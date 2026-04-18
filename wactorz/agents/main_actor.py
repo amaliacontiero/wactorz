@@ -910,7 +910,7 @@ class MainActor(LLMAgent):
             self._inject_user_facts_into_prompt()
             logger.info(f"[{self.name}] User facts updated: {list(new_facts.keys())}")
         except Exception as e:
-            logger.debug(f"[{self.name}] Facts extraction skipped: {e}")
+            logger.info(f"[{self.name}] Facts extraction skipped: {e}")
 
     async def delete_pipeline_rule(self, rule_id: str) -> str:
         """Stop all agents for a rule and remove it from registry."""

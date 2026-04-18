@@ -567,6 +567,17 @@ class DynamicAgent(Actor):
             "  - await agent.alert(msg) — this IS async, use await\n"
             "  - await agent.send_to(name, payload) — this IS async, use await\n"
             "  - await agent.mqtt_get(topic) — this IS async, use await\n\n"
+            "STREAMWINDOW API — w = agent.window('topic', seconds=N):\n"
+            "  StreamWindow is NOT a dict. Use methods, not dict-style access.\n"
+            "  Methods: count(), mean('field'), min('field'), max('field'),\n"
+            "           values('field'), latest(), rising('field', threshold=X),\n"
+            "           falling(), stable(), absent_for(seconds),\n"
+            "           event_count(key='k', value=V, seconds=N)\n"
+            "  WRONG: w.get('temp')        — StreamWindow is not a dict\n"
+            "  WRONG: w['temp']            — no __getitem__ by key intended\n"
+            "  RIGHT: w.latest()           — returns latest payload dict (or None)\n"
+            "  RIGHT: w.values('temp')     — list of all 'temp' values in window\n"
+            "  RIGHT: w.mean('temp')       — average of 'temp' over window\n\n"
             "Fix the error. Return ONLY the corrected Python code — no explanations, "
             "no markdown fences, no commentary.\n\n"
             f"```python\n{code}\n```"
@@ -1524,6 +1535,144 @@ class _AgentAPI:
             for p, c, t in pairs
             if p.name == self.name or c.name == self.name
         ]
+
+    # ── Time-series queries (for ML agents) ────────────────────────────────
+
+    def query_ts(
+        self,
+        hours: float = 24,
+        topic: Optional[str] = None,
+        entity_id: Optional[str] = None,
+        field: Optional[str] = None,
+        limit: int = 100_000,
+        as_dataframe: bool = False,
+    ) -> Any:
+        """
+        Query historical sensor readings from the time-series store.
+
+        Returns a list of dicts by default. Set as_dataframe=True to get
+        a pandas DataFrame (requires pandas installed).
+
+        SYNCHRONOUS — do NOT await.
+
+        Usage:
+            # Get last 24h of temperature data
+            rows = agent.query_ts(hours=24, field='temp')
+
+            # Get as pandas DataFrame for ML
+            df = agent.query_ts(hours=168, entity_id='sensor.kitchen_temp', as_dataframe=True)
+
+            # Train a model
+            from sklearn.ensemble import IsolationForest
+            model = IsolationForest().fit(df[['value']])
+            agent.persist('anomaly_model', model)
+        """
+        from ..core.persistence import get_db
+        db = get_db()
+        if not db:
+            logger.warning(f"[{self.name}] query_ts: persistence not initialised")
+            return [] if not as_dataframe else None
+
+        rows = db.query_sensor(
+            hours=hours, topic=topic, entity_id=entity_id,
+            field=field, limit=limit,
+        )
+
+        if as_dataframe:
+            try:
+                import pandas as pd
+                return pd.DataFrame(rows)
+            except ImportError:
+                logger.warning(f"[{self.name}] pandas not installed — returning list of dicts")
+                return rows
+        return rows
+
+    def query_detections(
+        self,
+        hours: float = 24,
+        agent_name: Optional[str] = None,
+        class_name: Optional[str] = None,
+        min_confidence: float = 0.0,
+        limit: int = 50_000,
+        as_dataframe: bool = False,
+    ) -> Any:
+        """
+        Query historical object detections (YOLO, camera agents).
+
+        Usage:
+            # All person detections in last 12 hours
+            rows = agent.query_detections(hours=12, class_name='person')
+
+            # As DataFrame for analysis
+            df = agent.query_detections(hours=48, min_confidence=0.8, as_dataframe=True)
+        """
+        from ..core.persistence import get_db
+        db = get_db()
+        if not db:
+            return [] if not as_dataframe else None
+
+        rows = db.query_detections(
+            hours=hours, agent=agent_name, class_name=class_name,
+            min_confidence=min_confidence, limit=limit,
+        )
+
+        if as_dataframe:
+            try:
+                import pandas as pd
+                return pd.DataFrame(rows)
+            except ImportError:
+                return rows
+        return rows
+
+    def query_ha_states(
+        self,
+        hours: float = 24,
+        entity_id: Optional[str] = None,
+        domain: Optional[str] = None,
+        limit: int = 50_000,
+        as_dataframe: bool = False,
+    ) -> Any:
+        """
+        Query historical Home Assistant state changes.
+
+        Usage:
+            # All light state changes in last week
+            df = agent.query_ha_states(hours=168, domain='light', as_dataframe=True)
+
+            # Specific entity history
+            rows = agent.query_ha_states(hours=24, entity_id='sensor.kitchen_temp')
+        """
+        from ..core.persistence import get_db
+        db = get_db()
+        if not db:
+            return [] if not as_dataframe else None
+
+        rows = db.query_ha_states(
+            hours=hours, entity_id=entity_id, domain=domain, limit=limit,
+        )
+
+        if as_dataframe:
+            try:
+                import pandas as pd
+                return pd.DataFrame(rows)
+            except ImportError:
+                return rows
+        return rows
+
+    def ts_stats(self) -> dict:
+        """
+        Return row counts for all time-series tables.
+        Useful for checking how much data is available before training.
+
+        Usage:
+            stats = agent.ts_stats()
+            # {'sensor_readings': 145230, 'detections': 8920, ...}
+        """
+        from ..core.persistence import get_db
+        db = get_db()
+        if not db:
+            return {}
+        return db.stats()
 
     # ── Metrics ────────────────────────────────────────────────────────────
 
