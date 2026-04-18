@@ -711,7 +711,7 @@ async def index_handler(request):
         _root / "monitor.html",
     ]:
         if candidate.exists():
-            ingress_path = request.headers.get("X-Hassio-Ingress-Path", "").rstrip("/")
+            ingress_path = request.headers.get("X-Ingress-Path", "").rstrip("/")
             # Inject the ingress path so the frontend can prefix all fetch/WS URLs.
             # When not behind ingress, ingress_path is "" and all URLs stay relative.
             inject = f"<script>window.__WACTORZ_INGRESS_PATH='{ingress_path}';</script>"
@@ -734,7 +734,7 @@ async def static_handler(request):
             if candidate.exists():
                 return _with_no_cache(web.FileResponse(candidate))
 
-    ingress_path = request.headers.get("X-Hassio-Ingress-Path", "").rstrip("/")
+    ingress_path = request.headers.get("X-Ingress-Path", "").rstrip("/")
 
     for base in [FRONTEND_DIST, FRONTEND_PUBLIC]:
         candidate = base / rel
@@ -906,8 +906,8 @@ async def config_handler(request):
     from aiohttp import web
     from .config import CONFIG
 
-    # Ingress support: HA sets X-Hassio-Ingress-Path
-    ingress_path = request.headers.get("X-Hassio-Ingress-Path", "")
+    # Ingress support: HA sets X-Ingress-Path
+    ingress_path = request.headers.get("X-Ingress-Path", "")
     
     # Force the host to use port 8888 for WebSockets
     raw_host = request.host.split(":")[0]
