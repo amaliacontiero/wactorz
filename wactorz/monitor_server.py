@@ -697,10 +697,8 @@ def _with_no_cache(response):
 
 async def index_handler(request):
     from aiohttp import web
-    # Ingress support: HA sets X-Hassio-Ingress-Path
-    ingress_path = request.headers.get("X-Hassio-Ingress-Path", "").rstrip("/")
-    
-    # Also handle favicon.svg if it's requested at root
+    from .config import CONFIG
+
     if request.path.endswith("favicon.svg"):
         for candidate in [FRONTEND_PUBLIC / "favicon.svg", FRONTEND_DIST / "favicon.svg"]:
             if candidate.exists():
@@ -713,22 +711,14 @@ async def index_handler(request):
         _root / "monitor.html",
     ]:
         if candidate.exists():
-            if not ingress_path:
-                return _with_no_cache(web.FileResponse(candidate))
-            
-            # Behind Ingress: We need to inject the base path so the JS can find the API
+            # Always inject __WACTORZ_API_BASE so JS uses the correct backend port
+            # even when the page is served through a proxy (e.g. HA sidebar on :8123).
+            protocol = "https" if request.secure else "http"
+            hostname = request.host.split(":")[0]
+            api_base = f"{protocol}://{hostname}:{CONFIG.ws_port}"
+            script = f"<script>window.__WACTORZ_API_BASE='{api_base}';</script>"
             content = candidate.read_text(encoding="utf-8")
-            
-            # 1. Inject a script to tell the JS what the ingress path is
-            script = f"<script>window.WACTORZ_INGRESS_PATH = '{ingress_path}';</script>"
-            content = content.replace("<head>", f"<head>{script}")
-            
-            # 2. Fix relative assets by adding a <base> tag
-            # Note: This might break some SPAs if not handled carefully, 
-            # but usually it helps with static assets.
-            base_tag = f'<base href="{ingress_path}/">'
-            content = content.replace("<head>", f"<head>{base_tag}")
-            
+            content = content.replace("<head>", f"<head>{script}", 1)
             return _with_no_cache(web.Response(text=content, content_type="text/html"))
     raise web.HTTPNotFound()
 

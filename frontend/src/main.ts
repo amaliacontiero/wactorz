@@ -53,10 +53,19 @@ const scene = new SceneManager(canvas);
 localStorage.setItem("wactorz-theme", "cards");
 scene.setTheme("cards");
 
+// ── API base (injected by server when behind HA / reverse proxy) ───────────────
+// The monitor server sets window.__WACTORZ_API_BASE = "http://<host>:<port>"
+// so all fetch/WS calls reach the correct backend port even when the page is
+// proxied through a different origin (e.g. HA sidebar panel on port 8123).
+const _apiBase: string = (window as any).__WACTORZ_API_BASE ?? "";
+const _wsProto = (_apiBase.startsWith("https") || window.location.protocol === "https:") ? "wss:" : "ws:";
+const _wsBase = _apiBase
+  ? _apiBase.replace(/^https?/, _wsProto.slice(0, -1))
+  : `${_wsProto}//${window.location.host}`;
+
 // ── MQTT ──────────────────────────────────────────────────────────────────────
 
-const _wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
-const _mqttDefault = `${_wsProto}//${window.location.host}/mqtt`;
+const _mqttDefault = `${_wsBase}/mqtt`;
 const MQTT_BROKER =
   localStorage.getItem("wactorz-mqtt-url") ||
   (import.meta.env["VITE_MQTT_WS_URL"] as string | undefined) ||
@@ -88,7 +97,7 @@ function syncAgentViews(): void {
 function refreshLiveActors(): void {
   if (liveSyncInFlight) return;
   liveSyncInFlight = true;
-  fetch("/api/actors")
+  fetch(`${_apiBase}/api/actors`)
     .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
     .then((actors: AgentInfo[]) => {
       scene.reconcileAgents(
@@ -173,13 +182,13 @@ wsChat.onStatePatch((agents, deletedId) => {
   syncAgentViews();
 });
 
-wsChat.connect(`${_wsProto}//${window.location.host}/ws`);
+wsChat.connect(`${_wsBase}/ws`);
 refreshLiveActors();
 window.setInterval(refreshLiveActors, 15000);
 
 // ── Seed localStorage from backend config (only for unset keys) ───────────────
 // Backend config (.env) provides defaults; a user-set localStorage value wins.
-fetch("/api/config")
+fetch(`${_apiBase}/api/config`)
   .then((r) => (r.ok ? r.json() : null))
   .then((cfg) => {
     if (!cfg) return;
