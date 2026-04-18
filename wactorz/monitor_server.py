@@ -711,14 +711,18 @@ async def index_handler(request):
         _root / "monitor.html",
     ]:
         if candidate.exists():
-            # Always inject __WACTORZ_API_BASE so JS uses the correct backend port
-            # even when the page is served through a proxy (e.g. HA sidebar on :8123).
             protocol = "https" if request.secure else "http"
             hostname = request.host.split(":")[0]
             api_base = f"{protocol}://{hostname}:{CONFIG.ws_port}"
-            script = f"<script>window.__WACTORZ_API_BASE='{api_base}';</script>"
+            ingress_path = request.headers.get("X-Hassio-Ingress-Path", "").rstrip("/")
+
+            inject = f"<script>window.__WACTORZ_API_BASE='{api_base}';</script>"
+            if ingress_path:
+                # <base> makes relative asset paths (JS/CSS) resolve through ingress
+                inject = f'<base href="{ingress_path}/">{inject}'
+
             content = candidate.read_text(encoding="utf-8")
-            content = content.replace("<head>", f"<head>{script}", 1)
+            content = content.replace("<head>", f"<head>{inject}", 1)
             return _with_no_cache(web.Response(text=content, content_type="text/html"))
     raise web.HTTPNotFound()
 
