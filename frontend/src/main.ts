@@ -53,15 +53,13 @@ const scene = new SceneManager(canvas);
 localStorage.setItem("wactorz-theme", "cards");
 scene.setTheme("cards");
 
-// ── API base (injected by server when behind HA / reverse proxy) ───────────────
-// The monitor server sets window.__WACTORZ_API_BASE = "http://<host>:<port>"
-// so all fetch/WS calls reach the correct backend port even when the page is
-// proxied through a different origin (e.g. HA sidebar panel on port 8123).
-const _apiBase: string = (window as any).__WACTORZ_API_BASE ?? "";
-const _wsProto = (_apiBase.startsWith("https") || window.location.protocol === "https:") ? "wss:" : "ws:";
-const _wsBase = _apiBase
-  ? _apiBase.replace(/^https?/, _wsProto.slice(0, -1))
-  : `${_wsProto}//${window.location.host}`;
+// ── Ingress path (injected by server when behind HA ingress proxy) ────────────
+// When served through HA's sidebar panel, all fetch/WS URLs must be prefixed
+// with the ingress path so HA's proxy forwards them to the addon.
+// When accessed directly (port 8888), ingress_path is "" — no change in behaviour.
+const _ingressPath: string = (window as any).__WACTORZ_INGRESS_PATH ?? "";
+const _wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
+const _wsBase = `${_wsProto}//${window.location.host}${_ingressPath}`;
 
 // ── MQTT ──────────────────────────────────────────────────────────────────────
 
@@ -97,7 +95,7 @@ function syncAgentViews(): void {
 function refreshLiveActors(): void {
   if (liveSyncInFlight) return;
   liveSyncInFlight = true;
-  fetch(`${_apiBase}/api/actors`)
+  fetch(`${_ingressPath}/api/actors`)
     .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
     .then((actors: AgentInfo[]) => {
       scene.reconcileAgents(
@@ -188,7 +186,7 @@ window.setInterval(refreshLiveActors, 15000);
 
 // ── Seed localStorage from backend config (only for unset keys) ───────────────
 // Backend config (.env) provides defaults; a user-set localStorage value wins.
-fetch(`${_apiBase}/api/config`)
+fetch(`${_ingressPath}/api/config`)
   .then((r) => (r.ok ? r.json() : null))
   .then((cfg) => {
     if (!cfg) return;

@@ -711,14 +711,11 @@ async def index_handler(request):
         _root / "monitor.html",
     ]:
         if candidate.exists():
-            protocol = "https" if request.secure else "http"
-            hostname = request.host.split(":")[0]
-            api_base = f"{protocol}://{hostname}:{CONFIG.ws_port}"
             ingress_path = request.headers.get("X-Hassio-Ingress-Path", "").rstrip("/")
-
-            inject = f"<script>window.__WACTORZ_API_BASE='{api_base}';</script>"
+            # Inject the ingress path so the frontend can prefix all fetch/WS URLs.
+            # When not behind ingress, ingress_path is "" and all URLs stay relative.
+            inject = f"<script>window.__WACTORZ_INGRESS_PATH='{ingress_path}';</script>"
             if ingress_path:
-                # <base> makes relative asset paths (JS/CSS) resolve through ingress
                 inject = f'<base href="{ingress_path}/">{inject}'
 
             content = candidate.read_text(encoding="utf-8")
