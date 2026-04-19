@@ -53,10 +53,39 @@ const scene = new SceneManager(canvas);
 localStorage.setItem("wactorz-theme", "cards");
 scene.setTheme("cards");
 
+// ── Backend base URL ──────────────────────────────────────────────────────────
+// Three deployment contexts, handled in priority order:
+//
+//   1. Tauri desktop  — __WACTORZ_API_PORT is injected as an initialization
+//                       script; the embedded Rust server owns that port.
+//   2. HA addon       — __WACTORZ_INGRESS_PATH is injected by the Python
+//                       server when the page is served behind HA's ingress
+//                       proxy (e.g. /api/hassio_ingress/<slug>).
+//   3. Direct browser — both are absent; relative URLs resolve correctly.
+//
+// Never use window.location.host to build absolute URLs: inside the HAOS
+// webview that host is the HA instance itself, not the addon backend.
+
+const _apiPort = (window as any).__WACTORZ_API_PORT as number | undefined;
+const _ingressPath: string = (window as any).__WACTORZ_INGRESS_PATH ?? "";
+const _isTauri = _apiPort != null;
+
+// For fetch: absolute when Tauri, ingress-prefixed (or plain-relative) otherwise.
+const _apiBase = _isTauri ? `http://localhost:${_apiPort}` : _ingressPath;
+
+const _wsProto = _isTauri
+  ? "ws:"
+  : window.location.protocol === "https:"
+    ? "wss:"
+    : "ws:";
+
+// For WebSocket: Tauri uses localhost; browser uses the page host + ingress prefix.
+const _wsHost = _isTauri ? `localhost:${_apiPort}` : window.location.host;
+const _wsBase = `${_wsProto}//${_wsHost}${_isTauri ? "" : _ingressPath}`;
+
 // ── MQTT ──────────────────────────────────────────────────────────────────────
 
-const _wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
-const _mqttDefault = `${_wsProto}//${window.location.host}/mqtt`;
+const _mqttDefault = `${_wsBase}/mqtt`;
 const MQTT_BROKER =
   localStorage.getItem("wactorz-mqtt-url") ||
   (import.meta.env["VITE_MQTT_WS_URL"] as string | undefined) ||
@@ -88,7 +117,7 @@ function syncAgentViews(): void {
 function refreshLiveActors(): void {
   if (liveSyncInFlight) return;
   liveSyncInFlight = true;
-  fetch("/api/actors")
+  fetch(`${_apiBase}/api/actors`)
     .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
     .then((actors: AgentInfo[]) => {
       scene.reconcileAgents(
@@ -173,13 +202,13 @@ wsChat.onStatePatch((agents, deletedId) => {
   syncAgentViews();
 });
 
-wsChat.connect(`${_wsProto}//${window.location.host}/ws`);
+wsChat.connect(`${_wsBase}/ws`);
 refreshLiveActors();
 window.setInterval(refreshLiveActors, 15000);
 
 // ── Seed localStorage from backend config (only for unset keys) ───────────────
 // Backend config (.env) provides defaults; a user-set localStorage value wins.
-fetch("/api/config")
+fetch(`${_apiBase}/api/config`)
   .then((r) => (r.ok ? r.json() : null))
   .then((cfg) => {
     if (!cfg) return;
