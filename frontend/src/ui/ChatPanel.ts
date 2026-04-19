@@ -248,8 +248,11 @@ export class ChatPanel {
                 ? "#4b5563"
                 : "#60a5fa";
       const isActive = agent.name === this.activeAgentName;
-      const isDisabled = agent.protected === true &&
-        !["main", "main-actor", "home-assistant-agent", "catalog"].includes(agent.name);
+      const isDisabled =
+        agent.protected === true &&
+        !["main", "main-actor", "home-assistant-agent", "catalog"].includes(
+          agent.name,
+        );
 
       let row = existing.get(agent.name);
       if (!row) {
@@ -263,7 +266,17 @@ export class ChatPanel {
         // Use delegated name lookup so the closure always reflects latest state
         row.addEventListener("click", () => {
           const a = this.agentList.find((x) => x.name === agent.name);
-          if (!a || (a.protected === true && !["main", "main-actor", "home-assistant-agent", "catalog"].includes(a.name))) return;
+          if (
+            !a ||
+            (a.protected === true &&
+              ![
+                "main",
+                "main-actor",
+                "home-assistant-agent",
+                "catalog",
+              ].includes(a.name))
+          )
+            return;
           document.dispatchEvent(
             new CustomEvent<{ agent: AgentInfo }>("agent-selected", {
               detail: { agent: a },
