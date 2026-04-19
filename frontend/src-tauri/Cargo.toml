@@ -2,10 +2,10 @@
 name = "wactorz-desktop"
 version.workspace = true
 description = "Wactorz desktop app (Tauri v2 + embedded Rust backend)"
-authors = ["Lazaros Toumanidis"]
+authors = ["Wactorz Contributors"]
 license.workspace = true
 repository.workspace = true
-edition = "2021"
+edition = "2024"
 
 [lib]
 name = "app_lib"
@@ -16,7 +16,8 @@ tauri-build = { version = "2.5.6", features = [] }
 
 [dependencies]
 # Tauri (pinned — not in the shared workspace)
-tauri                    = { version = "2.10.3", features = [] }
+# tauri = { version = "2.0.0", features = [ "tray-icon" ] }
+tauri                    = { version = "2.10.3", features = ["tray-icon"] }
 tauri-plugin-log         = "2"
 tauri-plugin-notification = "2"
 log              = "0.4"

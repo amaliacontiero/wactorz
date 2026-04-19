@@ -16,17 +16,12 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tauri::Manager;
-use wactorz_agents::{
-    CatalogAgent, DynamicAgent, FusekiAgent, HomeAssistantActuatorAgent, HomeAssistantAgent,
-    HomeAssistantStateBridgeAgent, IOAgent, InstallerAgent, LlmConfig, LlmProvider, MainActor,
-    ManualAgent, MonitorAgent, WeatherAgent,
-};
+use tauri::{Manager};
+use wactorz_agents::{LlmConfig, LlmProvider, MainActor};
 use wactorz_core::{ActorConfig, ActorSystem, EventPublisher, Supervisor, SupervisorStrategy};
 use wactorz_interfaces::ws::WsEnvelope;
 use wactorz_interfaces::{RestServer, RuntimeConfig, WsBridge};
 use wactorz_mqtt::{MqttClient, MqttConfig};
-
 const DEFAULT_PORT: u16 = 8888;
 
 // ── App config ────────────────────────────────────────────────────────────────
@@ -84,27 +79,59 @@ fn config_path(app: &tauri::AppHandle) -> std::path::PathBuf {
 /// Load config: saved JSON wins over env/defaults for every stored key.
 fn load_config(app: &tauri::AppHandle) -> AppConfig {
     let path = config_path(app);
-    if let Ok(bytes) = std::fs::read(&path) {
-        if let Ok(saved) = serde_json::from_slice::<AppConfig>(&bytes) {
+    if let Ok(bytes) = std::fs::read(&path)
+        && let Ok(saved) = serde_json::from_slice::<AppConfig>(&bytes) {
             tracing::info!("Loaded config from {}", path.display());
             return saved;
         }
-    }
-    tracing::info!("Using default/env config (no saved config at {})", path.display());
+    tracing::info!(
+        "Using default/env config (no saved config at {})",
+        path.display()
+    );
     AppConfig::default()
 }
 
 // ── Tauri state ───────────────────────────────────────────────────────────────
 
 struct ConfigState(Mutex<AppConfig>);
+struct BadgeState(Mutex<u32>);
 
 // ── Tauri commands ────────────────────────────────────────────────────────────
 
-/// Send a native OS notification.  Called from JS via invoke('notify', ...).
+/// Send a native OS notification. Called from JS via invoke('notify', ...).
 #[tauri::command]
 fn notify(app: tauri::AppHandle, title: String, body: String) {
     use tauri_plugin_notification::NotificationExt;
     let _ = app.notification().builder().title(title).body(body).show();
+}
+
+/// Increment the unread badge on the tray icon. Called from JS after a notification fires.
+#[tauri::command]
+fn add_unread(app: tauri::AppHandle, badge: tauri::State<BadgeState>) {
+    let count = {
+        let mut n = badge.0.lock().unwrap();
+        *n += 1;
+        *n
+    };
+    update_tray_tooltip(&app, count);
+}
+
+/// Clear the unread badge. Called from JS when the window gains focus.
+#[tauri::command]
+fn clear_unread(app: tauri::AppHandle, badge: tauri::State<BadgeState>) {
+    *badge.0.lock().unwrap() = 0;
+    update_tray_tooltip(&app, 0);
+}
+
+fn update_tray_tooltip(app: &tauri::AppHandle, count: u32) {
+    if let Some(tray) = app.tray_by_id("main") {
+        let tip = if count == 0 {
+            "Wactorz".to_string()
+        } else {
+            format!("Wactorz · {count} unread")
+        };
+        let _ = tray.set_tooltip(Some(&tip));
+    }
 }
 
 #[tauri::command]
@@ -133,6 +160,55 @@ fn save_config(
     tracing::info!("Config saved to {}", path.display());
     Ok(())
 }
+// ── Tray ──────────────────────────────────────────────────────────────────────
+
+fn build_tray(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::{
+        menu::{MenuBuilder, MenuItemBuilder},
+        tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    };
+
+    let show_hide = MenuItemBuilder::with_id("show_hide", "Show / Hide").build(app)?;
+    let quit = MenuItemBuilder::with_id("quit", "Quit Wactorz").build(app)?;
+    let menu = MenuBuilder::new(app)
+        .items(&[&show_hide, &quit])
+        .build()?;
+
+    TrayIconBuilder::with_id("main")
+        .icon(app.default_window_icon().unwrap().clone())
+        .tooltip("Wactorz")
+        .menu(&menu)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show_hide" => toggle_window(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                toggle_window(tray.app_handle());
+            }
+        })
+        .build(app)?;
+
+    Ok(())
+}
+
+fn toggle_window(app: &tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        if win.is_visible().unwrap_or(false) {
+            let _ = win.hide();
+        } else {
+            let _ = win.unminimize();
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+    }
+}
 
 // ── Embedded backend ──────────────────────────────────────────────────────────
 
@@ -159,8 +235,8 @@ async fn start_backend(cfg: AppConfig) -> Result<()> {
 
     tokio::spawn(async move {
         MqttClient::run_event_loop(&mut event_loop, move |evt| {
-            if let wactorz_mqtt::MqttEvent::Incoming { topic, payload } = evt {
-                if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(&payload) {
+            if let wactorz_mqtt::MqttEvent::Incoming { topic, payload } = evt
+                && let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(&payload) {
                     let _ = ws_tx_mqtt.send(WsEnvelope {
                         topic: topic.clone(),
                         payload: json_val.clone(),
@@ -209,8 +285,7 @@ async fn start_backend(cfg: AppConfig) -> Result<()> {
                     }
 
                     if topic.ends_with("/chat") {
-                        let from =
-                            json_val.get("from").and_then(|v| v.as_str()).unwrap_or("");
+                        let from = json_val.get("from").and_then(|v| v.as_str()).unwrap_or("");
                         let content = json_val
                             .get("content")
                             .and_then(|v| v.as_str())
@@ -273,7 +348,6 @@ async fn start_backend(cfg: AppConfig) -> Result<()> {
                         });
                     }
                 }
-            }
         })
         .await;
     });
@@ -334,221 +408,12 @@ async fn start_backend(cfg: AppConfig) -> Result<()> {
             2.0,
         );
     }
-    {
-        let sys = system.clone();
-        let pub_ = publisher.clone();
-        sup.supervise(
-            "monitor-agent",
-            Arc::new(move || {
-                Box::new(
-                    MonitorAgent::new(
-                        ActorConfig::new_with_node("monitor-agent", "bravo").protected(),
-                        sys.clone(),
-                    )
-                    .with_publisher(pub_.clone()),
-                )
-            }),
-            SupervisorStrategy::OneForOne,
-            10,
-            60.0,
-            1.0,
-        );
-    }
-    {
-        let sys = system.clone();
-        let pub_ = publisher.clone();
-        sup.supervise(
-            "io-agent",
-            Arc::new(move || {
-                Box::new(
-                    IOAgent::new(ActorConfig::new_with_node("io-agent", "charlie"), sys.clone())
-                        .with_publisher(pub_.clone()),
-                )
-            }),
-            SupervisorStrategy::OneForOne,
-            10,
-            60.0,
-            1.0,
-        );
-    }
-    {
-        let pub_ = publisher.clone();
-        sup.supervise(
-            "installer-agent",
-            Arc::new(move || {
-                Box::new(
-                    InstallerAgent::new(ActorConfig::new_with_node("installer-agent", "delta"))
-                        .with_publisher(pub_.clone()),
-                )
-            }),
-            SupervisorStrategy::OneForOne,
-            5,
-            60.0,
-            2.0,
-        );
-    }
-    {
-        let pub_ = publisher.clone();
-        sup.supervise(
-            "code-agent",
-            Arc::new(move || {
-                Box::new(
-                    DynamicAgent::new(ActorConfig::new_with_node("code-agent", "echo"), "")
-                        .with_publisher(pub_.clone()),
-                )
-            }),
-            SupervisorStrategy::OneForOne,
-            5,
-            60.0,
-            1.0,
-        );
-    }
-    {
-        let lc = llm_config.clone();
-        let pub_ = publisher.clone();
-        sup.supervise(
-            "manual-agent",
-            Arc::new(move || {
-                Box::new(
-                    ManualAgent::new(
-                        ActorConfig::new_with_node("manual-agent", "foxtrot"),
-                        lc.clone(),
-                    )
-                    .with_publisher(pub_.clone()),
-                )
-            }),
-            SupervisorStrategy::OneForOne,
-            5,
-            60.0,
-            1.0,
-        );
-    }
-    {
-        let pub_ = publisher.clone();
-        let ha_url = cfg.ha_url.clone();
-        let ha_token = cfg.ha_token.clone();
-        sup.supervise(
-            "home-assistant-agent",
-            Arc::new(move || {
-                Box::new(
-                    HomeAssistantAgent::new(ActorConfig::new_with_node(
-                        "home-assistant-agent",
-                        "golf",
-                    ))
-                    .with_ha_config(ha_url.clone(), ha_token.clone())
-                    .with_publisher(pub_.clone()),
-                )
-            }),
-            SupervisorStrategy::OneForOne,
-            5,
-            60.0,
-            2.0,
-        );
-    }
-    {
-        let pub_ = publisher.clone();
-        sup.supervise(
-            "weather-agent",
-            Arc::new(move || {
-                Box::new(
-                    WeatherAgent::new(ActorConfig::new_with_node("weather-agent", "hotel"))
-                        .with_publisher(pub_.clone()),
-                )
-            }),
-            SupervisorStrategy::OneForOne,
-            5,
-            60.0,
-            1.0,
-        );
-    }
-    {
-        let pub_ = publisher.clone();
-        sup.supervise(
-            "fuseki-agent",
-            Arc::new(move || {
-                Box::new(
-                    FusekiAgent::new(ActorConfig::new_with_node("fuseki-agent", "india"))
-                        .with_publisher(pub_.clone()),
-                )
-            }),
-            SupervisorStrategy::OneForOne,
-            5,
-            60.0,
-            2.0,
-        );
-    }
-    {
-        let pub_ = publisher.clone();
-        sup.supervise(
-            "catalog",
-            Arc::new(move || {
-                Box::new(
-                    CatalogAgent::new(
-                        ActorConfig::new_with_node("catalog", "juliet").protected(),
-                    )
-                    .with_publisher(pub_.clone()),
-                )
-            }),
-            SupervisorStrategy::OneForOne,
-            5,
-            60.0,
-            1.0,
-        );
-    }
-    {
-        let pub_ = publisher.clone();
-        let ha_url = cfg.ha_url.clone();
-        let ha_token = cfg.ha_token.clone();
-        sup.supervise(
-            "ha-actuator",
-            Arc::new(move || {
-                Box::new(
-                    HomeAssistantActuatorAgent::new(ActorConfig::new_with_node(
-                        "ha-actuator",
-                        "kilo",
-                    ))
-                    .with_ha_config(ha_url.clone(), ha_token.clone())
-                    .with_publisher(pub_.clone()),
-                )
-            }),
-            SupervisorStrategy::OneForOne,
-            5,
-            60.0,
-            2.0,
-        );
-    }
-    {
-        let pub_ = publisher.clone();
-        let sys = system.clone();
-        let ha_url = cfg.ha_url.clone();
-        let ha_token = cfg.ha_token.clone();
-        sup.supervise(
-            "ha-state-bridge",
-            Arc::new(move || {
-                Box::new(
-                    HomeAssistantStateBridgeAgent::new(ActorConfig::new_with_node(
-                        "ha-state-bridge",
-                        "lima",
-                    ))
-                    .with_system(sys.clone())
-                    .with_ha_config(
-                        ha_url.clone(),
-                        ha_token.clone(),
-                        "ha/state".into(),
-                        vec![],
-                    )
-                    .with_publisher(pub_.clone()),
-                )
-            }),
-            SupervisorStrategy::OneForOne,
-            5,
-            60.0,
-            2.0,
-        );
-    }
 
     sup.start().await?;
-    tracing::info!("Wactorz desktop: all agents started, serving on port {}", cfg.api_port);
+    tracing::info!(
+        "Wactorz desktop: all agents started, serving on port {}",
+        cfg.api_port
+    );
 
     let addr: SocketAddr = format!("127.0.0.1:{}", cfg.api_port).parse()?;
     let ws_bridge = WsBridge::new(
@@ -592,6 +457,7 @@ pub fn run() {
             let port = cfg.api_port;
 
             app.manage(ConfigState(Mutex::new(cfg.clone())));
+            app.manage(BadgeState(Mutex::new(0)));
 
             tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
                 .title("Wactorz")
@@ -599,8 +465,10 @@ pub fn run() {
                 .min_inner_size(900.0, 600.0)
                 .resizable(true)
                 .center()
-                .initialization_script(&format!("window.__WACTORZ_API_PORT={port};"))
+                .initialization_script(format!("window.__WACTORZ_API_PORT={port};"))
                 .build()?;
+
+            build_tray(app)?;
 
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = start_backend(cfg).await {
@@ -618,7 +486,14 @@ pub fn run() {
             Ok(())
         })
         .plugin(tauri_plugin_notification::init())
-        .invoke_handler(tauri::generate_handler![get_api_port, get_config, save_config, notify])
+        .invoke_handler(tauri::generate_handler![
+            get_api_port,
+            get_config,
+            save_config,
+            notify,
+            add_unread,
+            clear_unread
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
