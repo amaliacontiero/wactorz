@@ -40,6 +40,7 @@ pub struct AppConfig {
     pub llm_api_key: String,
     pub mqtt_host: String,
     pub mqtt_port: u16,
+    pub mqtt_ws_port: u16,
     pub ha_url: String,
     pub ha_token: String,
     pub static_dir: String,
@@ -54,6 +55,7 @@ impl Default for AppConfig {
             llm_api_key: env_str("LLM_API_KEY", ""),
             mqtt_host: env_str("MQTT_HOST", "localhost"),
             mqtt_port: env_u16("MQTT_PORT", 1883),
+            mqtt_ws_port: env_u16("MQTT_WS_PORT", 9001),
             ha_url: env_str("HA_URL", ""),
             ha_token: env_str("HA_TOKEN", ""),
             static_dir: env_str("STATIC_DIR", "static/app"),
@@ -554,7 +556,7 @@ async fn start_backend(cfg: AppConfig) -> Result<()> {
         mqtt_client,
         system.clone(),
         cfg.mqtt_host.clone(),
-        cfg.mqtt_port,
+        cfg.mqtt_ws_port,
     );
     RestServer::new(
         system,
@@ -564,7 +566,7 @@ async fn start_backend(cfg: AppConfig) -> Result<()> {
             ha_token: cfg.ha_token,
             mqtt_host: cfg.mqtt_host,
             mqtt_port: cfg.mqtt_port,
-            mqtt_ws_port: cfg.mqtt_port,
+            mqtt_ws_port: cfg.mqtt_ws_port,
             llm_provider: cfg.llm_provider,
             llm_model: cfg.llm_model,
             ..Default::default()

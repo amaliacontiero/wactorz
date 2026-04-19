@@ -88,6 +88,12 @@ const _wsBase = `${_wsProto}//${_wsHost}${_isTauri ? "" : _ingressPath}`;
 // ── MQTT ──────────────────────────────────────────────────────────────────────
 
 const _mqttDefault = `${_wsBase}/mqtt`;
+
+// In Tauri, MQTT goes through the embedded backend proxy at /mqtt — always
+// override any stale localStorage value (e.g. ws://localhost:1883 saved by
+// a previous Python dev session).
+if (_isTauri) localStorage.setItem("wactorz-mqtt-url", _mqttDefault);
+
 const MQTT_BROKER =
   localStorage.getItem("wactorz-mqtt-url") ||
   (import.meta.env["VITE_MQTT_WS_URL"] as string | undefined) ||
