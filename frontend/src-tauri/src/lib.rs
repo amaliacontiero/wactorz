@@ -98,6 +98,13 @@ struct ConfigState(Mutex<AppConfig>);
 
 // ── Tauri commands ────────────────────────────────────────────────────────────
 
+/// Send a native OS notification.  Called from JS via invoke('notify', ...).
+#[tauri::command]
+fn notify(app: tauri::AppHandle, title: String, body: String) {
+    use tauri_plugin_notification::NotificationExt;
+    let _ = app.notification().builder().title(title).body(body).show();
+}
+
 #[tauri::command]
 fn get_api_port(state: tauri::State<ConfigState>) -> u16 {
     state.0.lock().unwrap().api_port
@@ -608,7 +615,8 @@ pub fn run() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_api_port, get_config, save_config])
+        .plugin(tauri_plugin_notification::init())
+        .invoke_handler(tauri::generate_handler![get_api_port, get_config, save_config, notify])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

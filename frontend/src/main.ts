@@ -23,6 +23,7 @@ import { IOManager } from "./io/IOManager";
 import { WSChatClient } from "./io/WSChatClient";
 import { tts } from "./io/TTSManager";
 import { SettingsPanel } from "./ui/SettingsPanel";
+import { desktopNotifyBackground, desktopNotify } from "./io/DesktopNotify";
 
 import type { AgentInfo, AgentState, ThemeChangeEvent } from "./types/agent";
 
@@ -140,6 +141,7 @@ function refreshLiveActors(): void {
 
 // Non-streaming replies (slash commands, errors, one-shot agent replies)
 wsChat.onChat((content, from, timestampMs) => {
+  desktopNotifyBackground(from, content.slice(0, 120));
   const msg = {
     id: `ws-${timestampMs}`,
     from,
@@ -256,6 +258,10 @@ mqtt.on("spawn", (payload) => {
     agentName: payload.agentName,
     timestamp: payload.timestampMs,
   });
+  desktopNotifyBackground(
+    "Agent spawned",
+    `${payload.agentName} is online`,
+  );
 });
 
 mqtt.on("alert", (payload) => {
@@ -269,6 +275,12 @@ mqtt.on("alert", (payload) => {
     agentName: payload.agentName,
     timestamp: payload.timestampMs,
   });
+  // Errors always notify; warnings only notify in background
+  if (payload.severity === "error" || payload.severity === "critical") {
+    desktopNotify(`⚠ ${payload.agentName}`, payload.message.slice(0, 100));
+  } else {
+    desktopNotifyBackground(`${payload.agentName}`, payload.message.slice(0, 100));
+  }
 });
 
 mqtt.on("chat", (msg) => {
