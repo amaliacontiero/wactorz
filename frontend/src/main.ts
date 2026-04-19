@@ -23,7 +23,8 @@ import { IOManager } from "./io/IOManager";
 import { WSChatClient } from "./io/WSChatClient";
 import { tts } from "./io/TTSManager";
 import { SettingsPanel } from "./ui/SettingsPanel";
-import { desktopNotifyBackground, desktopNotify } from "./io/DesktopNotify";
+import { desktopNotifyBackground, desktopNotify, clearUnreadBadge, initNotifications } from "./io/DesktopNotify";
+import { toast } from "./ui/ToastManager";
 
 import type { AgentInfo, AgentState, ThemeChangeEvent } from "./types/agent";
 
@@ -67,6 +68,9 @@ scene.setTheme("cards");
 //
 // Never use window.location.host to build absolute URLs: inside the HAOS
 // webview that host is the HA instance itself, not the addon backend.
+
+// Request notification permission early so the macOS dialog appears on first launch
+initNotifications();
 
 const _apiPort = (window as any).__WACTORZ_API_PORT as number | undefined;
 const _ingressPath: string = (window as any).__WACTORZ_INGRESS_PATH ?? "";
@@ -126,7 +130,9 @@ function refreshLiveActors(): void {
   if (liveSyncInFlight) return;
   liveSyncInFlight = true;
   fetch(`${_apiBase}/api/actors`)
-    .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+    .then((r) =>
+      r.ok ? r.json() : Promise.reject(new Error(String(r.status))),
+    )
     .then((actors: AgentInfo[]) => {
       scene.reconcileAgents(
         actors.map((a) => ({
@@ -135,7 +141,9 @@ function refreshLiveActors(): void {
         })),
       );
       syncAgentViews();
-      console.info(`[Dashboard] reconciled ${actors.length} live actors from REST`);
+      console.info(
+        `[Dashboard] reconciled ${actors.length} live actors from REST`,
+      );
     })
     .catch(() => {
       // Dev mode without a running server — ignore silently.
@@ -147,6 +155,7 @@ function refreshLiveActors(): void {
 
 // Non-streaming replies (slash commands, errors, one-shot agent replies)
 wsChat.onChat((content, from, timestampMs) => {
+  toast.show({ type: "chat", title: from, message: content.slice(0, 120) });
   desktopNotifyBackground(from, content.slice(0, 120));
   const msg = {
     id: `ws-${timestampMs}`,
@@ -264,10 +273,8 @@ mqtt.on("spawn", (payload) => {
     agentName: payload.agentName,
     timestamp: payload.timestampMs,
   });
-  desktopNotifyBackground(
-    "Agent spawned",
-    `${payload.agentName} is online`,
-  );
+  toast.show({ type: "spawn", title: payload.agentName, message: `${payload.agentType ?? "agent"} is online` });
+  desktopNotifyBackground("Agent spawned", `${payload.agentName} is online`);
 });
 
 mqtt.on("alert", (payload) => {
@@ -281,15 +288,24 @@ mqtt.on("alert", (payload) => {
     agentName: payload.agentName,
     timestamp: payload.timestampMs,
   });
-  // Errors always notify; warnings only notify in background
-  if (payload.severity === "error" || payload.severity === "critical") {
+  const isError = payload.severity === "error" || payload.severity === "critical";
+  toast.show({
+    type: isError ? "alert-error" : "alert-warning",
+    title: payload.agentName,
+    message: payload.message.slice(0, 120),
+  });
+  if (isError) {
     desktopNotify(`⚠ ${payload.agentName}`, payload.message.slice(0, 100));
   } else {
-    desktopNotifyBackground(`${payload.agentName}`, payload.message.slice(0, 100));
+    desktopNotifyBackground(payload.agentName, payload.message.slice(0, 100));
   }
 });
 
 mqtt.on("chat", (msg) => {
+  if (msg.from !== "user") {
+    toast.show({ type: "chat", title: msg.from, message: msg.content.slice(0, 120) });
+    desktopNotifyBackground(msg.from, msg.content.slice(0, 120));
+  }
   ioManager.receiveAgentMessage(msg);
   scene.onChat(msg.from, msg.to);
   document.dispatchEvent(
@@ -448,6 +464,14 @@ document.addEventListener("agent-selected", (e) => {
   scene.onAgentSelected(evt.detail.agent.id);
 });
 
+// Streaming reply finished — notify
+document.addEventListener("af-stream-end", (e) => {
+  const { text, from } = (e as CustomEvent<{ text: string | null; from: string }>).detail;
+  if (!text) return;
+  toast.show({ type: "chat", title: from, message: text.slice(0, 120) });
+  desktopNotifyBackground(from, text.slice(0, 120));
+});
+
 // Agent commands from CardDashboard / SocialDashboard → WebSocket
 document.addEventListener("af-agent-command", (e) => {
   const { command, agentId } = (
@@ -480,11 +504,51 @@ if (haLink) {
 
 // ── Settings (Tauri desktop only) ─────────────────────────────────────────────
 
-const btnSettings = document.getElementById("btn-settings") as HTMLButtonElement | null;
+const btnSettings = document.getElementById(
+  "btn-settings",
+) as HTMLButtonElement | null;
 if (_isTauri && btnSettings) {
   btnSettings.style.display = "block";
   const settingsPanel = new SettingsPanel();
   btnSettings.addEventListener("click", () => settingsPanel.open());
+
+  // First-launch: greet + prompt for API key if not configured
+  const _tauri = (window as any).__TAURI_INTERNALS__;
+  if (_tauri?.invoke) {
+    _tauri
+      .invoke("get_config")
+      .then((cfg: { llm_api_key?: string }) => {
+        if (!cfg.llm_api_key) {
+          setTimeout(() => {
+            toast.show({
+              type: "welcome",
+              title: "Welcome to Wactorz",
+              message: "Set your LLM API key to bring your agents to life.",
+              durationMs: 12000,
+              actions: [
+                {
+                  label: "Open Settings",
+                  primary: true,
+                  onClick: () => settingsPanel.open(),
+                },
+              ],
+            });
+            desktopNotify("Welcome to Wactorz", "Open Settings to add your API key.");
+          }, 1200);
+        } else {
+          setTimeout(() => {
+            toast.show({
+              type: "system",
+              title: "Wactorz",
+              message: "Backend starting up — agents will appear shortly.",
+              durationMs: 4000,
+            });
+            desktopNotify("Wactorz", "Backend starting up…");
+          }, 800);
+        }
+      })
+      .catch(() => {});
+  }
 }
 
 // ── Sound / TTS toggles ───────────────────────────────────────────────────────
@@ -512,6 +576,8 @@ btnTTS?.addEventListener("click", () => {
 mqtt.connect();
 
 // ── Cleanup on page unload ────────────────────────────────────────────────────
+
+window.addEventListener("focus", () => clearUnreadBadge());
 
 window.addEventListener("beforeunload", () => {
   mqtt.disconnect();

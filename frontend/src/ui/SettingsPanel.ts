@@ -116,6 +116,7 @@ export class SettingsPanel {
           <span class="settings-restart-note" id="settings-restart-note" style="display:none">
             ↺ Restart to apply changes
           </span>
+          <button class="settings-btn-test"   id="settings-test">Test notification</button>
           <button class="settings-btn-cancel" id="settings-cancel">Cancel</button>
           <button class="settings-btn-save"   id="settings-save">Save</button>
         </div>
@@ -125,9 +126,18 @@ export class SettingsPanel {
     overlay.addEventListener("click", (e) => {
       if (e.target === overlay) this.close();
     });
-    overlay.querySelector("#settings-close")!.addEventListener("click", () => this.close());
-    overlay.querySelector("#settings-cancel")!.addEventListener("click", () => this.close());
-    overlay.querySelector("#settings-save")!.addEventListener("click", () => this._save());
+    overlay
+      .querySelector("#settings-close")!
+      .addEventListener("click", () => this.close());
+    overlay
+      .querySelector("#settings-cancel")!
+      .addEventListener("click", () => this.close());
+    overlay
+      .querySelector("#settings-save")!
+      .addEventListener("click", () => this._save());
+    overlay
+      .querySelector("#settings-test")!
+      .addEventListener("click", () => this._testNotification());
 
     return overlay;
   }
@@ -140,7 +150,9 @@ export class SettingsPanel {
     this._val("cfg-mqtt-port", String(cfg.mqtt_port));
     this._val("cfg-ha-url", cfg.ha_url);
     this._val("cfg-ha-token", cfg.ha_token);
-    const note = this.overlay.querySelector<HTMLElement>("#settings-restart-note");
+    const note = this.overlay.querySelector<HTMLElement>(
+      "#settings-restart-note",
+    );
     if (note) note.style.display = "none";
   }
 
@@ -159,12 +171,15 @@ export class SettingsPanel {
 
   private _save(): void {
     const config = this._collect();
-    const saveBtn = this.overlay.querySelector<HTMLButtonElement>("#settings-save");
+    const saveBtn =
+      this.overlay.querySelector<HTMLButtonElement>("#settings-save");
     if (saveBtn) saveBtn.disabled = true;
 
     invoke("save_config", { config })
       .then(() => {
-        const note = this.overlay.querySelector<HTMLElement>("#settings-restart-note");
+        const note = this.overlay.querySelector<HTMLElement>(
+          "#settings-restart-note",
+        );
         if (note) note.style.display = "inline";
         this._showToast("Settings saved — restart to apply", "success");
       })
@@ -174,6 +189,12 @@ export class SettingsPanel {
       .finally(() => {
         if (saveBtn) saveBtn.disabled = false;
       });
+  }
+
+  private _testNotification(): void {
+    invoke("notify", { title: "Wactorz", body: "Notifications are working!" })
+      .then(() => this._showToast("Test notification sent", "success"))
+      .catch(() => this._showToast("Notification failed — check permissions", "error"));
   }
 
   private _showToast(msg: string, kind: "success" | "error"): void {
@@ -187,17 +208,16 @@ export class SettingsPanel {
   }
 
   private _val(id: string, value: string): void {
-    const el = this.overlay.querySelector<
-      HTMLInputElement | HTMLSelectElement
-    >(`#${id}`);
+    const el = this.overlay.querySelector<HTMLInputElement | HTMLSelectElement>(
+      `#${id}`,
+    );
     if (el) el.value = value;
   }
 
   private _get(id: string): string {
     return (
-      this.overlay.querySelector<HTMLInputElement | HTMLSelectElement>(
-        `#${id}`,
-      )?.value ?? ""
+      this.overlay.querySelector<HTMLInputElement | HTMLSelectElement>(`#${id}`)
+        ?.value ?? ""
     );
   }
 
@@ -256,6 +276,12 @@ export class SettingsPanel {
       .settings-restart-note {
         font-size: 11px; color: #fbbf24; margin-right: auto;
       }
+      .settings-btn-test {
+        padding: 7px 14px; border-radius: 7px; font-size: 12px;
+        font-weight: 500; cursor: pointer; border: 1px solid rgba(99,102,241,.3);
+        background: transparent; color: #818cf8; margin-right: auto;
+      }
+      .settings-btn-test:hover { background: rgba(99,102,241,.12); }
       .settings-btn-cancel, .settings-btn-save {
         padding: 7px 18px; border-radius: 7px; font-size: 13px;
         font-weight: 500; cursor: pointer; border: none;
