@@ -22,6 +22,7 @@ import { VoiceInput } from "./io/VoiceInput";
 import { IOManager } from "./io/IOManager";
 import { WSChatClient } from "./io/WSChatClient";
 import { tts } from "./io/TTSManager";
+import { SettingsPanel } from "./ui/SettingsPanel";
 
 import type { AgentInfo, AgentState, ThemeChangeEvent } from "./types/agent";
 
@@ -455,6 +456,17 @@ document.addEventListener("af-send-message", (e) => {
 const haLink = document.getElementById("ha-link") as HTMLAnchorElement | null;
 if (haLink) {
   haLink.href = `${window.location.protocol}//${window.location.hostname}:8123`;
+}
+
+// ── Sound / TTS toggles ───────────────────────────────────────────────────────
+
+// ── Settings (Tauri desktop only) ─────────────────────────────────────────────
+
+const btnSettings = document.getElementById("btn-settings") as HTMLButtonElement | null;
+if (_isTauri && btnSettings) {
+  btnSettings.style.display = "block";
+  const settingsPanel = new SettingsPanel();
+  btnSettings.addEventListener("click", () => settingsPanel.open());
 }
 
 // ── Sound / TTS toggles ───────────────────────────────────────────────────────
