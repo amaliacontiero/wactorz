@@ -2,7 +2,8 @@
         up down logs shell release release-full release-native release-source \
         run run-py test test-py test-rust parity coverage coverage-py coverage-rust ci \
         install install-py install-docs install-dev install-frontend docs-serve docs-build publish \
-        dev-rust dev-rust-full dev-rust-down dev-rust-check
+        dev-rust dev-rust-full dev-rust-down dev-rust-check \
+        dev-desktop build-desktop
 
 COMPOSE      := docker compose
 COMPOSE_DEV  := $(COMPOSE) -f compose.dev.yaml
@@ -73,6 +74,12 @@ dev-full: ## Start full stack in dev mode (Python + mock agents + Vite)
 
 dev-ui: ## Start Vite dev server only (needs mosquitto running)
 	cd $(FRONTEND_DIR) && $(PKG_MGR) run dev
+
+dev-desktop: ## Start Tauri desktop app in dev mode (hot-reload)
+	cd $(FRONTEND_DIR) && cargo tauri dev
+
+build-desktop: ## Build Tauri desktop app (release bundle)
+	cd $(FRONTEND_DIR) && cargo tauri build
 
 # ── Build ───────────────────────────────────────────────────────────────────
 
@@ -173,8 +180,8 @@ test: test-py test-rust parity ## Run Python, Rust, and cross-backend parity tes
 test-py: ## Run Python tests
 	$(PYTHON) -m unittest discover -s tests -p 'test_*.py'
 
-test-rust: ## Run Rust tests
-	cargo test
+test-rust: ## Run Rust tests (excludes desktop Tauri crate — needs GTK/WebKit on Linux)
+	cargo test --workspace --exclude wactorz-desktop
 
 parity: ## Prove Python and Rust core supervisor semantics match
 	$(PYTHON) scripts/check_backend_parity.py
@@ -189,7 +196,7 @@ coverage-py: ## Generate Python coverage XML + terminal report
 
 coverage-rust: ## Generate Rust coverage with cargo-llvm-cov
 	mkdir -p coverage
-	cargo llvm-cov --workspace --lcov --output-path coverage/rust.lcov
+	cargo llvm-cov --workspace --exclude wactorz-desktop --lcov --output-path coverage/rust.lcov
 
 docs-serve: ## Build docs + serve locally on :8001
 	$(PYTHON) -W ignore::UserWarning:pdoc scripts/build_docs.py --serve

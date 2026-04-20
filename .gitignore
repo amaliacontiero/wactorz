@@ -1,3 +1,6 @@
+node_modules/
+package-lock.json
+
 # Runtime state (actor persistence)
 state/
 actor_state/
@@ -188,9 +191,16 @@ infra/homeassistant/.storage/frontend.user_data_*
 infra/homeassistant/.storage/trace.*
 infra/homeassistant/.storage/core.restore_state
 infra/homeassistant/.storage/core.entity_registry
+infra/homeassistant/.storage/core.device_registry
+infra/homeassistant/.storage/http
+infra/homeassistant/.HA_VERSION
 wactorz/__pycache__/
 wactorz/**/__pycache__/
 wactorz/**/*.pyc
 
 myenv/
 coverage/
+
+# Tauri
+frontend/src-tauri/target/
+frontend/src-tauri/gen/

@@ -5,23 +5,14 @@ export default defineConfig({
   envDir: "..",
   server: {
     port: 3000,
-    open: true,
+    // Don't auto-open a browser tab — Tauri opens its own WebView window.
+    // Set VITE_OPEN=true to restore the plain-browser dev experience.
+    open: process.env["VITE_OPEN"] === "true",
     proxy: {
-      // Proxy REST API calls to the wactorz REST interface (port 8000)
-      "/api": {
-        target: "http://localhost:8000",
-        rewrite: (path) => path.replace(/^\/api/, ""),
-      },
-      // Proxy WebSocket upgrade for the Wactorz WS bridge
-      "/ws": {
-        target: "ws://localhost:8081",
-        ws: true,
-      },
-      // Proxy MQTT WebSocket (matches the nginx /mqtt path used in production)
-      "/mqtt": {
-        target: "ws://localhost:9001",
-        ws: true,
-      },
+      // Forward to the embedded Rust backend (same port as __WACTORZ_API_PORT).
+      "/api": { target: "http://localhost:8888", changeOrigin: true },
+      "/ws":   { target: "ws://localhost:8888",  ws: true },
+      "/mqtt": { target: "ws://localhost:8888",  ws: true },
     },
   },
   base: "./",
