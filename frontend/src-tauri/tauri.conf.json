@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "io.waldiez.wactorz",
   "build": {
-    "frontendDist": "../static/app",
+    "frontendDist": "../../static/app",
     "devUrl": "http://localhost:3000",
     "beforeDevCommand": "bun run dev",
     "beforeBuildCommand": "bun run build"
