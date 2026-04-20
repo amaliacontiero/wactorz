@@ -697,6 +697,13 @@ def _with_no_cache(response):
 
 async def index_handler(request):
     from aiohttp import web
+    from .config import CONFIG
+
+    if request.path.endswith("favicon.svg"):
+        for candidate in [FRONTEND_PUBLIC / "favicon.svg", FRONTEND_DIST / "favicon.svg"]:
+            if candidate.exists():
+                return _with_no_cache(web.FileResponse(candidate))
+
     for candidate in [
         FRONTEND_DIST / "index.html",
         _find_dir("frontend") / "index.html",
@@ -704,18 +711,51 @@ async def index_handler(request):
         _root / "monitor.html",
     ]:
         if candidate.exists():
-            return _with_no_cache(web.FileResponse(candidate))
+            ingress_path = request.headers.get("X-Ingress-Path", "").rstrip("/")
+            # Inject the ingress path so the frontend can prefix all fetch/WS URLs.
+            # When not behind ingress, ingress_path is "" and all URLs stay relative.
+            inject = f"<script>window.__WACTORZ_INGRESS_PATH='{ingress_path}';</script>"
+            if ingress_path:
+                inject = f'<base href="{ingress_path}/">{inject}'
+
+            content = candidate.read_text(encoding="utf-8")
+            content = content.replace("<head>", f"<head>{inject}", 1)
+            return _with_no_cache(web.Response(text=content, content_type="text/html"))
     raise web.HTTPNotFound()
 
 
 async def static_handler(request):
     from aiohttp import web
     rel = request.match_info["path"]
+    
+    # Special case for favicon if it's requested at root
+    if rel == "favicon.svg":
+        for candidate in [FRONTEND_PUBLIC / "favicon.svg", FRONTEND_DIST / "favicon.svg"]:
+            if candidate.exists():
+                return _with_no_cache(web.FileResponse(candidate))
+
+    ingress_path = request.headers.get("X-Ingress-Path", "").rstrip("/")
+
     for base in [FRONTEND_DIST, FRONTEND_PUBLIC]:
         candidate = base / rel
         try:
             candidate = candidate.resolve()
             if candidate.is_file() and str(candidate).startswith(str(base.resolve())):
+                # If it's a JS file and we're behind Ingress, we must rewrite hardcoded absolute paths
+                if candidate.suffix == ".js" and ingress_path:
+                    content = candidate.read_text(encoding="utf-8")
+                    # Rewrite hardcoded paths from "/api/..." to "api/..." or prepending ingress_path
+                    # The frontend seems to use "/api/actors", "/api/config", etc.
+                    content = content.replace('"/api/', f'"{ingress_path}/api/')
+                    content = content.replace('"/config"', f'"{ingress_path}/config"')
+                    content = content.replace('"/actors"', f'"{ingress_path}/actors"')
+                    # FORCE the WebSocket to use port 8888 instead of HA's 8123
+                    content = content.replace('"ws://localhost:9001"', f'"ws://{request.host.split(":")[0]}:8888/mqtt"')
+                    content = content.replace('`ws://${location.host}/ws`', f'`ws://${{location.hostname}}:8888/ws`')
+                    content = content.replace('`ws://${location.host}/mqtt`', f'`ws://${{location.hostname}}:8888/mqtt`')
+                    
+                    return _with_no_cache(web.Response(text=content, content_type="application/javascript"))
+                
                 return _with_no_cache(web.FileResponse(candidate))
         except Exception:
             pass
@@ -865,6 +905,19 @@ async def config_handler(request):
     """Expose non-secret runtime config so the frontend can seed its defaults."""
     from aiohttp import web
     from .config import CONFIG
+
+    # Ingress support: HA sets X-Ingress-Path
+    ingress_path = request.headers.get("X-Ingress-Path", "")
+    
+    # Force the host to use port 8888 for WebSockets
+    raw_host = request.host.split(":")[0]
+    ws_host = f"{raw_host}:8888"
+    protocol = "wss" if request.secure else "ws"
+    
+    # WebSocket URLs go direct to 8888
+    mqtt_url = f"{protocol}://{ws_host}/mqtt"
+    ws_url   = f"{protocol}://{ws_host}/ws"
+
     return web.json_response({
         "ha": {
             "url":   CONFIG.ha_url,
@@ -877,7 +930,7 @@ async def config_handler(request):
         "mqtt": {
             "host": MQTT_BROKER,
             "port": MQTT_PORT,
-            "url":  f"ws://{MQTT_BROKER}:{WS_PORT}/mqtt",
+            "url":  mqtt_url,
         },
         "llm": {
             "provider": CONFIG.llm_provider,
@@ -886,6 +939,7 @@ async def config_handler(request):
         "weather": {
             "defaultLocation": CONFIG.weather_default_location,
         },
+        "ws_url": ws_url,
     })
 
 
@@ -894,7 +948,7 @@ async def config_handler(request):
 async def main(exit_on_failure: bool = False):
     from aiohttp import web
 
-    # Startup checks
+    # ... (startup checks remain same) ...
     mqtt_ok = await _check_mqtt()
     port_ok = await _check_ws_port()
 
@@ -911,9 +965,16 @@ async def main(exit_on_failure: bool = False):
     app.router.add_get("/",                      index_handler)
     app.router.add_get("/ws",                    ws_handler)
     app.router.add_get("/mqtt",                  mqtt_proxy_handler)
+    
+    # Add both /api and non-api versions to satisfy the frontend's different fetch patterns
     app.router.add_get("/api/actors",            actors_handler)
+    app.router.add_get("/actors",                actors_handler)
     app.router.add_get("/api/actors/{actor_id}", actor_handler)
+    app.router.add_get("/actors/{actor_id}",     actor_handler)
+    
     app.router.add_get("/api/config",            config_handler)
+    app.router.add_get("/config",                config_handler)
+    app.router.add_get("/favicon.svg",           index_handler)
     from .fuseki_proxy import fuseki_proxy_handler
     app.router.add_post("/api/fuseki/{dataset}/sparql",  fuseki_proxy_handler)
     app.router.add_post("/api/fuseki/{dataset}/update",  fuseki_proxy_handler)

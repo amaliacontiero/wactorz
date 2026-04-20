@@ -1756,7 +1756,7 @@ export class CardDashboard {
     left.className = "af-header-left";
 
     const icon = document.createElement("img");
-    icon.src = "/favicon.svg";
+    icon.src = "./favicon.svg";
     icon.width = 22;
     icon.height = 22;
     icon.alt = "Wactorz";
