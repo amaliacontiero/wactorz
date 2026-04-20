@@ -180,8 +180,8 @@ test: test-py test-rust parity ## Run Python, Rust, and cross-backend parity tes
 test-py: ## Run Python tests
 	$(PYTHON) -m unittest discover -s tests -p 'test_*.py'
 
-test-rust: ## Run Rust tests
-	cargo test
+test-rust: ## Run Rust tests (excludes desktop Tauri crate — needs GTK/WebKit on Linux)
+	cargo test --workspace --exclude wactorz-desktop
 
 parity: ## Prove Python and Rust core supervisor semantics match
 	$(PYTHON) scripts/check_backend_parity.py
@@ -196,7 +196,7 @@ coverage-py: ## Generate Python coverage XML + terminal report
 
 coverage-rust: ## Generate Rust coverage with cargo-llvm-cov
 	mkdir -p coverage
-	cargo llvm-cov --workspace --lcov --output-path coverage/rust.lcov
+	cargo llvm-cov --workspace --exclude wactorz-desktop --lcov --output-path coverage/rust.lcov
 
 docs-serve: ## Build docs + serve locally on :8001
 	$(PYTHON) -W ignore::UserWarning:pdoc scripts/build_docs.py --serve
