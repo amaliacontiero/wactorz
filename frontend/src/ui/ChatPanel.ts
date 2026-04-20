@@ -325,22 +325,38 @@ export class ChatPanel {
    */
   streamChunk(chunk: string, from: string): void {
     if (!this._streamRow) {
-      // First chunk — create the bubble
+      // First chunk — create the bubble with avatar header
       this._streamFrom = from;
       this._streamText = "";
 
       const wrapper = document.createElement("div");
       wrapper.className = "af-chat-msg af-chat-msg-agent";
 
-      const fromEl = document.createElement("div");
+      const header = document.createElement("div");
+      header.className = "af-chat-msg-header";
+
+      const avatar = document.createElement("img");
+      avatar.className = "af-chat-msg-avatar";
+      avatar.src = dicebearFor(from);
+      avatar.alt = from;
+      avatar.loading = "lazy";
+
+      const fromEl = document.createElement("span");
       fromEl.className = "af-chat-msg-from";
       fromEl.textContent = from;
+
+      header.appendChild(avatar);
+      header.appendChild(fromEl);
+
+      const body = document.createElement("div");
+      body.className = "af-chat-msg-body";
 
       const bubble = document.createElement("div");
       bubble.className = "af-chat-msg-bubble";
 
-      wrapper.appendChild(fromEl);
-      wrapper.appendChild(bubble);
+      body.appendChild(bubble);
+      wrapper.appendChild(header);
+      wrapper.appendChild(body);
 
       // Attach to the active thread in the DOM
       if (this.panel.classList.contains("open")) {
@@ -366,6 +382,19 @@ export class ChatPanel {
     // Render markdown on the completed text
     this._streamBody.innerHTML = renderMarkdown(this._streamText);
     this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+
+    // Add copy button + timestamp now that content is final
+    const body = this._streamBody.parentElement;
+    if (body) {
+      body.appendChild(this._makeCopyBtn(this._streamText));
+    }
+    const header = this._streamRow.querySelector<HTMLElement>(".af-chat-msg-header");
+    if (header) {
+      const time = document.createElement("span");
+      time.className = "af-chat-msg-time";
+      time.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      header.appendChild(time);
+    }
 
     // Store in thread history under the actual sender, not the active panel
     const key = this._streamFrom ?? this.activeAgentName ?? "main-actor";
@@ -470,6 +499,24 @@ export class ChatPanel {
     }
   }
 
+  private _makeCopyBtn(text: string): HTMLButtonElement {
+    const btn = document.createElement("button");
+    btn.className = "af-chat-copy-btn";
+    btn.title = "Copy message";
+    btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+    btn.addEventListener("click", () => {
+      navigator.clipboard.writeText(text).then(() => {
+        btn.textContent = "✓";
+        btn.style.color = "#34d399";
+        setTimeout(() => {
+          btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+          btn.style.color = "";
+        }, 2000);
+      }).catch(() => {});
+    });
+    return btn;
+  }
+
   private renderMessageEl(msg: ChatMessage): void {
     const isUser = msg.from === "user";
     const isSystem = msg.from === "system";
@@ -484,7 +531,7 @@ export class ChatPanel {
       from.className = "af-chat-msg-from";
       from.textContent = isSystem
         ? "system"
-        : `you · ${new Date(msg.timestampMs).toLocaleTimeString()}`;
+        : `you · ${new Date(msg.timestampMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
 
       const bubble = document.createElement("div");
       bubble.className = "af-chat-msg-bubble";
@@ -494,52 +541,110 @@ export class ChatPanel {
       el.appendChild(bubble);
       this.messagesEl.appendChild(el);
     } else {
-      // Agent message
+      // Agent message with avatar, copy button
       const wrapper = document.createElement("div");
       wrapper.className = "af-chat-msg af-chat-msg-agent";
 
-      const from = document.createElement("div");
+      const header = document.createElement("div");
+      header.className = "af-chat-msg-header";
+
+      const avatar = document.createElement("img");
+      avatar.className = "af-chat-msg-avatar";
+      avatar.src = dicebearFor(msg.from);
+      avatar.alt = msg.from;
+      avatar.loading = "lazy";
+
+      const from = document.createElement("span");
       from.className = "af-chat-msg-from";
       from.textContent = msg.from;
+
+      const time = document.createElement("span");
+      time.className = "af-chat-msg-time";
+      time.textContent = new Date(msg.timestampMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+      header.appendChild(avatar);
+      header.appendChild(from);
+      header.appendChild(time);
+
+      const body = document.createElement("div");
+      body.className = "af-chat-msg-body";
 
       const bubble = document.createElement("div");
       bubble.className = "af-chat-msg-bubble";
       bubble.innerHTML = renderMarkdown(msg.content);
 
-      const time = document.createElement("div");
-      time.className = "af-chat-msg-time";
-      time.textContent = new Date(msg.timestampMs).toLocaleTimeString();
+      body.appendChild(bubble);
+      body.appendChild(this._makeCopyBtn(msg.content));
 
-      wrapper.appendChild(from);
-      wrapper.appendChild(bubble);
-      wrapper.appendChild(time);
+      wrapper.appendChild(header);
+      wrapper.appendChild(body);
       this.messagesEl.appendChild(wrapper);
     }
   }
 }
 
-// ── Minimal markdown renderer (XSS-safe, no external deps) ───────────────────
+// ── Markdown renderer (XSS-safe, no external deps) ───────────────────────────
 
 function renderMarkdown(raw: string): string {
+  // HTML-escape via textContent trick
   const tmp = document.createElement("div");
   tmp.textContent = raw;
   let s = tmp.innerHTML;
 
-  // Fenced code blocks
-  s = s.replace(
-    /```[\s\S]*?```/g,
-    (m) => `<pre><code>${m.slice(3, -3).trim()}</code></pre>`,
-  );
+  // Protect fenced code blocks from inline processing
+  const blocks: string[] = [];
+  s = s.replace(/```[\s\S]*?```/g, (m) => {
+    const inner = m.slice(3, -3).replace(/^\w+\n/, ""); // strip optional lang tag
+    blocks.push(`<pre><code>${inner}</code></pre>`);
+    return `\x02${blocks.length - 1}\x03`;
+  });
+
   // Inline code
-  s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
-  // Bold
+  s = s.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+
+  // Line-by-line: headings and lists
+  const lines = s.split("\n");
+  let inUl = false;
+  let inOl = false;
+  const out: string[] = [];
+  for (const line of lines) {
+    const mH = line.match(/^(#{1,3}) (.+)/);
+    const mUl = !mH && line.match(/^[*\-] (.+)/);
+    const mOl = !mH && !mUl && line.match(/^\d+\. (.+)/);
+    if (mH) {
+      if (inUl) { out.push("</ul>"); inUl = false; }
+      if (inOl) { out.push("</ol>"); inOl = false; }
+      const lvl = mH[1]!.length;
+      out.push(`<h${lvl}>${mH[2]}</h${lvl}>`);
+    } else if (mUl) {
+      if (inOl) { out.push("</ol>"); inOl = false; }
+      if (!inUl) { out.push("<ul>"); inUl = true; }
+      out.push(`<li>${mUl[1]}</li>`);
+    } else if (mOl) {
+      if (inUl) { out.push("</ul>"); inUl = false; }
+      if (!inOl) { out.push("<ol>"); inOl = true; }
+      out.push(`<li>${mOl[1]}</li>`);
+    } else {
+      if (inUl) { out.push("</ul>"); inUl = false; }
+      if (inOl) { out.push("</ol>"); inOl = false; }
+      out.push(line);
+    }
+  }
+  if (inUl) out.push("</ul>");
+  if (inOl) out.push("</ol>");
+  s = out.join("\n");
+
+  // Bold / italic (after list processing to avoid * in list markers)
   s = s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
   s = s.replace(/__(.+?)__/g, "<strong>$1</strong>");
-  // Italic
-  s = s.replace(/\*([^*]+)\*/g, "<em>$1</em>");
-  s = s.replace(/_([^_]+)_/g, "<em>$1</em>");
-  // Line breaks
+  s = s.replace(/\*([^*<\n]+)\*/g, "<em>$1</em>");
+  s = s.replace(/_([^_<\n]+)_/g, "<em>$1</em>");
+
+  // Newlines → <br>
   s = s.replace(/\n/g, "<br>");
+
+  // Restore code blocks
+  s = s.replace(/\x02(\d+)\x03/g, (_, i) => blocks[+i] ?? "");
 
   return s;
 }

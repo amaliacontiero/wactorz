@@ -512,6 +512,14 @@ if (_isTauri && btnSettings) {
   const settingsPanel = new SettingsPanel();
   btnSettings.addEventListener("click", () => settingsPanel.open());
 
+  // Cmd+, (mac) / Ctrl+, (win/linux) → open settings
+  document.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === ",") {
+      e.preventDefault();
+      settingsPanel.open();
+    }
+  });
+
   // First-launch: greet + prompt for API key if not configured
   const _tauri = (window as any).__TAURI_INTERNALS__;
   if (_tauri?.invoke) {
