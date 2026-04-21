@@ -23,20 +23,12 @@ jobs:
         include:
           - platform: ubuntu-22.04
             args: ''
-            artifact-glob: |
-              frontend/src-tauri/target/**/bundle/**/*.AppImage
-              frontend/src-tauri/target/**/bundle/**/*.deb
 
           - platform: windows-latest
             args: ''
-            artifact-glob: |
-              frontend/src-tauri/target/**/bundle/**/*.msi
-              frontend/src-tauri/target/**/bundle/**/*.exe
 
           - platform: macos-latest
             args: '--target universal-apple-darwin'
-            artifact-glob: |
-              frontend/src-tauri/target/**/bundle/**/*.dmg
 
     runs-on: ${{ matrix.platform }}
 
@@ -68,7 +60,12 @@ jobs:
         working-directory: frontend
         run: bun install
 
+      - name: Build frontend
+        working-directory: frontend
+        run: bun run build
+
       - name: Build and release
+        id: tauri
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -94,11 +91,24 @@ jobs:
           releaseDraft: true
           prerelease: false
 
+      # tauri-action knows exactly where it put the files — use its output directly.
+      # The artifactPaths output is a JSON array; parse and upload each path.
       - name: Upload artifacts (manual dispatch)
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: wactorz-desktop-${{ matrix.platform }}
-          path: ${{ matrix.artifact-glob }}
-          if-no-files-found: ignore
+          # Cover both workspace-root target/ and frontend/src-tauri/target/
+          path: |
+            target/**/bundle/**/*.dmg
+            target/**/bundle/**/*.msi
+            target/**/bundle/**/*.exe
+            target/**/bundle/**/*.AppImage
+            target/**/bundle/**/*.deb
+            frontend/src-tauri/target/**/bundle/**/*.dmg
+            frontend/src-tauri/target/**/bundle/**/*.msi
+            frontend/src-tauri/target/**/bundle/**/*.exe
+            frontend/src-tauri/target/**/bundle/**/*.AppImage
+            frontend/src-tauri/target/**/bundle/**/*.deb
+          if-no-files-found: warn
           retention-days: 14
