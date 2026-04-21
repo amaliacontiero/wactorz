@@ -141,6 +141,8 @@ async def ask_agent(agent_name: str, message: str) -> str:
 async def list_agents() -> str:
     """List all currently running agents with their id, name, and state."""
     agents = await _wactorz_get("/agents")
+    if isinstance(agents, dict) and agents.get("error"):
+        return str(agents["error"])
     if not isinstance(agents, list) or not agents:
         return "No agents running."
     lines = []
