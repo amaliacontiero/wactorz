@@ -1,6 +1,6 @@
 # API Reference
 
-Wactorz exposes three interfaces: a REST API, a WebSocket bridge, and MQTT pub/sub.
+Wactorz exposes four integration surfaces: a REST API, a WebSocket bridge, MQTT pub/sub, and an optional MCP server.
 
 ---
 
@@ -272,3 +272,53 @@ The MQTT event loop routes this to IOAgent's mailbox, which parses the `@mention
 | `500` | Internal server error |
 
 MQTT errors are published as `agents/{id}/alert` with `severity: error`.
+
+---
+
+## MCP Server
+
+The optional MCP server lives at `wactorz.interfaces.mcp_server` and is exposed by the `wactorz-mcp` console script when `wactorz[mcp]` is installed. It uses stdio transport and calls the Wactorz REST API configured by `WACTORZ_URL`.
+
+```bash
+wactorz --interface rest --port 8000
+WACTORZ_URL=http://localhost:8000 wactorz-mcp
+```
+
+If the script is unavailable in an editable checkout:
+
+```bash
+python -m wactorz.interfaces.mcp_server
+```
+
+### Environment
+
+| Variable | Description |
+|---|---|
+| `WACTORZ_URL` | Base URL for the Wactorz REST API. Defaults to `http://localhost:8000`. |
+| `WACTORZ_API_KEY` | Optional API key sent to Wactorz REST as `X-API-Key`. |
+| `HA_URL` | Optional Home Assistant base URL for direct HA tools. |
+| `HA_TOKEN` | Optional Home Assistant long-lived access token. |
+
+### Tools
+
+| Tool | Backend |
+|---|---|
+| `ask_wactorz` | `POST /chat` |
+| `ask_agent` | `POST /chat` with `agent_name` |
+| `list_agents` | `GET /agents` |
+| `list_capabilities` | `POST /chat` with `/capabilities` |
+| `stop_agent` | `DELETE /actors/{agent_id}` |
+| `pause_agent` | `POST /actors/{agent_id}/pause` |
+| `resume_agent` | `POST /actors/{agent_id}/resume` |
+| `ha_list_entities` | Home Assistant `GET /api/states` |
+| `ha_get_state` | Home Assistant `GET /api/states/{entity_id}` |
+| `ha_call_service` | Home Assistant `POST /api/services/{domain}/{service}` |
+
+### Resources
+
+| Resource | Backend |
+|---|---|
+| `wactorz://agents` | `GET /agents` |
+| `wactorz://capabilities` | `POST /chat` with `/capabilities` |
+| `wactorz://ha-map` | `GET /ha-map` |
+| `wactorz://config` | local sanitized config |

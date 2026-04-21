@@ -231,7 +231,7 @@ wactorz --interface whatsapp
 wactorz --interface telegram --telegram-token $TELEGRAM_BOT_TOKEN
 
 # REST API
-wactorz --interface rest --port 8080
+wactorz --interface rest --port 8000
 
 # Custom MQTT broker (external)
 wactorz --mqtt-broker 192.168.1.10 --mqtt-port 1883
@@ -245,7 +245,8 @@ wactorz --no-monitor
 | Interface | Flag | Notes |
 |-----------|------|-------|
 | **CLI** | `--interface cli` | Default. Interactive terminal with streaming responses. |
-| **REST** | `--interface rest` | HTTP API on `--port` (default 8080). POST `/chat`, GET `/agents`. |
+| **REST** | `--interface rest` | HTTP API on `--port` (default 8000). POST `/chat`, GET `/agents`. |
+| **MCP** | separate `wactorz-mcp` process | Stdio Model Context Protocol server backed by Wactorz REST. |
 | **Discord** | `--interface discord` | Bot responds in channels and DMs. Requires `DISCORD_BOT_TOKEN`. |
 | **WhatsApp** | `--interface whatsapp` | Via Twilio. Requires `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_NUMBER`. |
 | **Telegram** | `--interface telegram` | Bot API. Requires `TELEGRAM_BOT_TOKEN`. |

@@ -103,6 +103,7 @@ This replaces all previous keyword heuristics with a single LLM classification s
 | `agents/home_assistant_state_bridge_agent.py` | Agent | HA `state_changed` → MQTT bridge |
 | `agents/home_assistant_actuator_agent.py` | Agent | Reactive MQTT→HA actuator — subscribes to topics, calls HA services |
 | `interfaces/chat_interfaces.py` | I/O | CLI (streaming), REST, Discord, WhatsApp — all call `process_user_input[_stream]` |
+| `interfaces/mcp_server.py` | I/O | MCP server exposing Wactorz and Home Assistant tools to MCP-compatible clients |
 | `monitor_server.py` | I/O | MQTT→WebSocket bridge that feeds the live dashboard |
 | `monitor.html` | I/O | Real-time web dashboard — agent cards, logs, cost meters, error alerts |
 
@@ -718,9 +719,36 @@ python -m wactorz --interface discord --discord-token YOUR_TOKEN
 
 ### REST API
 
-Start with `--interface rest` (default port 8080). Send `POST` requests to `/chat` with `{"message": "..."}`. Responses are blocking (non-streaming). Suitable for integration with other services.
+Start with `--interface rest` (default port 8000). Send `POST` requests to `/chat` with `{"message": "..."}`. Responses are blocking (non-streaming). Suitable for integration with other services.
 
 The Home Assistant map snapshot is also available at `GET /api/ha-map/latest`. It returns the latest cached map payload from `HomeAssistantMapAgent`, or `404` if no snapshot has been fetched yet.
+
+### MCP Server
+
+Install the MCP extra and run `wactorz-mcp` as a separate stdio process from your MCP client. The server proxies to the Wactorz REST interface, so start Wactorz REST first.
+
+```bash
+pip install "wactorz[mcp]"
+wactorz --interface rest --port 8000
+
+# In an MCP client config, use either:
+wactorz-mcp
+
+# Or, for editable installs where the script is not present yet:
+python -m wactorz.interfaces.mcp_server
+```
+
+MCP tools include `ask_wactorz`, `ask_agent`, `list_agents`, `list_capabilities`, `stop_agent`, `pause_agent`, `resume_agent`, `ha_list_entities`, `ha_get_state`, and `ha_call_service`. Resources include `wactorz://agents`, `wactorz://capabilities`, `wactorz://ha-map`, and `wactorz://config`.
+
+Configure it with `WACTORZ_URL` and optional `WACTORZ_API_KEY`. Direct Home Assistant tools are enabled by `HA_URL` and `HA_TOKEN`.
+
+Test with the MCP Inspector:
+
+```bash
+npx @modelcontextprotocol/inspector python -m wactorz.interfaces.mcp_server
+```
+
+Start with read-only tools such as `list_agents`, `ask_wactorz` with `/agents`, and `wactorz://config`. `ha_call_service` can change real devices, so use it only after confirming the target entity.
 
 ### Discord
 
@@ -1212,6 +1240,8 @@ By default Wactorz connects to `localhost:1883`. Override with `--mqtt-host` and
 | `TWILIO_ACCOUNT_SID` | Twilio account SID (for `--interface whatsapp`) |
 | `TWILIO_AUTH_TOKEN` | Twilio auth token |
 | `TWILIO_WHATSAPP_FROM` | Twilio WhatsApp sender number |
+| `WACTORZ_URL` | Wactorz REST base URL used by the MCP server (default `http://localhost:8000`) |
+| `WACTORZ_API_KEY` | Optional MCP-to-REST API key; should match `API_KEY` when REST auth is enabled |
 
 ---
 
@@ -1288,7 +1318,8 @@ wactorz/
 │   └── ml_agent.py                            MLAgent, YOLOAgent, AnomalyDetectorAgent
 │
 └── interfaces/
-    └── chat_interfaces.py                     CLI (with /deploy, /migrate, /nodes), REST, Discord, WhatsApp
+    ├── chat_interfaces.py                     CLI (with /deploy, /migrate, /nodes), REST, Discord, WhatsApp
+    └── mcp_server.py                          MCP tools/resources for compatible clients
 
 catalogue_agents/                              Pre-built agent recipe files (loaded by CatalogAgent at startup)
 ├── __init__.py
