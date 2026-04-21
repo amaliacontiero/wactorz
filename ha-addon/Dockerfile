@@ -7,7 +7,8 @@ RUN apk add --no-cache \
     mosquitto mosquitto-clients
 
 # Fuseki — embedded SPARQL triplestore (opt-in at runtime via fuseki_embedded option)
-ARG FUSEKI_VERSION=5.2.0
+# Version matches config/fuseki-container/Containerfile (known-good with shiro 2.x auth)
+ARG FUSEKI_VERSION=5.0.0
 RUN curl -fsSL \
     "https://archive.apache.org/dist/jena/binaries/apache-jena-fuseki-${FUSEKI_VERSION}.tar.gz" \
     | tar -xz -C /opt \

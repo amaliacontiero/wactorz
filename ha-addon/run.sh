@@ -132,21 +132,85 @@ fi
 # ── Embedded Fuseki ───────────────────────────────────────────────────────────
 if [ "$FUSEKI_EMBEDDED" = "true" ]; then
     bashio::log.info "Starting embedded Apache Jena Fuseki on :3030 (dataset: ${FUSEKI_DATASET})..."
-    mkdir -p "/share/fuseki/${FUSEKI_DATASET}"
 
-    export JAVA_HOME=/usr/lib/jvm/java-17-openjdk
-    export PATH="${JAVA_HOME}/bin:${PATH}"
+    export FUSEKI_HOME=/opt/fuseki
+    export FUSEKI_BASE=/share/fuseki
 
-    /opt/fuseki/fuseki-server \
-        --port=3030 \
-        --update \
-        --loc="/share/fuseki/${FUSEKI_DATASET}" \
-        "/${FUSEKI_DATASET}" &
+    mkdir -p "${FUSEKI_BASE}/databases/${FUSEKI_DATASET}" \
+             "${FUSEKI_BASE}/configuration" \
+             "${FUSEKI_BASE}/logs"
 
-    # Override wactorz Fuseki config to use the local instance
+    # Write shiro.ini on first boot (Fuseki 5.x requires this for auth)
+    SHIRO="${FUSEKI_BASE}/shiro.ini"
+    if [ ! -f "$SHIRO" ]; then
+        cat > "$SHIRO" << EOF
+[main]
+ssl.enabled = false
+credentialsMatcher = org.apache.shiro.authc.credential.SimpleCredentialsMatcher
+iniRealm.credentialsMatcher = \$credentialsMatcher
+
+[users]
+${FUSEKI_USER} = ${FUSEKI_PASSWORD}, admin
+
+[roles]
+admin = *
+
+[urls]
+/\$/metrics = anon
+/\$/ping    = anon
+/**        = authcBasic, roles[admin]
+EOF
+    fi
+
+    # Write TDB2 dataset config on first boot
+    CONF="${FUSEKI_BASE}/configuration/${FUSEKI_DATASET}.ttl"
+    if [ ! -f "$CONF" ]; then
+        cat > "$CONF" << EOF
+@prefix fuseki:  <http://jena.apache.org/fuseki#> .
+@prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix tdb2:    <http://jena.apache.org/2016/tdb#> .
+@prefix ja:      <http://jena.hpl.hp.com/2005/11/Assembler#> .
+
+<#service_${FUSEKI_DATASET}>
+    rdf:type              fuseki:Service ;
+    rdfs:label            "${FUSEKI_DATASET}" ;
+    fuseki:name           "${FUSEKI_DATASET}" ;
+    fuseki:serviceQuery   "query", "sparql" ;
+    fuseki:serviceUpdate  "update" ;
+    fuseki:serviceUpload  "upload" ;
+    fuseki:serviceReadGraphStore  "get" ;
+    fuseki:serviceReadWriteGraphStore "data" ;
+    fuseki:dataset        <#dataset_${FUSEKI_DATASET}> ;
+    .
+
+<#dataset_${FUSEKI_DATASET}>
+    rdf:type      tdb2:DatasetTDB2 ;
+    tdb2:location "${FUSEKI_BASE}/databases/${FUSEKI_DATASET}" ;
+    .
+EOF
+    fi
+
+    # Let Fuseki find java via PATH (apk puts it at /usr/bin/java)
+    export JVM_ARGS="-Xmx512m"
+    export JAVA_TOOL_OPTIONS="${JVM_ARGS}"
+
+    "${FUSEKI_HOME}/fuseki-server" --port=3030 &
+
+    # Override wactorz to use local Fuseki
     export FUSEKI_URL="http://localhost:3030"
 
-    bashio::log.info "Embedded Fuseki starting in background (dataset persisted at /share/fuseki/${FUSEKI_DATASET})"
+    # Wait for Fuseki to accept requests (Java startup can take 10-15 s)
+    bashio::log.info "Waiting for Fuseki to be ready..."
+    i=0
+    while [ $i -lt 60 ]; do
+        if curl -sf "http://localhost:3030/\$/ping" > /dev/null 2>&1; then
+            bashio::log.info "Fuseki ready (dataset: ${FUSEKI_DATASET}, data: ${FUSEKI_BASE}/databases/${FUSEKI_DATASET})"
+            break
+        fi
+        sleep 1
+        i=$((i+1))
+    done
 fi
 
 exec wactorz
