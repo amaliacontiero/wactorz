@@ -140,10 +140,8 @@ if [ "$FUSEKI_EMBEDDED" = "true" ]; then
              "${FUSEKI_BASE}/configuration" \
              "${FUSEKI_BASE}/logs"
 
-    # Write shiro.ini on first boot (Fuseki 5.x requires this for auth)
-    SHIRO="${FUSEKI_BASE}/shiro.ini"
-    if [ ! -f "$SHIRO" ]; then
-        cat > "$SHIRO" << EOF
+    # Write shiro.ini every boot so credential changes take effect on restart
+    cat > "${FUSEKI_BASE}/shiro.ini" << EOF
 [main]
 ssl.enabled = false
 credentialsMatcher = org.apache.shiro.authc.credential.SimpleCredentialsMatcher
@@ -160,7 +158,6 @@ admin = *
 /\$/ping    = anon
 /**        = authcBasic, roles[admin]
 EOF
-    fi
 
     # Write TDB2 dataset config on first boot
     CONF="${FUSEKI_BASE}/configuration/${FUSEKI_DATASET}.ttl"
