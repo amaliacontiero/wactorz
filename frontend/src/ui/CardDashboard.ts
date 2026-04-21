@@ -2036,8 +2036,9 @@ export class CardDashboard {
 
     // ── SPARQL runner ──────────────────────────────────────────────────────
     const datasetPath = encodeURIComponent(ds);
-    const sparqlUrl = `/api/fuseki/${datasetPath}/sparql`;
-    const updateUrl = `/api/fuseki/${datasetPath}/update`;
+    const _ingress: string = (window as any).__WACTORZ_INGRESS_PATH ?? "";
+    const sparqlUrl = `${_ingress}/api/fuseki/${datasetPath}/sparql`;
+    const updateUrl = `${_ingress}/api/fuseki/${datasetPath}/update`;
 
     const SPARQL_PREFIXES = `PREFIX syn:    <https://synapse.waldiez.io/ns#>
 PREFIX sosa:   <http://www.w3.org/ns/sosa/>
