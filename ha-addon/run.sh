@@ -74,6 +74,10 @@ export DISCORD_BOT_TOKEN=$(get_config_safe 'discord_bot_token' '')
 export TELEGRAM_BOT_TOKEN=$(get_config_safe 'telegram_bot_token' '')
 export TELEGRAM_ALLOWED_USER_ID=$(get_config_safe 'telegram_allowed_user_id' '0')
 
+# Embedded services
+MOSQUITTO_EMBEDDED=$(get_config_safe 'mosquitto_embedded' 'false')
+FUSEKI_EMBEDDED=$(get_config_safe 'fuseki_embedded' 'false')
+
 # Application Settings
 export INTERFACE=rest
 export PORT=8000
@@ -85,6 +89,64 @@ bashio::log.info "Configured: mqtt_host='${MQTT_HOST}' mqtt_port='${MQTT_PORT}' 
 # Final safety check: if LLM provider is missing, default it here
 if [ -z "$LLM_PROVIDER" ] || [ "$LLM_PROVIDER" == "null" ]; then
     export LLM_PROVIDER="anthropic"
+fi
+
+# ── Embedded Mosquitto ────────────────────────────────────────────────────────
+if [ "$MOSQUITTO_EMBEDDED" = "true" ]; then
+    bashio::log.info "Starting embedded Mosquitto MQTT broker..."
+    mkdir -p /share/mosquitto
+
+    cat > /tmp/mosquitto.conf << 'MQTTEOF'
+# TCP listener
+listener 1883
+allow_anonymous true
+
+# WebSocket listener (used by the wactorz frontend via /mqtt proxy)
+listener 8083
+protocol websockets
+allow_anonymous true
+
+persistence true
+persistence_location /share/mosquitto/
+MQTTEOF
+
+    mosquitto -c /tmp/mosquitto.conf &
+
+    # Override wactorz MQTT config to use the local broker
+    export MQTT_HOST="localhost"
+    export MQTT_PORT="1883"
+    export MQTT_WS_PORT="8083"
+
+    # Wait until Mosquitto is accepting connections (up to 15 s)
+    i=0
+    while [ $i -lt 15 ]; do
+        if mosquitto_pub -h localhost -p 1883 -t "wactorz/probe" -m "" -q 0 2>/dev/null; then
+            break
+        fi
+        sleep 1
+        i=$((i+1))
+    done
+    bashio::log.info "Embedded Mosquitto ready on 1883/8083"
+fi
+
+# ── Embedded Fuseki ───────────────────────────────────────────────────────────
+if [ "$FUSEKI_EMBEDDED" = "true" ]; then
+    bashio::log.info "Starting embedded Apache Jena Fuseki on :3030 (dataset: ${FUSEKI_DATASET})..."
+    mkdir -p "/share/fuseki/${FUSEKI_DATASET}"
+
+    export JAVA_HOME=/usr/lib/jvm/java-17-openjdk
+    export PATH="${JAVA_HOME}/bin:${PATH}"
+
+    /opt/fuseki/fuseki-server \
+        --port=3030 \
+        --update \
+        --loc="/share/fuseki/${FUSEKI_DATASET}" \
+        "/${FUSEKI_DATASET}" &
+
+    # Override wactorz Fuseki config to use the local instance
+    export FUSEKI_URL="http://localhost:3030"
+
+    bashio::log.info "Embedded Fuseki starting in background (dataset persisted at /share/fuseki/${FUSEKI_DATASET})"
 fi
 
 exec wactorz
