@@ -1,8 +1,15 @@
 import json
+import importlib.util
 import unittest
 from unittest import mock
 
-from wactorz.interfaces import mcp_server
+if importlib.util.find_spec("mcp") is None:
+    mcp_server = None
+    MCP_IMPORT_ERROR = "mcp optional dependency is not installed"
+else:
+    from wactorz.interfaces import mcp_server
+
+    MCP_IMPORT_ERROR = ""
 
 
 EXPECTED_TOOLS = {
@@ -26,6 +33,7 @@ EXPECTED_RESOURCES = {
 }
 
 
+@unittest.skipUnless(mcp_server, MCP_IMPORT_ERROR or "mcp optional dependency is not installed")
 class McpServerContractTest(unittest.IsolatedAsyncioTestCase):
     async def test_expected_tools_are_registered(self):
         tools = await mcp_server.mcp.list_tools()
