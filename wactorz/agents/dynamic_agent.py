@@ -66,6 +66,7 @@ class DynamicAgent(Actor):
         input_schema: dict = None,          # expected task payload fields
         output_schema: dict = None,         # returned result fields
         llm_provider=None,                  # optional LLM for agent.llm.chat()
+        trusted: bool = False,              # True = catalog agent, skip safety validator
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -75,6 +76,7 @@ class DynamicAgent(Actor):
         self.input_schema    = input_schema  or {}
         self.output_schema   = output_schema or {}
         self._llm_provider   = llm_provider
+        self._trusted        = trusted       # catalog agents bypass safety checks
 
         # Compiled functions — populated in on_start
         self._fn_setup       = None
@@ -372,14 +374,21 @@ class DynamicAgent(Actor):
         Returns the error message string if compilation fails, None on success.
         Callers use the error string to ask the LLM to fix the code and retry
         (see on_start / _fix_syntax_with_llm).
+
+        Trusted agents (from the catalog) skip the safety validator — their code
+        is pre-built and tested, and may legitimately use __import__, subprocess,
+        etc. that the safety validator would block.
         """
         source = code if code is not None else self._code
-        clean  = self._sanitize_code(source)
+        clean  = self._sanitize_code(source) if not self._trusted else source
 
-        # ── Safety check before exec ───────────────────────────────────────
-        safety_error = self._validate_code_safety(clean)
-        if safety_error:
-            return safety_error
+        # ── Safety check before exec (skipped for trusted/catalog agents) ──
+        if not self._trusted:
+            safety_error = self._validate_code_safety(clean)
+            if safety_error:
+                return safety_error
+        else:
+            logger.info(f"[{self.name}] Trusted agent — skipping safety validator")
 
         # Pre-inject the LLM shim so generated code can call agent.llm directly
         def _get_llm_shim(*args, **kwargs):

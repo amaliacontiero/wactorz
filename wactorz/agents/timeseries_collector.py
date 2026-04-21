@@ -60,6 +60,8 @@ class TimeSeriesCollector(Actor):
             "custom/detections/#",
             "custom/sensors/#",
             "homeassistant/state_changes/#",
+            "sinergym/env/+/observation",        # Sinergym step observations
+            "sinergym/env/+/episode",            # Sinergym episode start/end events
         ]
         self._batch_interval = batch_interval
         self._batch_size = batch_size
@@ -217,6 +219,84 @@ class TimeSeriesCollector(Actor):
                                 if k not in ("class", "confidence", "bbox", "frame_id")}),
                     payload.get("node", ""),
                 ))
+
+        # ── Sinergym observations ──────────────────────────────────────
+        elif "sinergym/" in topic and "/observation" in topic:
+            env_id  = payload.get("env_id", "")
+            episode = int(payload.get("episode", 0))
+            step    = int(payload.get("step", 0))
+            reward  = payload.get("reward")
+            mode    = payload.get("mode", "")
+            entity  = f"sinergym.{env_id}" if env_id else "sinergym"
+
+            # Store reward as a sensor reading
+            if reward is not None:
+                self._sensor_buffer.append((
+                    now, topic, entity, "reward",
+                    float(reward), "", "",
+                    f"sinergym-{mode}", "",
+                ))
+
+            # Store each obs dimension as obs_0, obs_1, ...
+            obs = payload.get("obs", [])
+            if isinstance(obs, list):
+                for i, val in enumerate(obs):
+                    if isinstance(val, (int, float)):
+                        self._sensor_buffer.append((
+                            now, topic, entity, f"obs_{i}",
+                            float(val), "", "",
+                            f"sinergym-{mode}", "",
+                        ))
+
+            # Store each action dimension
+            action = payload.get("action", [])
+            if isinstance(action, list):
+                for i, val in enumerate(action):
+                    if isinstance(val, (int, float)):
+                        self._sensor_buffer.append((
+                            now, topic, entity, f"action_{i}",
+                            float(val), "", "",
+                            f"sinergym-{mode}", "",
+                        ))
+
+            # Store step and episode as metadata
+            self._sensor_buffer.append((
+                now, topic, entity, "step",
+                float(step), "", "", f"sinergym-{mode}", "",
+            ))
+            self._sensor_buffer.append((
+                now, topic, entity, "episode",
+                float(episode), "", "", f"sinergym-{mode}", "",
+            ))
+
+            # Store info dict fields (energy, comfort, etc.)
+            info = payload.get("info", {})
+            if isinstance(info, dict):
+                for k, v in info.items():
+                    if isinstance(v, (int, float)):
+                        self._sensor_buffer.append((
+                            now, topic, entity, f"info_{k}",
+                            float(v), "", "",
+                            f"sinergym-{mode}", "",
+                        ))
+
+        # ── Sinergym episode events ────────────────────────────────────
+        elif "sinergym/" in topic and "/episode" in topic:
+            event = payload.get("event", "")
+            if event == "episode_end":
+                # Store episode summary as sensor readings for easy querying
+                env_id = payload.get("env_id", "")
+                entity = f"sinergym.{env_id}" if env_id else "sinergym"
+                for field in ("total_reward", "mean_reward", "steps",
+                              "total_energy_W", "comfort_violations_degC_steps",
+                              "violation_timesteps", "duration_s"):
+                    val = payload.get(field)
+                    if val is not None and isinstance(val, (int, float)):
+                        self._sensor_buffer.append((
+                            now, topic, entity, f"ep_{field}",
+                            float(val), "", "",
+                            "sinergym-bridge", "",
+                        ))
 
         # ── HA state changes ───────────────────────────────────────────
         elif "state_changes" in topic:

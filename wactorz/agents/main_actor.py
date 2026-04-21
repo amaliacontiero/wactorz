@@ -2203,6 +2203,7 @@ class MainActor(LLMAgent):
             output_schema=config.get("output_schema", {}),
             llm_provider=self.llm,
             persistence_dir=str(self._persistence_dir.parent),
+            trusted=bool(config.get("trusted", False)),
         )
         
         # Register TopicContract if spawn config declares pub/sub topics
