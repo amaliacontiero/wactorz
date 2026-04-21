@@ -1,0 +1,9 @@
+{
+  "scripts": {
+    "dev": "cd frontend && bun run dev",
+    "build": "cd frontend && bun run build"
+  },
+  "dependencies": {
+    "@tauri-apps/cli": "^2.10.1"
+  }
+}

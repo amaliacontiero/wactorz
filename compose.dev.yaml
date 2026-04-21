@@ -13,7 +13,6 @@
 name: wactorz-dev
 
 services:
-
   # ── MQTT broker ─────────────────────────────────────────────────────────────
   mosquitto:
     image: eclipse-mosquitto:2.0
@@ -29,7 +28,19 @@ services:
       - mosquitto-data:/mosquitto/data
       - mosquitto-logs:/mosquitto/log
     healthcheck:
-      test: ["CMD", "mosquitto_sub", "-t", "$$SYS/#", "-C", "1", "-i", "hc", "-W", "3"]
+      test:
+        [
+          "CMD",
+          "mosquitto_sub",
+          "-t",
+          "$$SYS/#",
+          "-C",
+          "1",
+          "-i",
+          "hc",
+          "-W",
+          "3",
+        ]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -144,6 +155,29 @@ services:
       - ./infra/prometheus/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
     networks:
       - wactorz-net
+
+  homeassistant:
+    profiles: [full]
+    image: homeassistant/home-assistant:stable
+    container_name: wactorz-homeassistant
+    hostname: homeassistant.local
+    restart: unless-stopped
+    privileged: true
+    networks:
+      - wactorz-net
+    environment:
+      TZ: "${TZ:-UTC}"
+
+    volumes:
+      - ./infra/homeassistant:/config
+    ports:
+      - "8123:8123"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8123"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
 volumes:
   mosquitto-data:

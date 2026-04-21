@@ -6,10 +6,11 @@ members = [
     "rust/crates/wactorz-agents",
     "rust/crates/wactorz-interfaces",
     "rust/crates/wactorz-server",
+    "frontend/src-tauri",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.3.4"
 edition = "2024"
 authors = ["Wactorz Contributors"]
 license = "Apache-2.0"

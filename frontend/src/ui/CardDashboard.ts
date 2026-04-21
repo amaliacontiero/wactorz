@@ -26,8 +26,16 @@ const SYSTEM_AGENT_NAMES: Set<any> = new Set([
   "home-assistant-state-bridge",
   "home-assistant-map-agent",
 ]);
-const ALWAYS_MESSAGEABLE = new Set(["main", "main-actor", "home-assistant-agent", "catalog"]);
-function canDirectMessage(agent: { name: string; protected?: boolean }): boolean {
+const ALWAYS_MESSAGEABLE = new Set([
+  "main",
+  "main-actor",
+  "home-assistant-agent",
+  "catalog",
+]);
+function canDirectMessage(agent: {
+  name: string;
+  protected?: boolean;
+}): boolean {
   if (ALWAYS_MESSAGEABLE.has(agent.name)) return true;
   if (SYSTEM_AGENT_NAMES.has(agent.name)) return false;
   return !agent.protected;
@@ -406,7 +414,8 @@ export class CardDashboard {
     else if (this.view === "feed") body.appendChild(this._buildFeedView());
     else if (this.view === "ha") body.appendChild(this._buildHAView());
     else if (this.view === "fuseki") body.appendChild(this._buildFusekiView());
-    else if (this.view === "settings") body.appendChild(this._buildSettingsView());
+    else if (this.view === "settings")
+      body.appendChild(this._buildSettingsView());
     else if (this.view === "chat") {
       body.appendChild(this._buildChatView());
       // _render* calls inside _buildChatView() run before the element is in
@@ -766,10 +775,14 @@ export class CardDashboard {
     hbBtn.className = `af-mini-btn${this.hideHeartbeats ? "" : " active"}`;
     hbBtn.style.cssText = "font-size:11px;padding:3px 10px;";
     hbBtn.title = "Toggle heartbeat events";
-    hbBtn.textContent = this.hideHeartbeats ? "♥ heartbeats: off" : "♥ heartbeats: on";
+    hbBtn.textContent = this.hideHeartbeats
+      ? "♥ heartbeats: off"
+      : "♥ heartbeats: on";
     hbBtn.addEventListener("click", () => {
       this.hideHeartbeats = !this.hideHeartbeats;
-      hbBtn.textContent = this.hideHeartbeats ? "♥ heartbeats: off" : "♥ heartbeats: on";
+      hbBtn.textContent = this.hideHeartbeats
+        ? "♥ heartbeats: off"
+        : "♥ heartbeats: on";
       hbBtn.className = `af-mini-btn${this.hideHeartbeats ? "" : " active"}`;
       const feed = wrap.querySelector<HTMLElement>("#af-feed-view")!;
       feed.querySelectorAll<HTMLElement>(".af-feed-heartbeat").forEach((el) => {
@@ -785,8 +798,10 @@ export class CardDashboard {
 
     const visible = this.feedItems.filter(
       (i) =>
-        !(this.hideHeartbeats && (i.type === "heartbeat" || i.type === "health")) &&
-        !SYSTEM_AGENT_NAMES.has(nameFromWid(i.agentName)),
+        !(
+          this.hideHeartbeats &&
+          (i.type === "heartbeat" || i.type === "health")
+        ) && !SYSTEM_AGENT_NAMES.has(nameFromWid(i.agentName)),
     );
     if (visible.length === 0) {
       const empty = document.createElement("div");
@@ -797,14 +812,20 @@ export class CardDashboard {
       visible.forEach((item) => this._feedItemEl(feed, item));
     }
     wrap.appendChild(feed);
-    setTimeout(() => { feed.scrollTop = feed.scrollHeight; }, 0);
+    setTimeout(() => {
+      feed.scrollTop = feed.scrollHeight;
+    }, 0);
     return wrap;
   }
 
   private _appendFeedItemToView(item: FeedItem): void {
     const feed = this.root.querySelector<HTMLElement>("#af-feed-view");
     if (!feed) return;
-    if (this.hideHeartbeats && (item.type === "heartbeat" || item.type === "health")) return;
+    if (
+      this.hideHeartbeats &&
+      (item.type === "heartbeat" || item.type === "health")
+    )
+      return;
     if (SYSTEM_AGENT_NAMES.has(nameFromWid(item.agentName))) return;
     feed.querySelector(".af-feed-empty")?.remove();
     this._feedItemEl(feed, item);
@@ -1963,12 +1984,10 @@ export class CardDashboard {
       sosa:resultTime "2026-04-17T12:15:00Z"^^xsd:dateTime .
   }
 }`;
-    hdr
-      .querySelector("#fsk-reconfigure")
-      ?.addEventListener("click", () => {
-        wrapper.innerHTML = "";
-        wrapper.appendChild(this._buildFusekiConfigForm());
-      });
+    hdr.querySelector("#fsk-reconfigure")?.addEventListener("click", () => {
+      wrapper.innerHTML = "";
+      wrapper.appendChild(this._buildFusekiConfigForm());
+    });
     wrapper.appendChild(hdr);
 
     const hint = document.createElement("div");
@@ -2004,7 +2023,8 @@ export class CardDashboard {
       "flex:1;display:flex;flex-direction:column;gap:10px;min-width:0;overflow:hidden;";
 
     const editorRow = document.createElement("div");
-    editorRow.style.cssText = "display:flex;gap:8px;align-items:flex-start;flex-shrink:0;";
+    editorRow.style.cssText =
+      "display:flex;gap:8px;align-items:flex-start;flex-shrink:0;";
 
     const editor = document.createElement("textarea");
     editor.className = "af-fuseki-editor";
@@ -2053,7 +2073,7 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
     const withPrefixes = (q: string): string => {
       // Only inject prefixes that aren't already declared in the query
       const declared = new Set(
-        [...q.matchAll(/^\s*PREFIX\s+(\w*:)/gim)].map((m) => m[1])
+        [...q.matchAll(/^\s*PREFIX\s+(\w*:)/gim)].map((m) => m[1]),
       );
       const needed = SPARQL_PREFIXES.split("\n")
         .filter((line) => {
@@ -2072,7 +2092,10 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
       status.style.color = "rgba(255,255,255,0.4)";
       results.innerHTML = "";
 
-      const isUpdate = /^\s*(INSERT|DELETE|DROP|CREATE|LOAD|CLEAR|ADD|MOVE|COPY)/i.test(trimmed);
+      const isUpdate =
+        /^\s*(INSERT|DELETE|DROP|CREATE|LOAD|CLEAR|ADD|MOVE|COPY)/i.test(
+          trimmed,
+        );
       const full = withPrefixes(trimmed);
       const headers: Record<string, string> = {};
       if (auth) headers["Authorization"] = auth;
@@ -2112,7 +2135,9 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
 
         const json = (await resp.json()) as {
           head: { vars: string[] };
-          results?: { bindings: Record<string, { value: string; type: string }>[] };
+          results?: {
+            bindings: Record<string, { value: string; type: string }>[];
+          };
           boolean?: boolean;
         };
 
@@ -2154,12 +2179,16 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
           vars.forEach((v) => {
             const td = tr.insertCell();
             const cell = row[v];
-            if (!cell) { td.textContent = ""; return; }
+            if (!cell) {
+              td.textContent = "";
+              return;
+            }
             const val = cell.value;
             // shorten long URIs
-            const display = val.length > 60
-              ? `<span title="${val}">${val.slice(0, 58)}…</span>`
-              : val;
+            const display =
+              val.length > 60
+                ? `<span title="${val}">${val.slice(0, 58)}…</span>`
+                : val;
             const isUri = cell.type === "uri";
             td.innerHTML = isUri
               ? `<span class="af-fuseki-uri">${display}</span>`
@@ -2204,9 +2233,9 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
       "max-width:440px;margin:40px auto;display:flex;flex-direction:column;gap:16px;";
 
     const stored = {
-      url:  this.fusekiUrl?.replace(/^https?:\/\//, "") ?? "",
-      tls:  (this.fusekiUrl ?? "").startsWith("https://"),
-      ds:   this.fusekiDataset,
+      url: this.fusekiUrl?.replace(/^https?:\/\//, "") ?? "",
+      tls: (this.fusekiUrl ?? "").startsWith("https://"),
+      ds: this.fusekiDataset,
       user: this.fusekiUser,
       pass: this.fusekiPass,
     };
@@ -2256,7 +2285,9 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
     `;
 
     form.querySelector("#fsk-cfg-save")?.addEventListener("click", () => {
-      const raw = (form.querySelector<HTMLInputElement>("#fsk-cfg-url")?.value ?? "").trim();
+      const raw = (
+        form.querySelector<HTMLInputElement>("#fsk-cfg-url")?.value ?? ""
+      ).trim();
       if (!raw) {
         const msg = form.querySelector<HTMLElement>("#fsk-cfg-msg")!;
         msg.style.color = "#f87171";
@@ -2267,9 +2298,16 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
       const proto = tls ? "https" : "http";
       const hasProto = /^https?:\/\//i.test(raw);
       const url = hasProto ? raw : `${proto}://${raw}`;
-      const ds = (form.querySelector<HTMLInputElement>("#fsk-cfg-ds")?.value ?? "wactorz").trim() || "wactorz";
-      const user = (form.querySelector<HTMLInputElement>("#fsk-cfg-user")?.value ?? "").trim();
-      const pass = form.querySelector<HTMLInputElement>("#fsk-cfg-pass")?.value ?? "";
+      const ds =
+        (
+          form.querySelector<HTMLInputElement>("#fsk-cfg-ds")?.value ??
+          "wactorz"
+        ).trim() || "wactorz";
+      const user = (
+        form.querySelector<HTMLInputElement>("#fsk-cfg-user")?.value ?? ""
+      ).trim();
+      const pass =
+        form.querySelector<HTMLInputElement>("#fsk-cfg-pass")?.value ?? "";
 
       localStorage.setItem("wactorz-fuseki-url", url);
       localStorage.setItem("wactorz-fuseki-dataset", ds);
@@ -2280,10 +2318,12 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
     });
 
     form.querySelector("#fsk-cfg-clear")?.addEventListener("click", () => {
-      ["wactorz-fuseki-url", "wactorz-fuseki-dataset",
-       "wactorz-fuseki-user", "wactorz-fuseki-pass"].forEach((k) =>
-        localStorage.removeItem(k),
-      );
+      [
+        "wactorz-fuseki-url",
+        "wactorz-fuseki-dataset",
+        "wactorz-fuseki-user",
+        "wactorz-fuseki-pass",
+      ].forEach((k) => localStorage.removeItem(k));
       this._renderView();
     });
 
@@ -2301,21 +2341,66 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
     title.textContent = "Settings";
     el.appendChild(title);
 
-    el.appendChild(this._buildSettingsSection("🏠 Home Assistant", [
-      { key: "wactorz-ha-url",   label: "URL",   placeholder: "http://homeassistant.local:8123", type: "text" },
-      { key: "wactorz-ha-token", label: "Token", placeholder: "Long-lived access token",          type: "password" },
-    ]));
+    el.appendChild(
+      this._buildSettingsSection("🏠 Home Assistant", [
+        {
+          key: "wactorz-ha-url",
+          label: "URL",
+          placeholder: "http://homeassistant.local:8123",
+          type: "text",
+        },
+        {
+          key: "wactorz-ha-token",
+          label: "Token",
+          placeholder: "Long-lived access token",
+          type: "password",
+        },
+      ]),
+    );
 
-    el.appendChild(this._buildSettingsSection("⬡ Knowledge Graph (Fuseki)", [
-      { key: "wactorz-fuseki-url",     label: "URL",      placeholder: "http://localhost:3030", type: "text" },
-      { key: "wactorz-fuseki-dataset", label: "Dataset",  placeholder: "wactorz",              type: "text" },
-      { key: "wactorz-fuseki-user",    label: "Username", placeholder: "admin",                 type: "text" },
-      { key: "wactorz-fuseki-pass",    label: "Password", placeholder: "",                      type: "password" },
-    ]));
+    el.appendChild(
+      this._buildSettingsSection("⬡ Knowledge Graph (Fuseki)", [
+        {
+          key: "wactorz-fuseki-url",
+          label: "URL",
+          placeholder: "http://localhost:3030",
+          type: "text",
+        },
+        {
+          key: "wactorz-fuseki-dataset",
+          label: "Dataset",
+          placeholder: "wactorz",
+          type: "text",
+        },
+        {
+          key: "wactorz-fuseki-user",
+          label: "Username",
+          placeholder: "admin",
+          type: "text",
+        },
+        {
+          key: "wactorz-fuseki-pass",
+          label: "Password",
+          placeholder: "",
+          type: "password",
+        },
+      ]),
+    );
 
-    el.appendChild(this._buildSettingsSection("📡 MQTT Broker", [
-      { key: "wactorz-mqtt-url", label: "WebSocket URL", placeholder: "ws://localhost:9001", type: "text" },
-    ], "⚠ Changes require a page reload"));
+    el.appendChild(
+      this._buildSettingsSection(
+        "📡 MQTT Broker",
+        [
+          {
+            key: "wactorz-mqtt-url",
+            label: "WebSocket URL",
+            placeholder: "ws://localhost:9001",
+            type: "text",
+          },
+        ],
+        "⚠ Changes require a page reload",
+      ),
+    );
 
     return el;
   }

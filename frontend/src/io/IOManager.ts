@@ -56,14 +56,17 @@ export class IOManager {
       this.chatPanel.hideTyping(this._lastTypingKey);
       this.chatPanel.finalizeStream();
       const text = this.chatPanel.lastStreamedText;
+      const from = this._lastStreamFrom || "main-actor";
       if (text) tts.notify(text);
       _feedPush({
         type: "chat",
         label: text?.slice(0, 60) ?? "(stream)",
-        agentName: this._lastStreamFrom || "main",
+        agentName: from,
         timestamp: Date.now(),
       });
-      document.dispatchEvent(new CustomEvent("af-stream-end"));
+      document.dispatchEvent(
+        new CustomEvent("af-stream-end", { detail: { text, from } }),
+      );
     });
   }
 
