@@ -1,5 +1,5 @@
 name: Wactorz
-version: "0.3.3"
+version: "0.3.6"
 slug: wactorz
 description: Actor-model multi-agent AI framework — spawn, coordinate and monitor AI agents at runtime.
 url: https://github.com/waldiez/wactorz
@@ -23,9 +23,13 @@ webui: http://[HOST]:[PORT:8888]
 ports:
   8000/tcp: 8000
   8888/tcp: 8888
+  3030/tcp: 3030
+  1883/tcp: null
 ports_description:
   8000/tcp: Wactorz REST + WebSocket API
   8888/tcp: Wactorz Monitor UI
+  3030/tcp: Fuseki SPARQL endpoint (only active when fuseki_embedded is true)
+  1883/tcp: MQTT TCP broker (only active when mosquitto_embedded is true)
 
 # ── Persistent state ───────────────────────────────────────────────────────────
 map:
@@ -60,6 +64,11 @@ options:
   fuseki_user: admin
   fuseki_password: admin
 
+  # Embedded services — bundle Mosquitto and/or Fuseki inside this addon container
+  # (no external addons needed; data persisted to /share/mosquitto and /share/fuseki)
+  mosquitto_embedded: false
+  fuseki_embedded: false
+
   # Optional extra integrations
   discord_bot_token: ""
   telegram_bot_token: ""
@@ -80,6 +89,8 @@ schema:
   fuseki_dataset: str
   fuseki_user: str
   fuseki_password: str
+  mosquitto_embedded: bool
+  fuseki_embedded: bool
   discord_bot_token: str
   telegram_bot_token: str
   telegram_allowed_user_id: int

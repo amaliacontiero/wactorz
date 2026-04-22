@@ -76,24 +76,26 @@ log = logging.getLogger("wactorz.fuseki")
 # ── Shared Turtle prefix block ────────────────────────────────────────────────
 
 TTL_PREFIXES = """\
-@prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
-@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
-@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
-@prefix owl:     <http://www.w3.org/2002/07/owl#> .
-@prefix dcterms: <http://purl.org/dc/terms/> .
-@prefix prov:    <http://www.w3.org/ns/prov#> .
-@prefix sosa:    <http://www.w3.org/ns/sosa/> .
-@prefix ssn:     <http://www.w3.org/ns/ssn/> .
-@prefix saref:   <https://saref.etsi.org/core/> .
-@prefix core:    <https://www.spatialwebfoundation.org/ns/hsml/core#> .
-@prefix syn:     <https://synapse.waldiez.io/ns#> .
-@prefix bot:   <https://w3id.org/bot#> .
-@prefix ha:      <urn:ha:entity:> .
-@prefix haobs:   <urn:ha:obs:> .
-@prefix haprop:  <urn:ha:prop:> .
-@prefix wact:    <urn:wactorz:agent:> .
+@prefix rdf:      <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:     <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:      <http://www.w3.org/2001/XMLSchema#> .
+@prefix owl:      <http://www.w3.org/2002/07/owl#> .
+@prefix dcterms:  <http://purl.org/dc/terms/> .
+@prefix prov:     <http://www.w3.org/ns/prov#> .
+@prefix sosa:     <http://www.w3.org/ns/sosa/> .
+@prefix ssn:      <http://www.w3.org/ns/ssn/> .
+@prefix saref:    <https://saref.etsi.org/core/> .
+@prefix core:     <https://www.spatialwebfoundation.org/ns/hsml/core#> .
+@prefix syn:      <https://synapse.waldiez.io/ns#> .
+@prefix bot:      <https://w3id.org/bot#> .
+@prefix af:       <https://waldiez.github.io/wactorz/ontology#> .
+@prefix ha:       <urn:ha:entity:> .
+@prefix haobs:    <urn:ha:obs:> .
+@prefix haprop:   <urn:ha:prop:> .
+@prefix wact:     <urn:wactorz:agent:> .
 @prefix wactprop: <urn:wactorz:prop:> .
-@prefix haarea: <urn:ha:area:> .
+@prefix wactchan: <urn:wactorz:channel:> .
+@prefix haarea:   <urn:ha:area:> .
 """
 
 # Provenance IRIs
@@ -101,11 +103,14 @@ BRIDGE_AGENT_IRI = "<urn:ha:bridge:wactorz>"
 MANIFEST_BRIDGE_IRI = "<urn:wactorz:bridge:agent-manifest>"
 
 # Named graph IRIs
-GRAPH_CURRENT = "urn:ha:current"
-GRAPH_HISTORY = "urn:ha:history"
-GRAPH_DEVICES = "urn:ha:devices"
-GRAPH_AGENTS  = "urn:wactorz:agents"
-GRAPH_AREAS   = "urn:ha:areas"
+GRAPH_CURRENT  = "urn:ha:current"
+GRAPH_HISTORY  = "urn:ha:history"
+GRAPH_DEVICES  = "urn:ha:devices"
+GRAPH_AGENTS   = "urn:wactorz:agents"
+GRAPH_CHANNELS = "urn:wactorz:channels"
+GRAPH_AREAS    = "urn:ha:areas"
+
+AF = "https://waldiez.github.io/wactorz/ontology#"
 
 # ── Domain → RDF type mapping ─────────────────────────────────────────────────
 
@@ -474,6 +479,65 @@ def _agent_manifest_body(manifest: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# ── Channel contract helpers ──────────────────────────────────────────────────
+
+def _channel_iri(topic: str) -> str:
+    return f"wactchan:{_safe(topic)}"
+
+
+def _channel_contract_body(actor_id: str, manifest: dict) -> str:
+    """
+    Convert the TopicContract fields from a manifest to Turtle for urn:wactorz:channels.
+
+    Writes af:Channel nodes and links them to the agent via af:publishesTo /
+    af:subscribesTo. observed_samples (authoritative runtime schemas) are stored
+    on the channel so SPARQL can answer "what does this topic actually carry?".
+    """
+    agent_iri = _agent_iri(actor_id)
+    observed   = manifest.get("observed_samples") or {}
+    produces   = manifest.get("produces_schema") or {}
+    consumes   = manifest.get("consumes_schema") or {}
+    triggers   = manifest.get("triggers_when") or {}
+    lines: list[str] = []
+
+    for topic in manifest.get("publishes") or []:
+        if not isinstance(topic, str):
+            continue
+        ch_iri = _channel_iri(topic)
+        obs    = observed.get(topic) or {}
+        lines.append(f"{ch_iri}")
+        lines.append(f"  a af:Channel ;")
+        lines.append(f'  af:channelTopic "{_esc(topic)}" ;')
+        if produces:
+            lines.append(f'  af:declaredSchema "{_esc(json.dumps(produces))}" ;')
+        if obs.get("fields"):
+            lines.append(f'  af:observedSchema "{_esc(json.dumps(obs["fields"]))}" ;')
+        if obs.get("example"):
+            lines.append(f'  af:observedExample "{_esc(json.dumps(obs["example"]))}" ;')
+        lines.append(f"  prov:wasAttributedTo {MANIFEST_BRIDGE_IRI} .")
+        lines.append("")
+        lines.append(f"{agent_iri} af:publishesTo {ch_iri} .")
+        lines.append("")
+
+    for topic in manifest.get("subscribes") or []:
+        if not isinstance(topic, str):
+            continue
+        ch_iri = _channel_iri(topic)
+        lines.append(f"{ch_iri}")
+        lines.append(f"  a af:Channel ;")
+        lines.append(f'  af:channelTopic "{_esc(topic)}" ;')
+        if consumes:
+            lines.append(f'  af:declaredSchema "{_esc(json.dumps(consumes))}" ;')
+        if triggers:
+            lines.append(f'  af:triggersWhen "{_esc(json.dumps(triggers))}" ;')
+        lines.append(f"  prov:wasAttributedTo {MANIFEST_BRIDGE_IRI} .")
+        lines.append("")
+        lines.append(f"{agent_iri} af:subscribesTo {ch_iri} .")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 # ── Fuseki GSP / SPARQL Update client ────────────────────────────────────────
 
 class FusekiClient:
@@ -565,6 +629,90 @@ WHERE {{
 """
         await self.sparql_update(delete_q)
         await self.append_graph(graph, ttl)
+
+    async def replace_agent_channels(
+        self, graph: str, actor_id: str, ttl: str
+    ) -> None:
+        """Replace all af:publishesTo / af:subscribesTo links for one agent, then append new ones."""
+        full_iri = f"urn:wactorz:agent:{_safe(actor_id)}"
+        delete_q = f"""
+PREFIX af: <{AF}>
+
+DELETE {{
+  GRAPH <{graph}> {{
+    <{full_iri}> af:publishesTo ?ch .
+    <{full_iri}> af:subscribesTo ?ch .
+  }}
+}}
+WHERE {{
+  GRAPH <{graph}> {{
+    {{ <{full_iri}> af:publishesTo ?ch . }}
+    UNION
+    {{ <{full_iri}> af:subscribesTo ?ch . }}
+  }}
+}}
+"""
+        await self.sparql_update(delete_q)
+        if ttl.strip():
+            await self.append_graph(graph, ttl)
+
+    async def upsert_agent_metrics(
+        self, graph: str, actor_id: str, metrics: dict
+    ) -> None:
+        """Atomically replace metrics properties for one agent."""
+        full_iri = f"urn:wactorz:agent:{_safe(actor_id)}"
+        dt_now   = _dt_now()
+
+        metric_props = [
+            "af:messagesProcessed", "af:errorsCount", "af:tasksCompleted",
+            "af:tasksFailed", "af:restartCount", "af:costUsd", "af:metricsUpdatedAt",
+        ]
+        delete_block = "\n".join(
+            f"    <{full_iri}> {p} ?v{i} ."
+            for i, p in enumerate(metric_props)
+        )
+        optional_block = "\n".join(
+            f"    OPTIONAL {{ <{full_iri}> {p} ?v{i} . }}"
+            for i, p in enumerate(metric_props)
+        )
+
+        inserts: list[str] = []
+        if metrics.get("messages_processed") is not None:
+            inserts.append(f'af:messagesProcessed {_literal(int(metrics["messages_processed"]))}')
+        if metrics.get("errors") is not None:
+            inserts.append(f'af:errorsCount {_literal(int(metrics["errors"]))}')
+        if metrics.get("tasks_completed") is not None:
+            inserts.append(f'af:tasksCompleted {_literal(int(metrics["tasks_completed"]))}')
+        if metrics.get("tasks_failed") is not None:
+            inserts.append(f'af:tasksFailed {_literal(int(metrics["tasks_failed"]))}')
+        if metrics.get("restart_count") is not None:
+            inserts.append(f'af:restartCount {_literal(int(metrics["restart_count"]))}')
+        if metrics.get("cost_usd") is not None:
+            inserts.append(f'af:costUsd {_literal(float(metrics["cost_usd"]))}')
+        inserts.append(f'af:metricsUpdatedAt "{dt_now}"^^xsd:dateTime')
+
+        insert_block = " ;\n      ".join(inserts)
+
+        query = f"""
+PREFIX af:  <{AF}>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+
+DELETE {{
+  GRAPH <{graph}> {{
+{delete_block}
+  }}
+}}
+INSERT {{
+  GRAPH <{graph}> {{
+    <{full_iri}>
+      {insert_block} .
+  }}
+}}
+WHERE {{
+{optional_block}
+}}
+"""
+        await self.sparql_update(query)
 
     async def replace_entity_in_graph(
         self, graph: str, entity_id: str, ttl: str
@@ -887,9 +1035,76 @@ class AgentManifestBridge:
             return
         name = manifest.get("name", actor_id)
         log.debug("agent manifest: %s (%s)", name, actor_id)
+
+        # Agent service catalog (GRAPH_AGENTS)
         body = _agent_manifest_body(manifest)
         await fuseki.replace_agent_in_graph(GRAPH_AGENTS, actor_id, _ttl(body))
         log.info("Upserted agent manifest: %s → %s", name, GRAPH_AGENTS)
+
+        # Channel topology (GRAPH_CHANNELS) — write only if contract fields present
+        if manifest.get("publishes") or manifest.get("subscribes"):
+            chan_body = _channel_contract_body(actor_id, manifest)
+            if chan_body.strip():
+                await fuseki.replace_agent_channels(
+                    GRAPH_CHANNELS, actor_id, _ttl(chan_body)
+                )
+                log.info("Upserted channels: %s → %s", name, GRAPH_CHANNELS)
+
+
+# ── Metrics bridge ───────────────────────────────────────────────────────────
+
+class MetricsBridge:
+    """
+    Subscribe to agents/+/metrics MQTT and upsert runtime metrics into
+    urn:wactorz:agents via af: properties.
+
+    Enables SPARQL like:
+        SELECT ?agent ?msgs ?cost WHERE {
+          ?agent af:messagesProcessed ?msgs ;
+                 af:costUsd ?cost .
+        } ORDER BY DESC(?cost)
+    """
+
+    def __init__(
+        self,
+        mqtt_broker: str,
+        mqtt_port: int,
+        fuseki_url: str,
+        fuseki_dataset: str,
+        fuseki_user: str = "",
+        fuseki_password: str = "",
+    ) -> None:
+        self._mqtt_broker    = mqtt_broker
+        self._mqtt_port      = mqtt_port
+        self._fuseki_url     = fuseki_url
+        self._fuseki_dataset = fuseki_dataset
+        self._fuseki_auth: aiohttp.BasicAuth | None = (
+            aiohttp.BasicAuth(fuseki_user, fuseki_password) if fuseki_user else None
+        )
+
+    async def run(self) -> None:
+        connector = aiohttp.TCPConnector(ssl=False, force_close=True)
+        async with aiohttp.ClientSession(connector=connector) as http:
+            fuseki = FusekiClient(
+                self._fuseki_url, self._fuseki_dataset, http, self._fuseki_auth
+            )
+            async with aiomqtt.Client(self._mqtt_broker, self._mqtt_port) as client:
+                await client.subscribe("agents/+/metrics")
+                log.info(
+                    "MetricsBridge listening on %s:%d agents/+/metrics",
+                    self._mqtt_broker, self._mqtt_port,
+                )
+                async for message in client.messages:
+                    try:
+                        metrics: dict[str, Any] = json.loads(bytes(message.payload))
+                        # topic is agents/{actor_id}/metrics
+                        actor_id = str(message.topic).split("/")[1]
+                        await fuseki.upsert_agent_metrics(
+                            GRAPH_AGENTS, actor_id, metrics
+                        )
+                        log.debug("Metrics upserted: %s", actor_id)
+                    except Exception as exc:
+                        log.exception("MetricsBridge handling error: %s", exc)
 
 
 # ── CLI entrypoint ────────────────────────────────────────────────────────────
@@ -953,7 +1168,7 @@ async def _main() -> None:
     else:
         log.info("HA_TOKEN not set — HAFusekiBridge disabled.")
 
-    # ── Agent manifest bridge ─────────────────────────────────────────────────
+    # ── Agent manifest bridge (also writes channels) ──────────────────────────
     log.info("AgentManifestBridge  mqtt=%s:%d", mqtt_broker, mqtt_port)
     agent_bridge = AgentManifestBridge(
         mqtt_broker=mqtt_broker,
@@ -964,6 +1179,18 @@ async def _main() -> None:
         fuseki_password=fuseki_password,
     )
     tasks.append(_run_with_retry(agent_bridge.run, "AgentManifestBridge"))
+
+    # ── Metrics bridge ────────────────────────────────────────────────────────
+    log.info("MetricsBridge  mqtt=%s:%d", mqtt_broker, mqtt_port)
+    metrics_bridge = MetricsBridge(
+        mqtt_broker=mqtt_broker,
+        mqtt_port=mqtt_port,
+        fuseki_url=fuseki_url,
+        fuseki_dataset=fuseki_dataset,
+        fuseki_user=fuseki_user,
+        fuseki_password=fuseki_password,
+    )
+    tasks.append(_run_with_retry(metrics_bridge.run, "MetricsBridge"))
 
     await asyncio.gather(*tasks)
 

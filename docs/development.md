@@ -39,6 +39,7 @@ The `[all]` extra installs everything except the ML stack (heavy torch dependenc
 | `wactorz[google]` | `google-generativeai` | `--llm gemini` |
 | `wactorz[discord]` | `discord.py` | `--interface discord` |
 | `wactorz[whatsapp]` | `twilio` | `--interface whatsapp` |
+| `wactorz[mcp]` | `mcp` | MCP-compatible clients |
 | `wactorz[ml]` | `ultralytics`, `torch`, `numpy` | webcam detection pipelines |
 | `wactorz[all]` | all of the above except `ml` | recommended starting point |
 
@@ -116,6 +117,10 @@ TELEGRAM_BOT_TOKEN=1234567890:AAF...
 
 # REST API auth (optional)
 API_KEY=my-secret-key
+
+# MCP server (optional)
+WACTORZ_URL=http://localhost:8000
+WACTORZ_API_KEY=              # optional; mirrors API_KEY for REST auth
 ```
 
 #### MQTT broker
@@ -173,6 +178,56 @@ wactorz --no-monitor
 ```
 
 > **Browser cache:** If you update doc files and still see old content, do a hard refresh: **Ctrl+Shift+R** (Windows/Linux) or **Cmd+Shift+R** (Mac).
+
+---
+
+## MCP
+
+Wactorz includes an optional Model Context Protocol server for local MCP clients. Install the extra, start Wactorz's REST interface, then point your MCP client at the stdio server.
+
+```bash
+pip install -e ".[mcp]"
+
+# Terminal 1
+wactorz --interface rest --port 8000
+
+# Terminal 2: verify registered tools
+python -c "import asyncio, wactorz.interfaces.mcp_server as s; print([t.name for t in asyncio.run(s.mcp.list_tools())])"
+```
+
+The registered tools are:
+
+```text
+ask_wactorz, ask_agent, list_agents, list_capabilities,
+stop_agent, pause_agent, resume_agent,
+ha_list_entities, ha_get_state, ha_call_service
+```
+
+Test with the MCP Inspector:
+
+```bash
+npx @modelcontextprotocol/inspector python -m wactorz.interfaces.mcp_server
+```
+
+Use `list_agents`, `ask_wactorz` with `/agents`, and `wactorz://config` as the first read-only checks. Home Assistant tools require `HA_URL` and `HA_TOKEN`; service calls can change real devices, so test read-only tools before `ha_call_service`.
+
+MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "wactorz": {
+      "command": "python",
+      "args": ["-m", "wactorz.interfaces.mcp_server"],
+      "env": {
+        "WACTORZ_URL": "http://localhost:8000"
+      }
+    }
+  }
+}
+```
+
+ChatGPT custom connectors require a remote HTTP/SSE MCP server; this Wactorz MCP entrypoint is currently a local stdio server intended for desktop/editor MCP clients.
 
 ---
 
@@ -313,7 +368,8 @@ wactorz/                         ← repo root
 │   │   └── io_agent.py
 │   ├── catalogue_agents/        ← pre-built DynamicAgent recipes
 │   ├── interfaces/
-│   │   └── chat_interfaces.py   ← CLI, REST, Discord, WhatsApp, Telegram
+│   │   ├── chat_interfaces.py   ← CLI, REST, Discord, WhatsApp, Telegram
+│   │   └── mcp_server.py        ← MCP tools/resources for compatible clients
 │   └── static/
 │       └── docs/                ← documentation (served at /docs/)
 ├── static/                      ← source docs + frontend SPA
