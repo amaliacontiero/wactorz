@@ -150,6 +150,7 @@ pyrightconfig.json
 .vscode/
 .claude/
 .codex/
+.codex
 .gemini/
 __pycache__/
 rust/**/target/
