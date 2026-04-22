@@ -2163,11 +2163,28 @@ class MainActor(LLMAgent):
             packages = [p.strip() for p in packages.replace(",", " ").split()]
 
         if packages:
-            # Install and spawn in a background task so we don't block the user
-            logger.info(f"[{self.name}] Scheduling background install+spawn for '{name}': {packages}")
-            asyncio.create_task(self._install_then_spawn(config, name, code, packages))
-            # Return a placeholder so the caller knows spawn is in progress
-            return _SpawnPlaceholder(name)
+            # Fast-path: check which packages actually need installing.
+            # On restore (after restart), packages from the previous session
+            # are already installed — no need to wait for the installer agent
+            # which might not have started yet.
+            import importlib
+            needed = []
+            for pkg in packages:
+                import_name = pkg.replace("-", "_").split("[")[0]
+                try:
+                    importlib.import_module(import_name)
+                except ImportError:
+                    needed.append(pkg)
+
+            if needed:
+                # Some packages missing — install in background
+                logger.info(f"[{self.name}] Scheduling background install+spawn for '{name}': {needed}")
+                asyncio.create_task(self._install_then_spawn(config, name, code, needed))
+                return _SpawnPlaceholder(name)
+            else:
+                # All packages already available — spawn immediately
+                logger.info(f"[{self.name}] All deps for '{name}' already installed — spawning directly")
+                return await self._do_spawn_dynamic(config, name, code)
         else:
             return await self._do_spawn_dynamic(config, name, code)
 

@@ -751,7 +751,25 @@ def init_persistence(
     _pickle = PickleStore(state_dir)
 
     if run_migration:
+        # 1. Migrate legacy pickle data to new stores
         migrate_from_pickle(state_dir, _db, _redis)
+
+        # 2. Run framework migrations (schema upgrades, state upgrades, spawn validation)
+        try:
+            from .migrations import run_migrations
+            migration_result = run_migrations(_db, _redis, _pickle)
+
+            # Log spawn issues as startup warnings
+            for issue in migration_result.get("spawn_issues", []):
+                if issue["severity"] == "error":
+                    logger.warning(
+                        f"[Persistence] Spawn registry issue: {issue['agent']} — "
+                        f"{issue['message']}"
+                    )
+        except ImportError:
+            logger.debug("[Persistence] migrations module not available — skipping")
+        except Exception as e:
+            logger.warning(f"[Persistence] Migration runner failed: {e} — continuing anyway")
 
     return _db, _redis, _pickle
 
