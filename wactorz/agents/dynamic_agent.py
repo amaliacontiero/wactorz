@@ -157,8 +157,6 @@ class DynamicAgent(Actor):
 
     async def on_stop(self):
         # ── Unregister from TopicBus so stale contracts don't accumulate ───
-        # Without this, stopped/deleted/replaced agents remain in the registry
-        # and the planner may try to wire against topics from dead agents.
         try:
             from ..core.topic_bus import get_topic_bus
             bus = get_topic_bus()
@@ -168,13 +166,53 @@ class DynamicAgent(Actor):
         except Exception:
             pass  # TopicBus unavailable — not fatal
 
-        # Give generated code a chance to clean up
+        # ── Give generated code a chance to clean up ───────────────────────
         cleanup = self._ns.get("cleanup")
         if cleanup:
             try:
-                await cleanup(self._api)
-            except Exception:
-                pass
+                await asyncio.wait_for(cleanup(self._api), timeout=10.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"[{self.name}] cleanup() timed out after 10s")
+            except Exception as e:
+                logger.warning(f"[{self.name}] cleanup() error: {e}")
+
+        # ── Force-release common resources that LLM code may have opened ───
+        # Even if cleanup() didn't run or missed something, we try to release
+        # known resource types stored in agent.state.
+        state = getattr(self._api, 'state', {}) if self._api else {}
+
+        # Release cv2 VideoCapture handles
+        for key in list(state.keys()):
+            obj = state.get(key)
+            if obj is None:
+                continue
+            # cv2.VideoCapture
+            if hasattr(obj, 'release') and hasattr(obj, 'isOpened'):
+                try:
+                    if obj.isOpened():
+                        obj.release()
+                        logger.info(f"[{self.name}] Released camera handle '{key}'")
+                except Exception:
+                    pass
+            # Close any open file handles
+            elif hasattr(obj, 'close') and hasattr(obj, 'closed'):
+                try:
+                    if not obj.closed:
+                        obj.close()
+                        logger.debug(f"[{self.name}] Closed file handle '{key}'")
+                except Exception:
+                    pass
+
+        # ── Cancel any tasks spawned inside setup/process code ─────────────
+        # Generated code may have called asyncio.create_task() directly without
+        # adding to _tasks. We can't track those, but we can ensure all tasks
+        # we DO track are properly cancelled and awaited.
+        for task in self._tasks:
+            if not task.done():
+                task.cancel()
+        # Give cancelled tasks a moment to actually stop
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
 
     # ── Code compilation ───────────────────────────────────────────────────
 
