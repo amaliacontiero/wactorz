@@ -194,3 +194,9 @@ wactorz/**/*.pyc
 
 myenv/
 coverage/
+
+
+yolov8n.pt
+# Add this to your .gitignore
+static/app/assets/
+static/app/index.html
