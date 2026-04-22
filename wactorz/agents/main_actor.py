@@ -1039,11 +1039,14 @@ class MainActor(LLMAgent):
                     max_tokens=10,
                     reasoning_effort="none",
                 ),
-                timeout=5.0,
+                timeout=60.0,
             )
             token = (decision or "").strip().upper().split()[0] if decision else "OTHER"
             if token in ("HA", "PIPELINE", "OTHER", "ACTUATE"):
                 return token
+            return "OTHER"
+        except asyncio.TimeoutError:
+            logger.warning(f"[{self.name}] Intent classification timed out after 60s")
             return "OTHER"
         except Exception as e:
             logger.debug(f"[{self.name}] Intent classification failed: {e}")
@@ -1124,7 +1127,7 @@ class MainActor(LLMAgent):
                 reply_to_id=self.actor_id,
                 persistence_dir=str(self._persistence_dir.parent),
             )
-            result = await asyncio.wait_for(future, timeout=30.0)
+            result = await asyncio.wait_for(future, timeout=120.0)
             return result.get("result", "Done.")
         except asyncio.TimeoutError:
             return "Actuation timed out, please retry."

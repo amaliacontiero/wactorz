@@ -20,7 +20,7 @@ Core agents are started by the Supervisor on launch and managed with `ONE_FOR_ON
 | **restarts** | 10 |
 | **persists** | `_spawned_agents`, `_pipeline_rules`, `_user_facts`, `_notification_urls`, `conversation_history`, `history_summary` → SQLite |
 
-The LLM brain of the system. Every user message — from any interface — passes through MainActor. It classifies intent with a single LLM call (`ACTUATE` / `HA` / `PIPELINE` / `OTHER`), routes to the right agent, and streams replies back.
+The LLM brain of the system. Every user message — from any interface — passes through MainActor. It classifies intent with a single LLM call (`ACTUATE` / `HA` / `PIPELINE` / `OTHER`), routes to the right agent, and streams replies back. Intent classification has a 60s timeout; if it expires, MainActor falls back to `OTHER`.
 
 #### Intent routing
 
@@ -204,7 +204,7 @@ HA_TOKEN=eyJ...   # Long-lived access token
 
 Spawned by MainActor for `ACTUATE` intent requests — immediate one-shot device control. Before spawning, MainActor fetches the full HA entity list via `home-assistant-agent` and appends it to the request text so the actuator's LLM can resolve natural language device names ("the lamp") to specific entity IDs (`light.wiz_rgbw_tunable_02cba0`).
 
-The agent resolves the request to HA service calls, executes them via the HA WebSocket API, sends the result back to MainActor, then deletes itself.
+The agent resolves the request to HA service calls, executes them via the HA WebSocket API, sends the result back to MainActor, then deletes itself. The resolver LLM call and the one-shot actuation wait both allow up to 120s, which gives local Ollama models enough time to respond without prematurely timing out.
 
 Examples: "turn on the living room light", "set heating to 23 degrees", "lock the front door".
 
@@ -440,6 +440,8 @@ Base class for all LLM-backed agents. Manages conversation history, rolling summ
 | `OllamaProvider` | `--llm ollama --ollama-model llama3` | — | Local. No cost tracking. |
 | `NIMProvider` | `--llm nim --nim-model meta/llama-3.3-70b-instruct` | `NIM_API_KEY` | NVIDIA NIM. Free tier: 1000 req/month per model. |
 | `GeminiProvider` | `--llm gemini --gemini-model gemini-2.5-flash` | `GEMINI_API_KEY` | Google Gemini via `google-generativeai` SDK. Free tier available. |
+
+All providers receive the same `complete(messages, system)` and `stream(messages, system)` calls. Ollama sends the system prompt as the first `{"role": "system"}` message in the native `/api/chat` payload, so local models receive the same persona/instructions as hosted providers.
 
 #### Cost tracking
 

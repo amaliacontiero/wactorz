@@ -202,11 +202,19 @@ class OllamaProvider(LLMProvider):
         self.model = model
         self.base_url = base_url
 
+    @staticmethod
+    def _chat_messages(messages: list[dict], system: str = "") -> list[dict]:
+        if not system:
+            return list(messages)
+        return [{"role": "system", "content": system}] + list(messages)
+
     async def complete(self, messages: list[dict], system: str = "", **kwargs) -> tuple[str, dict]:
         import aiohttp
-        payload = {"model": self.model, "messages": messages, "stream": False}
-        if system:
-            payload["system"] = system
+        payload = {
+            "model": self.model,
+            "messages": self._chat_messages(messages, system),
+            "stream": False,
+        }
         async with aiohttp.ClientSession() as session:
             async with session.post(f"{self.base_url}/api/chat", json=payload) as resp:
                 data = await resp.json()
@@ -219,9 +227,11 @@ class OllamaProvider(LLMProvider):
     async def stream(self, messages: list[dict], system: str = "", **kwargs):
         """Yield text chunks as they arrive. Final item is a dict with usage."""
         import aiohttp, json as _json
-        payload = {"model": self.model, "messages": messages, "stream": True}
-        if system:
-            payload["system"] = system
+        payload = {
+            "model": self.model,
+            "messages": self._chat_messages(messages, system),
+            "stream": True,
+        }
         input_tokens = output_tokens = 0
         async with aiohttp.ClientSession() as session:
             async with session.post(f"{self.base_url}/api/chat", json=payload) as resp:

@@ -185,6 +185,8 @@ Discord channel
 
 All providers implement `complete(messages, system) → (text, usage)` and `stream(messages, system) → AsyncGenerator`. Cost tracking (USD per 1M tokens) is built into every provider and accumulated in `LLMAgent.metrics`.
 
+For Ollama, `system` is encoded as the first `{"role": "system"}` entry in the native `/api/chat` `messages` array for both blocking and streaming calls. This keeps local model behavior aligned with the hosted providers, which already receive system instructions through their chat-message APIs.
+
 ---
 
 ## Supervision Tree
