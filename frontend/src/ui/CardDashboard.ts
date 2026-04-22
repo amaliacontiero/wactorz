@@ -275,7 +275,7 @@ export class CardDashboard {
     this._evFeed = (e) => {
       const item = (e as CustomEvent<{ item: FeedItem }>).detail.item;
       this.feedItems.push(item);
-      if (this.feedItems.length > 200) this.feedItems.shift();
+      if (this.feedItems.length > 500) this.feedItems.shift();
       if (this.view === "feed") this._appendFeedItemToView(item);
     };
 
@@ -289,7 +289,7 @@ export class CardDashboard {
           ? { ...msg, to: this._lastSentTarget }
           : msg;
       this.chatMessages.push(stored);
-      if (this.chatMessages.length > 200) this.chatMessages.shift();
+      if (this.chatMessages.length > 500) this.chatMessages.shift();
       if (this.view === "chat" && this._msgBelongsHere(stored)) {
         this._appendChatMsgEl(stored);
         this._scrollThread();

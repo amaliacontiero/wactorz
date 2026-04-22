@@ -2,9 +2,9 @@
  * Activity feed — collapsible right panel showing all MQTT events.
  *
  * - Collapsed by default; toggle with #feed-toggle button
- * - Badge on toggle button shows count when collapsed
+ * - Badge on toggle button shows count when collapsed; shows "500+" when capped
  * - Colour-coded rows: spawn=green, error=red, warning=amber, chat=cyan, stopped=dim
- * - Max 200 items; auto-scrolls; pauses on hover
+ * - Max 500 items; auto-scrolls; pauses on hover; cap banner shown when exceeded
  */
 
 export type FeedEventType =
@@ -24,7 +24,7 @@ export interface FeedItem {
   timestamp: number;
 }
 
-const MAX_ITEMS = 200;
+const MAX_ITEMS = 500;
 
 const TYPE_COLORS: Record<FeedEventType, string> = {
   spawn: "#34d399",
@@ -69,6 +69,8 @@ export class ActivityFeed {
   private isOpen = false;
   private isPaused = false;
   private unseenCount = 0;
+  private totalReceived = 0;
+  private capBanner: HTMLElement | null = null;
 
   constructor() {
     this.panel = document.getElementById("activity-feed")!;
@@ -89,10 +91,20 @@ export class ActivityFeed {
 
   /** Push a new event into the feed. */
   push(item: FeedItem): void {
+    this.totalReceived++;
     this.items.push(item);
+
     if (this.items.length > MAX_ITEMS) {
       this.items.shift();
-      this.list.firstElementChild?.remove();
+      // Remove oldest DOM row (after the cap banner, if present)
+      const firstRow = this.capBanner
+        ? this.capBanner.nextElementSibling
+        : this.list.firstElementChild;
+      firstRow?.remove();
+    }
+
+    if (this.totalReceived > MAX_ITEMS) {
+      this._updateCapBanner();
     }
 
     this.renderItem(item);
@@ -152,12 +164,24 @@ export class ActivityFeed {
 
   private updateBadge(): void {
     if (this.unseenCount > 0 && !this.isOpen) {
-      this.badge.textContent = String(
-        this.unseenCount > 99 ? "99+" : this.unseenCount,
-      );
+      const capped = this.totalReceived > MAX_ITEMS;
+      this.badge.textContent = capped
+        ? `${MAX_ITEMS}+`
+        : String(this.unseenCount > 99 ? "99+" : this.unseenCount);
       this.badge.style.display = "inline-flex";
     } else {
       this.badge.style.display = "none";
     }
+  }
+
+  private _updateCapBanner(): void {
+    if (!this.capBanner) {
+      this.capBanner = document.createElement("div");
+      this.capBanner.className = "af-feed-cap-banner";
+      this.capBanner.style.cssText =
+        "text-align:center;padding:4px 8px;font-size:10px;color:rgba(255,255,255,0.35);border-bottom:1px solid rgba(255,255,255,0.07);position:sticky;top:0;background:rgba(10,10,20,0.85);backdrop-filter:blur(4px);z-index:1;";
+      this.list.prepend(this.capBanner);
+    }
+    this.capBanner.textContent = `${MAX_ITEMS}+ events — showing latest ${MAX_ITEMS}`;
   }
 }
