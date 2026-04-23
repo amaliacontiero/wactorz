@@ -181,6 +181,31 @@ class Actor(ABC):
             task.cancel()
         await self.on_stop()                  # on_stop() calls persist() first
         await self._save_persistent_state()   # THEN save to disk
+
+        # ── Persist final cost metrics (for LLM-backed agents) ─────────
+        # Cost data lives in-memory and dies with the agent object.
+        # Persist it so the UI can show lifetime costs for deleted agents.
+        if hasattr(self, "total_cost_usd") and getattr(self, "total_cost_usd", 0) > 0:
+            self.persist("_final_cost", {
+                "input_tokens":  getattr(self, "total_input_tokens", 0),
+                "output_tokens": getattr(self, "total_output_tokens", 0),
+                "cost_usd":      round(self.total_cost_usd, 6),
+                "name":          self.name,
+                "stopped_at":    time.time(),
+            })
+
+        # ── Publish final metrics before the agent disappears ──────────
+        # The heartbeat loop is already cancelled at this point, so this
+        # is the UI's last chance to capture cost/usage data.
+        try:
+            final_metrics = self._build_metrics()
+            final_metrics["final"] = True   # signals UI this is the last message
+            await self._mqtt_publish(
+                f"agents/{self.actor_id}/metrics", final_metrics,
+            )
+        except Exception:
+            pass
+
         await self._publish_status()
         # ── Unregister from TopicBus ───────────────────────────────────
         # Remove this agent's TopicContract so the planner doesn't wire
