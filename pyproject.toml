@@ -112,8 +112,7 @@ exclude = [
 # static/docs/ → documentation site (build_docs.py output)
 # After `pip install` these land at {site-packages}/wactorz/static/.
 [tool.hatch.build.targets.wheel.force-include]
-"static"       = "wactorz/static"
-"monitor.html" = "wactorz/monitor.html"
+"static"       = "static"
 
 # ── sdist (source distribution for PyPI) ──────────────────────────────────────
 [tool.hatch.build.targets.sdist]
