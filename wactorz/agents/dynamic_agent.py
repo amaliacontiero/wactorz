@@ -156,6 +156,36 @@ class DynamicAgent(Actor):
         await self._api._publish_manifest()
 
     async def on_stop(self):
+        # ── Persist final cost metrics so they survive agent deletion ──────
+        # Without this, cost data dies with the agent object and the UI
+        # can't show lifetime costs for deleted agents.
+        if hasattr(self, "total_cost_usd") and self.total_cost_usd > 0:
+            self.persist("_final_cost", {
+                "input_tokens":  self.total_input_tokens,
+                "output_tokens": self.total_output_tokens,
+                "cost_usd":      round(self.total_cost_usd, 6),
+                "name":          self.name,
+                "stopped_at":    time.time(),
+            })
+
+        # ── Publish final metrics before heartbeat loop is cancelled ───────
+        try:
+            await self._mqtt_publish(
+                f"agents/{self.actor_id}/metrics",
+                self._build_metrics() if hasattr(self, '_build_metrics') else {
+                    "actor_id":           self.actor_id,
+                    "input_tokens":       getattr(self, "total_input_tokens", 0),
+                    "output_tokens":      getattr(self, "total_output_tokens", 0),
+                    "cost_usd":           round(getattr(self, "total_cost_usd", 0.0), 6),
+                    "messages_processed": self.metrics.messages_processed,
+                    "errors":             self.metrics.errors,
+                    "uptime":             self.metrics.uptime,
+                    "final":              True,   # signals UI this is the last metrics msg
+                },
+            )
+        except Exception:
+            pass
+
         # ── Unregister from TopicBus so stale contracts don't accumulate ───
         try:
             from ..core.topic_bus import get_topic_bus
