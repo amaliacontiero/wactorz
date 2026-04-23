@@ -6,6 +6,7 @@
   <title>Agents — Wactorz</title>
   <meta name="description" content="Wactorz — Actor-model multi-agent AI framework"/>
   <link rel="icon" href="https://waldiez.io/images/wactorz/favicon.svg" type="image/svg+xml" />
+  <link rel="icon" href="https://waldiez.github.io/media/images/wactorz/icon.ico" />
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet"/>
   <style>
@@ -116,9 +117,11 @@
       <a href="../guide/development.html" class="">Installation</a>
       <a href="../guide/architecture.html" class="">Architecture</a>
       <a href="../guide/agents.html" class="active">Agents</a>
+      <a href="../guide/mqtt_auto_wiring.html" class="">Auto-Wiring</a>
       <a href="../guide/interfaces.html" class="">Interfaces</a>
       <a href="../guide/pipelines.html" class="">Pipelines</a>
       <a href="../guide/remote-nodes.html" class="">Remote Nodes</a>
+      <a href="../guide/prometheus.html" class="">Prometheus</a>
     </div>
   </aside>
   <main class="content">
@@ -148,11 +151,11 @@
 </tr>
 <tr>
 <td><strong>persists</strong></td>
-<td><code>state/main/state.pkl</code></td>
+<td><code>_spawned_agents</code>, <code>_pipeline_rules</code>, <code>_user_facts</code>, <code>_notification_urls</code>, <code>conversation_history</code>, <code>history_summary</code> → SQLite</td>
 </tr>
 </tbody>
 </table>
-<p>The LLM brain of the system. Every user message — from any interface — passes through MainActor. It classifies intent with a single LLM call (<code>HA</code> / <code>PIPELINE</code> / <code>OTHER</code>), routes to the right agent, and streams replies back.</p>
+<p>The LLM brain of the system. Every user message — from any interface — passes through MainActor. It classifies intent with a single LLM call (<code>ACTUATE</code> / <code>HA</code> / <code>PIPELINE</code> / <code>OTHER</code>), routes to the right agent, and streams replies back. Intent classification has a 60s timeout; if it expires, MainActor falls back to <code>OTHER</code>.</p>
 <h4 id="intent-routing">Intent routing</h4>
 <table>
 <thead>
@@ -164,9 +167,14 @@
 </thead>
 <tbody>
 <tr>
+<td><code>ACTUATE</code></td>
+<td><code>OneOffActuatorAgent</code> (ephemeral)</td>
+<td>"turn off the lamp"</td>
+</tr>
+<tr>
 <td><code>HA</code></td>
 <td><code>home-assistant-agent</code></td>
-<td>"turn off the living room lights"</td>
+<td>"list all automations"</td>
 </tr>
 <tr>
 <td><code>PIPELINE</code></td>
@@ -186,17 +194,24 @@
 </tbody>
 </table>
 <h4 id="memory">Memory</h4>
-<p>After every exchange, a background LLM task extracts durable facts (HA URLs, entity IDs, webhook URLs, preferences) into <code>_user_facts</code>, which are injected into the system prompt on the next call. Rolling summarisation kicks in when conversation history exceeds 30 messages.</p>
+<p>After every exchange, a background LLM task extracts durable facts (HA URLs, entity IDs, webhook URLs, preferences) into <code>_user_facts</code>, which are injected into the system prompt on the next call. Rolling summarisation kicks in when conversation history exceeds 30 messages. Both conversation history and user facts are stored in SQLite and survive restarts.</p>
 <h4 id="spawn-registry">Spawn registry</h4>
-<p>Every DynamicAgent spawned during the session is saved to <code>state/main/state.pkl</code> under <code>_spawned_agents</code>. On restart, MainActor re-spawns every entry so pipelines survive reboots.</p>
+<p>Every DynamicAgent spawned during the session is saved to the <code>_spawned_agents</code> key in SQLite. On restart, MainActor re-spawns every entry so pipelines survive reboots. A fast-path import check skips dependency installation for packages that are already available, ensuring catalog agents restore instantly.</p>
 <h4 id="commands">Commands</h4>
-<div class="highlight"><pre><span></span><code><span class="o">/</span><span class="nv">rules</span><span class="w">                    </span>—<span class="w"> </span><span class="nv">list</span><span class="w"> </span><span class="nv">active</span><span class="w"> </span><span class="nv">pipeline</span><span class="w"> </span><span class="nv">rules</span>
-<span class="o">/</span><span class="nv">rules</span><span class="w"> </span><span class="nv">delete</span><span class="w"> </span><span class="o">&lt;</span><span class="nv">id</span><span class="o">&gt;</span><span class="w">        </span>—<span class="w"> </span><span class="nv">stop</span><span class="w"> </span><span class="nv">agents</span><span class="w"> </span><span class="nv">and</span><span class="w"> </span><span class="nv">remove</span><span class="w"> </span><span class="nv">rule</span>
-<span class="o">/</span><span class="nv">memory</span><span class="w">                   </span>—<span class="w"> </span><span class="k">show</span><span class="w"> </span><span class="nv">user</span><span class="w"> </span><span class="nv">facts</span><span class="w"> </span><span class="nv">and</span><span class="w"> </span><span class="nv">conversation</span><span class="w"> </span><span class="nv">summary</span>
-<span class="o">/</span><span class="nv">memory</span><span class="w"> </span><span class="nv">clear</span><span class="w">             </span>—<span class="w"> </span><span class="nv">wipe</span><span class="w"> </span><span class="nv">all</span><span class="w"> </span><span class="nv">memory</span>
-<span class="o">/</span><span class="nv">memory</span><span class="w"> </span><span class="nv">forget</span><span class="w"> </span><span class="o">&lt;</span><span class="nv">key</span><span class="o">&gt;</span><span class="w">      </span>—<span class="w"> </span><span class="nv">remove</span><span class="w"> </span><span class="nv">one</span><span class="w"> </span><span class="nv">fact</span>
-<span class="o">/</span><span class="nv">webhook</span><span class="w"> </span><span class="nv">discord</span><span class="w"> </span><span class="o">&lt;</span><span class="nv">url</span><span class="o">&gt;</span><span class="w">    </span>—<span class="w"> </span><span class="nv">store</span><span class="w"> </span><span class="nv">a</span><span class="w"> </span><span class="nv">Discord</span><span class="w"> </span><span class="nv">webhook</span><span class="w"> </span><span class="nv">URL</span>
-<span class="o">/</span><span class="nv">webhook</span><span class="w">                  </span>—<span class="w"> </span><span class="nv">list</span><span class="w"> </span><span class="nv">stored</span><span class="w"> </span><span class="nv">webhooks</span>
+<div class="highlight"><pre><span></span><code><span class="o">/</span><span class="nx">agents</span><span class="w">                   </span><span class="err">—</span><span class="w"> </span><span class="nx">list</span><span class="w"> </span><span class="nx">all</span><span class="w"> </span><span class="nx">running</span><span class="w"> </span><span class="nx">agents</span><span class="w"> </span><span class="nx">with</span><span class="w"> </span><span class="k">type</span><span class="w"> </span><span class="k">and</span><span class="w"> </span><span class="nx">status</span>
+<span class="o">/</span><span class="nx">agents</span><span class="w"> </span><span class="p">&lt;</span><span class="nx">keyword</span><span class="p">&gt;</span><span class="w">         </span><span class="err">—</span><span class="w"> </span><span class="nx">filter</span><span class="w"> </span><span class="nx">agents</span><span class="w"> </span><span class="nx">by</span><span class="w"> </span><span class="nx">capability</span><span class="w"> </span><span class="nx">keyword</span>
+<span class="o">/</span><span class="nx">agents</span><span class="w"> </span><span class="nx">stop</span><span class="w"> </span><span class="p">&lt;</span><span class="nx">name</span><span class="p">&gt;</span><span class="w">       </span><span class="err">—</span><span class="w"> </span><span class="nx">stop</span><span class="w"> </span><span class="k">and</span><span class="w"> </span><span class="nx">remove</span><span class="w"> </span><span class="nx">an</span><span class="w"> </span><span class="nx">agent</span>
+<span class="o">/</span><span class="nx">rules</span><span class="w">                    </span><span class="err">—</span><span class="w"> </span><span class="nx">list</span><span class="w"> </span><span class="nx">active</span><span class="w"> </span><span class="nx">pipeline</span><span class="w"> </span><span class="nx">rules</span>
+<span class="o">/</span><span class="nx">rules</span><span class="w"> </span><span class="nx">delete</span><span class="w"> </span><span class="p">&lt;</span><span class="nx">id</span><span class="p">&gt;</span><span class="w">        </span><span class="err">—</span><span class="w"> </span><span class="nx">stop</span><span class="w"> </span><span class="nx">agents</span><span class="w"> </span><span class="k">and</span><span class="w"> </span><span class="nx">remove</span><span class="w"> </span><span class="nx">rule</span>
+<span class="o">/</span><span class="nx">memory</span><span class="w">                   </span><span class="err">—</span><span class="w"> </span><span class="nx">show</span><span class="w"> </span><span class="nx">user</span><span class="w"> </span><span class="nx">facts</span><span class="w"> </span><span class="k">and</span><span class="w"> </span><span class="nx">conversation</span><span class="w"> </span><span class="nx">summary</span>
+<span class="o">/</span><span class="nx">memory</span><span class="w"> </span><span class="nx">clear</span><span class="w">             </span><span class="err">—</span><span class="w"> </span><span class="nx">wipe</span><span class="w"> </span><span class="nx">all</span><span class="w"> </span><span class="nx">memory</span>
+<span class="o">/</span><span class="nx">memory</span><span class="w"> </span><span class="nx">forget</span><span class="w"> </span><span class="p">&lt;</span><span class="nx">key</span><span class="p">&gt;</span><span class="w">      </span><span class="err">—</span><span class="w"> </span><span class="nx">remove</span><span class="w"> </span><span class="nx">one</span><span class="w"> </span><span class="nx">fact</span>
+<span class="o">/</span><span class="nx">webhook</span><span class="w"> </span><span class="nx">discord</span><span class="w"> </span><span class="p">&lt;</span><span class="nx">url</span><span class="p">&gt;</span><span class="w">    </span><span class="err">—</span><span class="w"> </span><span class="nx">store</span><span class="w"> </span><span class="nx">a</span><span class="w"> </span><span class="nx">Discord</span><span class="w"> </span><span class="nx">webhook</span><span class="w"> </span><span class="nx">URL</span>
+<span class="o">/</span><span class="nx">webhook</span><span class="w">                  </span><span class="err">—</span><span class="w"> </span><span class="nx">list</span><span class="w"> </span><span class="nx">stored</span><span class="w"> </span><span class="nx">webhooks</span>
+<span class="o">/</span><span class="nx">topics</span><span class="w">                   </span><span class="err">—</span><span class="w"> </span><span class="nx">list</span><span class="w"> </span><span class="nx">MQTT</span><span class="w"> </span><span class="nx">topics</span><span class="w"> </span><span class="nx">published</span><span class="w"> </span><span class="nx">by</span><span class="w"> </span><span class="nx">known</span><span class="w"> </span><span class="nx">agents</span>
+<span class="o">/</span><span class="nx">nodes</span><span class="w">                    </span><span class="err">—</span><span class="w"> </span><span class="nx">list</span><span class="w"> </span><span class="nx">remote</span><span class="w"> </span><span class="nx">nodes</span><span class="w"> </span><span class="k">and</span><span class="w"> </span><span class="nx">their</span><span class="w"> </span><span class="nx">agents</span>
+<span class="o">/</span><span class="nx">bus</span><span class="w">                      </span><span class="err">—</span><span class="w"> </span><span class="nx">list</span><span class="w"> </span><span class="nx">TopicBus</span><span class="w"> </span><span class="err">—</span><span class="w"> </span><span class="nx">Reactive</span><span class="w"> </span><span class="nx">Pub</span><span class="o">/</span><span class="nx">Sub</span><span class="w"> </span><span class="nx">Registry</span>
+<span class="o">/</span><span class="nx">help</span><span class="w">                     </span><span class="err">—</span><span class="w"> </span><span class="nx">show</span><span class="w"> </span><span class="nx">all</span><span class="w"> </span><span class="nx">commands</span>
 </code></pre></div>
 
 <hr />
@@ -220,15 +235,60 @@
 </tr>
 </tbody>
 </table>
-<p>Spawned by MainActor for every <code>PIPELINE</code>-classified request. The planner queries <code>home-assistant-agent</code> for the full list of real entity IDs, then asks the LLM to produce a multi-agent plan as a JSON array. Each step is either a <code>dynamic</code> agent (Python code string) or an <code>ha_actuator</code> agent (declarative HA service call). The planner spawns all agents, registers the pipeline rule with main, and exits.</p>
+<p>Spawned by MainActor for every <code>PIPELINE</code>-classified request. The planner queries <code>home-assistant-agent</code> for the full list of real entity IDs, samples live topic schemas from the TopicBus, then asks the LLM to produce a multi-agent plan as a JSON array. Each step is either a <code>dynamic</code> agent (Python code string) or an <code>ha_actuator</code> agent (declarative HA service call). The planner spawns all agents, registers the pipeline rule with main, and exits.</p>
 <h4 id="supported-patterns">Supported patterns</h4>
-<ul>
-<li><strong>HA sensor → HA action</strong> — e.g. motion sensor turns on light</li>
-<li><strong>HA sensor → notification</strong> — e.g. door opens → Discord message</li>
-<li><strong>Webcam detection → HA action</strong> — e.g. person detected → unlock door</li>
-<li><strong>Webcam detection → notification</strong> — e.g. cat detected → Telegram photo</li>
-<li><strong>Timer → HA action</strong> — e.g. every day at 07:00 turn on coffee maker</li>
-</ul>
+<table>
+<thead>
+<tr>
+<th>Pattern</th>
+<th>Trigger</th>
+<th>Action</th>
+<th>Agents spawned</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>HA sensor state change</td>
+<td>HA service call</td>
+<td>dynamic filter + <code>ha_actuator</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td>HA sensor state change</td>
+<td>Discord/webhook notification</td>
+<td>dynamic agent</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Webcam detection (YOLO)</td>
+<td>HA service call</td>
+<td>dynamic YOLO + <code>ha_actuator</code></td>
+</tr>
+<tr>
+<td>4</td>
+<td>Webcam detection (YOLO)</td>
+<td>Discord/webhook notification</td>
+<td>dynamic YOLO + dynamic notify</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Timer/schedule</td>
+<td>HA service call</td>
+<td>dynamic timer + <code>ha_actuator</code></td>
+</tr>
+<tr>
+<td>6</td>
+<td>MQTT sensor + condition</td>
+<td>HA service call</td>
+<td>dynamic monitor + <code>ha_actuator</code></td>
+</tr>
+</tbody>
+</table>
+<h4 id="code-validation">Code validation</h4>
+<p>After the LLM generates code, <code>_validate_pipeline_code()</code> scans each dynamic agent's code for common mistakes: strips <code>await</code> from synchronous agent methods, rewrites raw <code>aiomqtt.Client()</code> usage to <code>agent.subscribe()</code>, and flags direct HA REST API calls that should use <code>ha_actuator</code> instead.</p>
+<h4 id="topicbus-integration">TopicBus integration</h4>
+<p>Before generating code, the planner calls <code>prune_stale()</code> on the TopicBus registry to remove contracts from stopped agents, then reads <code>observed_samples</code> to inject real field names into the LLM prompt. This solves the vocabulary mismatch problem — the LLM writes <code>payload["temp"]</code> instead of guessing <code>payload["temperature"]</code>.</p>
 <blockquote>
 <p><strong>ℹ MQTT topic rule</strong> — All generated agents always subscribe to <code>homeassistant/state_changes/#</code> (wildcard) and filter by <code>entity_id</code> in the payload — never by topic path. This works regardless of the <code>HA_STATE_BRIDGE_PER_ENTITY</code> setting.</p>
 </blockquote>
@@ -257,7 +317,7 @@
 </tr>
 </tbody>
 </table>
-<p>Tracks heartbeat timestamps from every registered actor. If an actor's last heartbeat is older than <code>heartbeat_timeout</code> seconds it publishes an alert to <code>agents/{monitor_id}/alert</code> and notifies MainActor directly. Does <em>not</em> auto-restart actors — restart policy belongs to the Supervisor.</p>
+<p>Tracks heartbeat timestamps from every registered actor. If an actor's last heartbeat is older than <code>heartbeat_timeout</code> seconds it publishes an alert to <code>agents/{monitor_id}/alert</code> and notifies MainActor directly. Does <em>not</em> auto-restart actors — restart policy belongs to the Supervisor. Infrastructure agents (monitor, installer, main, home-assistant-agent) are excluded from user-facing notifications.</p>
 <hr />
 <h3 id="ioagent-core">IOAgent <code>[core]</code></h3>
 <p><strong>File:</strong> <code>wactorz/agents/io_agent.py</code></p>
@@ -301,7 +361,7 @@
 </tr>
 </tbody>
 </table>
-<p>Runs <code>pip install</code> in a subprocess on request. Called automatically by <code>CatalogAgent</code> before spawning a recipe that declares an <code>"install": [...]</code> list. Replies with a result dict so the caller can gate on success before proceeding.</p>
+<p>Runs <code>pip install</code> in a subprocess on request. Called automatically by <code>CatalogAgent</code> before spawning a recipe that declares an <code>"install": [...]</code> list. Also handles remote node deployment via SSH (<code>node_deploy</code>, <code>node_install</code>, <code>node_run</code> actions). Replies with a result dict so the caller can gate on success before proceeding.</p>
 <div class="highlight"><pre><span></span><code><span class="err">@</span><span class="nx">installer</span><span class="w"> </span><span class="p">{</span><span class="s">&quot;action&quot;</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;install&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;packages&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s">&quot;httpx&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;aiomqtt&quot;</span><span class="p">]}</span>
 </code></pre></div>
 
@@ -330,12 +390,11 @@
 </tr>
 </tbody>
 </table>
-<p>Pre-built agent recipe library. On startup it loads every <code>AGENT_CODE</code> string from <code>catalogue_agents/*.py</code> and injects a manifest for each recipe into MainActor so the LLM is aware of what can be spawned. When asked to spawn a recipe it first asks InstallerAgent to install any declared dependencies, then creates a DynamicAgent with the recipe code.</p>
+<p>Pre-built agent recipe library. On startup it loads every <code>AGENT_CODE</code> string from <code>catalogue_agents/*.py</code> and injects a manifest for each recipe into MainActor so the LLM is aware of what can be spawned. When asked to spawn a recipe it first asks InstallerAgent to install any declared dependencies, then creates a DynamicAgent with the recipe code and <code>trusted=True</code> — bypassing the code safety validator since catalog agents are pre-built and tested.</p>
 <h4 id="usage">Usage</h4>
 <div class="highlight"><pre><span></span><code><span class="nv">@catalog</span><span class="w"> </span><span class="n">list</span>
-<span class="nv">@catalog</span><span class="w"> </span><span class="n">info</span><span class="w"> </span><span class="n">discord</span><span class="o">-</span><span class="n">notify</span><span class="o">-</span><span class="n">agent</span>
-<span class="nv">@catalog</span><span class="w"> </span><span class="n">spawn</span><span class="w"> </span><span class="n">discord</span><span class="o">-</span><span class="n">notify</span><span class="o">-</span><span class="n">agent</span>
-<span class="nv">@catalog</span><span class="w"> </span><span class="n">spawn</span><span class="w"> </span><span class="n">ha</span><span class="o">-</span><span class="n">actuator</span><span class="o">-</span><span class="n">agent</span>
+<span class="nv">@catalog</span><span class="w"> </span><span class="n">info</span><span class="w"> </span><span class="n">anomaly</span><span class="o">-</span><span class="n">detector</span>
+<span class="nv">@catalog</span><span class="w"> </span><span class="n">spawn</span><span class="w"> </span><span class="n">anomaly</span><span class="o">-</span><span class="n">detector</span>
 </code></pre></div>
 
 <p>See the <a href="#catalog-recipes">Catalog recipes</a> section below for available recipes.</p>
@@ -372,7 +431,7 @@
 <tbody>
 <tr>
 <td><code>list_entities</code></td>
-<td>Fetch all entities (used by Planner)</td>
+<td>Fetch all entities (used by Planner and OneOffActuator)</td>
 </tr>
 <tr>
 <td><code>call_service</code></td>
@@ -397,6 +456,56 @@
 <span class="nv">HA_TOKEN</span><span class="o">=</span>eyJ...<span class="w">   </span><span class="c1"># Long-lived access token</span>
 </code></pre></div>
 
+<hr />
+<h3 id="oneoffactuatoragent-core">OneOffActuatorAgent <code>[core]</code></h3>
+<p><strong>File:</strong> <code>wactorz/agents/one_off_actuator_agent.py</code></p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>name</strong></td>
+<td><code>one-off-actuator-{hash}</code> (ephemeral)</td>
+</tr>
+<tr>
+<td><strong>lifetime</strong></td>
+<td>single request</td>
+</tr>
+</tbody>
+</table>
+<p>Spawned by MainActor for <code>ACTUATE</code> intent requests — immediate one-shot device control. Before spawning, MainActor fetches the full HA entity list via <code>home-assistant-agent</code> and appends it to the request text so the actuator's LLM can resolve natural language device names ("the lamp") to specific entity IDs (<code>light.wiz_rgbw_tunable_02cba0</code>).</p>
+<p>The agent resolves the request to HA service calls, executes them via the HA WebSocket API, sends the result back to MainActor, then deletes itself. The resolver LLM call and the one-shot actuation wait both allow up to 120s, which gives local Ollama models enough time to respond without prematurely timing out.</p>
+<p>Examples: "turn on the living room light", "set heating to 23 degrees", "lock the front door".</p>
+<hr />
+<h3 id="homeassistantactuatoragent-core">HomeAssistantActuatorAgent <code>[core]</code></h3>
+<p><strong>File:</strong> <code>wactorz/agents/home_assistant_actuator_agent.py</code></p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>name</strong></td>
+<td>set at spawn time</td>
+</tr>
+<tr>
+<td><strong>spawned by</strong></td>
+<td>PlannerAgent</td>
+</tr>
+</tbody>
+</table>
+<p>The reactive action end of every HA pipeline. Subscribes to one or more MQTT topics, evaluates an optional detection filter and HA entity conditions, enforces a configurable cooldown, and calls HA services via a persistent WebSocket connection.</p>
+<div class="highlight"><pre><span></span><code>DynamicAgent (sensor/filter) → MQTT topic → HomeAssistantActuatorAgent → HA service call
+</code></pre></div>
+
+<p>Configured with an <code>ActuatorConfig</code> specifying <code>mqtt_topics</code>, <code>detection_filter</code>, <code>conditions</code>, <code>actions</code>, and <code>cooldown_seconds</code>. Detection filter supports equality and operator dicts (<code>{"gte": 0.7}</code>).</p>
 <hr />
 <h3 id="homeassistantstatebridgeagent-core">HomeAssistantStateBridgeAgent <code>[core]</code></h3>
 <p><strong>File:</strong> <code>wactorz/agents/home_assistant_state_bridge_agent.py</code></p>
@@ -471,7 +580,82 @@
 </tr>
 </tbody>
 </table>
-<p>Maintains a live map of entity IDs to friendly names and domains. Used by PlannerAgent to resolve user-friendly device names ("the living room lamp") to actual HA entity IDs before generating pipeline code.</p>
+<p>Maintains a live map of entity IDs to friendly names and domains. Used by PlannerAgent and OneOffActuatorAgent to resolve user-friendly device names ("the living room lamp") to actual HA entity IDs before generating pipeline code or executing service calls.</p>
+<hr />
+<h3 id="timeseriescollector-core">TimeSeriesCollector <code>[core]</code></h3>
+<p><strong>File:</strong> <code>wactorz/agents/timeseries_collector.py</code></p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>name</strong></td>
+<td><code>timeseries-collector</code></td>
+</tr>
+<tr>
+<td><strong>restarts</strong></td>
+<td>5</td>
+</tr>
+<tr>
+<td><strong>persists</strong></td>
+<td><code>sensor_readings</code>, <code>detections</code>, <code>ha_state_changes</code>, <code>actuations</code> → SQLite</td>
+</tr>
+</tbody>
+</table>
+<p>Background data collector that subscribes to MQTT topics and writes every message to SQLite time-series tables. No LLM involved — pure append-only data collection for historical queries and ML training.</p>
+<h4 id="subscriptions">Subscriptions</h4>
+<table>
+<thead>
+<tr>
+<th>Topic pattern</th>
+<th>Data type</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>sensors/#</code></td>
+<td>Sensor readings (temp, humidity, energy, etc.)</td>
+</tr>
+<tr>
+<td><code>custom/sensors/#</code></td>
+<td>Custom agent sensor data</td>
+</tr>
+<tr>
+<td><code>custom/detections/#</code></td>
+<td>YOLO/camera detection events</td>
+</tr>
+<tr>
+<td><code>homeassistant/state_changes/#</code></td>
+<td>HA state change events</td>
+</tr>
+<tr>
+<td><code>sinergym/env/+/observation</code></td>
+<td>Sinergym simulation step data</td>
+</tr>
+<tr>
+<td><code>sinergym/env/+/episode</code></td>
+<td>Sinergym episode start/end events</td>
+</tr>
+</tbody>
+</table>
+<h4 id="write-strategy">Write strategy</h4>
+<p>Messages are buffered in memory and flushed to SQLite every <code>batch_interval</code> seconds (default: 5s) or when the buffer reaches <code>batch_size</code> (default: 200 messages). A final flush runs on agent stop. Data older than <code>retention_days</code> (default: 90) is pruned automatically every 6 hours.</p>
+<h4 id="sinergym-data-handling">Sinergym data handling</h4>
+<p>Sinergym observations are flattened into individual field rows: each <code>obs_i</code> dimension, each <code>action_i</code> dimension, <code>reward</code>, <code>step</code>, <code>episode</code>, and every numeric field from the <code>info</code> dict (<code>info_total_power_demand</code>, <code>info_total_temperature_violation</code>, etc.). Episode end events are stored as summary rows (<code>ep_total_reward</code>, <code>ep_mean_reward</code>, <code>ep_steps</code>, etc.).</p>
+<h4 id="commands_1">Commands</h4>
+<div class="highlight"><pre><span></span><code><span class="nv">@timeseries</span><span class="o">-</span><span class="n">collector</span><span class="w"> </span><span class="n">stats</span><span class="w">     </span><span class="err">—</span><span class="w"> </span><span class="n">show</span><span class="w"> </span><span class="n">received</span><span class="o">/</span><span class="n">written</span><span class="w"> </span><span class="n">counts</span><span class="w"> </span><span class="ow">and</span><span class="w"> </span><span class="nc">table</span><span class="w"> </span><span class="k">row</span><span class="w"> </span><span class="n">counts</span>
+<span class="nv">@timeseries</span><span class="o">-</span><span class="n">collector</span><span class="w"> </span><span class="n">prune</span><span class="w">     </span><span class="err">—</span><span class="w"> </span><span class="n">force</span><span class="w"> </span><span class="k">immediate</span><span class="w"> </span><span class="k">data</span><span class="w"> </span><span class="n">pruning</span>
+</code></pre></div>
+
+<h4 id="configuration-environment-variables">Configuration (environment variables)</h4>
+<div class="highlight"><pre><span></span><code><span class="nv">TS_RETENTION_DAYS</span><span class="o">=</span><span class="m">90</span><span class="w">       </span><span class="c1"># auto-prune data older than this (default: 90)</span>
+<span class="nv">TS_BATCH_INTERVAL</span><span class="o">=</span><span class="m">5</span>.0<span class="w">      </span><span class="c1"># flush to SQLite every N seconds (default: 5)</span>
+</code></pre></div>
+
 <hr />
 <h2 id="dynamicagent">DynamicAgent</h2>
 <p><strong>File:</strong> <code>wactorz/agents/dynamic_agent.py</code></p>
@@ -511,12 +695,12 @@
 <tr>
 <td><code>async def process(agent)</code></td>
 <td>Every <code>poll_interval</code> seconds</td>
-<td>For periodic work. Only started after <code>setup()</code> returns (or immediately if no setup).</td>
+<td>For periodic work. Timeout: 120s per call. Only started after <code>setup()</code> returns (or immediately if no setup).</td>
 </tr>
 <tr>
 <td><code>async def handle_task(agent, payload)</code></td>
 <td>On every inbound TASK message</td>
-<td>Must return a dict. Used for command/response interactions.</td>
+<td>Must return a dict. Timeout: 60s per call. Used for command/response interactions.</td>
 </tr>
 </tbody>
 </table>
@@ -525,44 +709,120 @@
 <thead>
 <tr>
 <th>Method</th>
+<th>Sync/Async</th>
 <th>Description</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td><code>await agent.publish(topic, payload)</code></td>
+<td>async</td>
 <td>Publish a dict to any MQTT topic</td>
 </tr>
 <tr>
 <td><code>agent.subscribe(topic, callback)</code></td>
-<td>Subscribe to MQTT topic; callback is <code>async def cb(payload: dict)</code>. Runs as background task — <code>setup()</code> returns immediately.</td>
+<td><strong>sync</strong></td>
+<td>Subscribe to MQTT topic; callback is <code>async def cb(payload)</code>. Returns immediately.</td>
 </tr>
 <tr>
 <td><code>await agent.send_to(name, payload)</code></td>
+<td>async</td>
 <td>Send a TASK message to another actor by name</td>
 </tr>
 <tr>
 <td><code>await agent.log(message)</code></td>
-<td>Publish to the agent's log stream (visible in dashboard)</td>
+<td>async</td>
+<td>Publish to the agent's log stream</td>
 </tr>
 <tr>
 <td><code>await agent.alert(message, level)</code></td>
-<td>Publish an alert. Levels: <code>info</code>, <code>warning</code>, <code>error</code></td>
+<td>async</td>
+<td>Publish an alert (<code>info</code>, <code>warning</code>, <code>error</code>)</td>
 </tr>
 <tr>
 <td><code>agent.persist(key, value)</code></td>
-<td>Write a value to the agent's pickle state (survives restarts)</td>
+<td><strong>sync</strong></td>
+<td>Write a value (routes to SQLite/Redis/Pickle based on key)</td>
 </tr>
 <tr>
 <td><code>agent.recall(key)</code></td>
+<td><strong>sync</strong></td>
 <td>Read a persisted value</td>
 </tr>
 <tr>
 <td><code>agent.state</code></td>
+<td>—</td>
 <td>In-memory dict (not persisted)</td>
+</tr>
+<tr>
+<td><code>agent.window(topic, seconds)</code></td>
+<td><strong>sync</strong></td>
+<td>Create a sliding time window over an MQTT topic stream</td>
+</tr>
+<tr>
+<td><code>agent.declare_contract(...)</code></td>
+<td><strong>sync</strong></td>
+<td>Register a TopicBus contract for auto-wiring</td>
+</tr>
+<tr>
+<td><code>agent.query_ts(hours, field, ...)</code></td>
+<td><strong>sync</strong></td>
+<td>Query historical sensor data from SQLite</td>
+</tr>
+<tr>
+<td><code>agent.query_detections(hours, ...)</code></td>
+<td><strong>sync</strong></td>
+<td>Query historical YOLO detections from SQLite</td>
+</tr>
+<tr>
+<td><code>agent.query_ha_states(hours, ...)</code></td>
+<td><strong>sync</strong></td>
+<td>Query historical HA state changes from SQLite</td>
+</tr>
+<tr>
+<td><code>agent.ts_stats()</code></td>
+<td><strong>sync</strong></td>
+<td>Row counts for all time-series tables</td>
+</tr>
+<tr>
+<td><code>agent.agents()</code></td>
+<td><strong>sync</strong></td>
+<td>List all currently running agents</td>
+</tr>
+<tr>
+<td><code>agent.topics(keyword)</code></td>
+<td><strong>sync</strong></td>
+<td>List known MQTT topics</td>
 </tr>
 </tbody>
 </table>
+<h4 id="time-series-queries">Time-series queries</h4>
+<p>Any dynamic agent can query historical data collected by the TimeSeriesCollector:</p>
+<div class="highlight"><pre><span></span><code><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">handle_task</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="n">payload</span><span class="p">):</span>
+    <span class="c1"># Get last 24h of temperature readings</span>
+    <span class="n">rows</span> <span class="o">=</span> <span class="n">agent</span><span class="o">.</span><span class="n">query_ts</span><span class="p">(</span><span class="n">hours</span><span class="o">=</span><span class="mi">24</span><span class="p">,</span> <span class="n">field</span><span class="o">=</span><span class="s1">&#39;temp&#39;</span><span class="p">)</span>
+
+    <span class="c1"># Get as pandas DataFrame for ML training</span>
+    <span class="n">df</span> <span class="o">=</span> <span class="n">agent</span><span class="o">.</span><span class="n">query_ts</span><span class="p">(</span><span class="n">hours</span><span class="o">=</span><span class="mi">168</span><span class="p">,</span> <span class="n">entity_id</span><span class="o">=</span><span class="s1">&#39;sensor.kitchen_temp&#39;</span><span class="p">,</span> <span class="n">as_dataframe</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
+    <span class="c1"># Query YOLO detections</span>
+    <span class="n">df</span> <span class="o">=</span> <span class="n">agent</span><span class="o">.</span><span class="n">query_detections</span><span class="p">(</span><span class="n">hours</span><span class="o">=</span><span class="mi">12</span><span class="p">,</span> <span class="n">class_name</span><span class="o">=</span><span class="s1">&#39;person&#39;</span><span class="p">,</span> <span class="n">as_dataframe</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
+    <span class="c1"># Check available data volume</span>
+    <span class="n">stats</span> <span class="o">=</span> <span class="n">agent</span><span class="o">.</span><span class="n">ts_stats</span><span class="p">()</span>
+    <span class="c1"># {&#39;sensor_readings&#39;: 145230, &#39;detections&#39;: 8920, ...}</span>
+</code></pre></div>
+
+<h4 id="code-safety">Code safety</h4>
+<p>LLM-generated agents go through a 5-layer defense:</p>
+<ol>
+<li><strong>Prompt engineering</strong> — LLM prompt lists sync vs async methods</li>
+<li><strong>Code sanitizer</strong> — regex strips <code>await</code> from sync methods, removes LLM self-setup blocks</li>
+<li><strong>Safety validator</strong> — blocks <code>os.system</code>, <code>eval</code>, <code>__import__</code>, file writes, raw sockets</li>
+<li><strong>Callback wrapper</strong> — catches <code>TypeError</code> from accidental <code>await None</code> in subscribe callbacks</li>
+<li><strong>LLM self-correction</strong> — if <code>setup()</code> crashes, traceback is sent to LLM for fix (2 attempts)</li>
+</ol>
+<p>Catalog agents spawn with <code>trusted=True</code> and bypass layers 2-3 (sanitizer + safety validator), since their code is pre-built and may legitimately use <code>__import__</code>, <code>subprocess</code>, etc.</p>
 <h4 id="example-mqtt-subscription">Example — MQTT subscription</h4>
 <div class="highlight"><pre><span></span><code><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">setup</span><span class="p">(</span><span class="n">agent</span><span class="p">):</span>
     <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">on_state</span><span class="p">(</span><span class="n">payload</span><span class="p">):</span>
@@ -577,7 +837,6 @@
                 <span class="p">)</span>
             <span class="k">await</span> <span class="n">agent</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="s2">&quot;Discord notification sent&quot;</span><span class="p">)</span>
 
-    <span class="c1"># Wildcard subscription — works with any HA_STATE_BRIDGE_PER_ENTITY setting</span>
     <span class="n">agent</span><span class="o">.</span><span class="n">subscribe</span><span class="p">(</span><span class="s2">&quot;homeassistant/state_changes/#&quot;</span><span class="p">,</span> <span class="n">on_state</span><span class="p">)</span>
 </code></pre></div>
 
@@ -594,7 +853,7 @@
 <hr />
 <h2 id="llmagent-base-class">LLMAgent base class</h2>
 <p><strong>File:</strong> <code>wactorz/agents/llm_agent.py</code></p>
-<p>Base class for all LLM-backed agents. Manages conversation history, rolling summarisation (compresses the oldest half of history when the message count exceeds <code>summarize_threshold=30</code>), and cost tracking.</p>
+<p>Base class for all LLM-backed agents. Manages conversation history, rolling summarisation (compresses the oldest half of history when the message count exceeds <code>summarize_threshold=30</code>), and cost tracking. Conversation history and summary are persisted to SQLite and restored on startup.</p>
 <h4 id="providers">Providers</h4>
 <table>
 <thead>
@@ -638,11 +897,12 @@
 </tr>
 </tbody>
 </table>
+<p>All providers receive the same <code>complete(messages, system)</code> and <code>stream(messages, system)</code> calls. Ollama sends the system prompt as the first <code>{"role": "system"}</code> message in the native <code>/api/chat</code> payload, so local models receive the same persona/instructions as hosted providers.</p>
 <h4 id="cost-tracking">Cost tracking</h4>
 <p>All providers track token usage and compute cost in USD per call. Costs are accumulated in <code>LLMAgent.metrics</code> and published with every heartbeat. The <code>PRICING</code> dict in <code>llm_agent.py</code> covers all major model variants — add new entries there to track custom models.</p>
 <hr />
 <h2 id="catalog-recipes">Catalog recipes</h2>
-<p>Recipes live in <code>catalogue_agents/</code> as plain Python files exporting an <code>AGENT_CODE</code> string. They are loaded by <code>CatalogAgent</code> at startup and spawned on demand as DynamicAgents.</p>
+<p>Recipes live in <code>catalogue_agents/</code> as plain Python files exporting an <code>AGENT_CODE</code> string. They are loaded by <code>CatalogAgent</code> at startup and spawned on demand as DynamicAgents with <code>trusted=True</code> (safety validator bypassed).</p>
 <table>
 <thead>
 <tr>
@@ -677,6 +937,24 @@
 <td>Converts PDF or TXT documents into PowerPoint presentations. Extracts embedded images from PDF; optionally uses NIM FLUX for slides without images.</td>
 <td><code>pymupdf</code>, <code>pdfplumber</code>, <code>pillow</code></td>
 </tr>
+<tr>
+<td><code>sinergym-collector</code></td>
+<td><code>sinergym_collector_agent.py</code></td>
+<td>Collects Sinergym episode data via MQTT for RL/Bayesian training. Listens on <code>sinergym/env/{env_id}/observation</code>, buffers transitions per-episode, persists episode blobs, and signals the optimizer on collection complete.</td>
+<td><code>aiomqtt</code>, <code>numpy</code></td>
+</tr>
+<tr>
+<td><code>sinergym-optimizer</code></td>
+<td><code>sinergym_optimizer_agent.py</code></td>
+<td>Env-aware GP-UCB Q(s,a) optimizer with RBC warm-start. Trains from collected episodes (RL PPO/SAC or Bayesian GP), then publishes actions to <code>sinergym/env/{env_id}/action</code> during deployment. Auto-introspects obs/action variable names and comfort models.</td>
+<td><code>stable-baselines3</code>, <code>scikit-learn</code>, <code>numpy</code>, <code>torch</code>, <code>aiomqtt</code>, <code>gymnasium</code></td>
+</tr>
+<tr>
+<td><code>anomaly-detector</code></td>
+<td><code>anomaly_detector_agent.py</code></td>
+<td>Learns normal patterns from time-series data (HA sensors and Sinergym), detects anomalies in real-time. Statistical z-score, percentile range, rate-of-change, and absence detection. Works with both real-world HA devices and simulated building data.</td>
+<td><code>aiomqtt</code>, <code>numpy</code></td>
+</tr>
 </tbody>
 </table>
 <blockquote>
@@ -694,14 +972,12 @@
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
 
     <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">on_start</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
-        <span class="c1"># Long-running work must be a background task</span>
         <span class="n">asyncio</span><span class="o">.</span><span class="n">create_task</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_my_loop</span><span class="p">())</span>
 
     <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">handle_message</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">msg</span><span class="p">:</span> <span class="n">Message</span><span class="p">):</span>
         <span class="k">if</span> <span class="n">msg</span><span class="o">.</span><span class="n">type</span> <span class="o">!=</span> <span class="n">MessageType</span><span class="o">.</span><span class="n">TASK</span><span class="p">:</span>
             <span class="k">return</span>
         <span class="n">result</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;echo&quot;</span><span class="p">:</span> <span class="n">msg</span><span class="o">.</span><span class="n">payload</span><span class="p">}</span>
-        <span class="c1"># Echo _task_id so caller futures resolve</span>
         <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">msg</span><span class="o">.</span><span class="n">payload</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
             <span class="n">result</span><span class="p">[</span><span class="s2">&quot;_task_id&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">msg</span><span class="o">.</span><span class="n">payload</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;_task_id&quot;</span><span class="p">)</span>
         <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">msg</span><span class="o">.</span><span class="n">reply_to</span> <span class="ow">or</span> <span class="n">msg</span><span class="o">.</span><span class="n">sender_id</span><span class="p">,</span> <span class="n">MessageType</span><span class="o">.</span><span class="n">RESULT</span><span class="p">,</span> <span class="n">result</span><span class="p">)</span>
@@ -716,7 +992,8 @@
 <div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">wactorz.agents.my_agent</span><span class="w"> </span><span class="kn">import</span> <span class="n">MyAgent</span>
 
 <span class="k">def</span><span class="w"> </span><span class="nf">make_my_agent</span><span class="p">():</span>
-    <span class="k">return</span> <span class="n">MyAgent</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;my-agent&quot;</span><span class="p">,</span> <span class="n">persistence_dir</span><span class="o">=</span><span class="s2">&quot;./state&quot;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">_wire_persistence</span><span class="p">(</span>
+        <span class="n">MyAgent</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;my-agent&quot;</span><span class="p">,</span> <span class="n">persistence_dir</span><span class="o">=</span><span class="s2">&quot;./state&quot;</span><span class="p">))</span>
 
 <span class="n">system</span><span class="o">.</span><span class="n">supervisor</span><span class="o">.</span><span class="n">supervise</span><span class="p">(</span>
     <span class="s2">&quot;my-agent&quot;</span><span class="p">,</span> <span class="n">make_my_agent</span><span class="p">,</span>

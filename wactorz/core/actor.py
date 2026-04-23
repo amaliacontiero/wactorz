@@ -141,6 +141,10 @@ class Actor(ABC):
         self._persistence_dir.mkdir(parents=True, exist_ok=True)
         self._persistent_state: dict = {}
 
+        # Unified persistence API — set by ActorSystem if available,
+        # otherwise falls back to legacy pickle behavior
+        self._persistence_api: Optional[Any] = None
+
         # Protection — if True, stop/delete/pause commands are ignored
         self.protected: bool = False
 
@@ -177,6 +181,31 @@ class Actor(ABC):
             task.cancel()
         await self.on_stop()                  # on_stop() calls persist() first
         await self._save_persistent_state()   # THEN save to disk
+
+        # ── Persist final cost metrics (for LLM-backed agents) ─────────
+        # Cost data lives in-memory and dies with the agent object.
+        # Persist it so the UI can show lifetime costs for deleted agents.
+        if hasattr(self, "total_cost_usd") and getattr(self, "total_cost_usd", 0) > 0:
+            self.persist("_final_cost", {
+                "input_tokens":  getattr(self, "total_input_tokens", 0),
+                "output_tokens": getattr(self, "total_output_tokens", 0),
+                "cost_usd":      round(self.total_cost_usd, 6),
+                "name":          self.name,
+                "stopped_at":    time.time(),
+            })
+
+        # ── Publish final metrics before the agent disappears ──────────
+        # The heartbeat loop is already cancelled at this point, so this
+        # is the UI's last chance to capture cost/usage data.
+        try:
+            final_metrics = self._build_metrics()
+            final_metrics["final"] = True   # signals UI this is the last message
+            await self._mqtt_publish(
+                f"agents/{self.actor_id}/metrics", final_metrics,
+            )
+        except Exception:
+            pass
+
         await self._publish_status()
         # ── Unregister from TopicBus ───────────────────────────────────
         # Remove this agent's TopicContract so the planner doesn't wire
@@ -189,7 +218,6 @@ class Actor(ABC):
         except Exception:
             pass  # TopicBus not initialised or unavailable — not fatal
         logger.info(f"[{self.name}] Actor stopped.")
- 
 
     async def pause(self):
         self.state = ActorState.PAUSED
@@ -382,6 +410,7 @@ class Actor(ABC):
         - MQTT client (so it can publish heartbeats/status)
         - Registry (so it can send/receive messages)
         - Persistence dir defaults to same root
+        - Persistence API (SQLite/Redis/Pickle routing)
         """
         # Default persistence to same root as parent
         kwargs.setdefault("persistence_dir", str(self._persistence_dir.parent))
@@ -393,6 +422,18 @@ class Actor(ABC):
         child._mqtt_broker  = self._mqtt_broker   # broker address for command listener
         child._mqtt_port    = self._mqtt_port     # broker port
         child._registry     = self._registry      # message routing
+
+        # Inherit persistence API if available
+        if self._persistence_api is not None:
+            try:
+                from .persistence import PersistenceAPI, get_db, get_redis, get_pickle_store
+                db = get_db()
+                redis = get_redis()
+                pkl = get_pickle_store()
+                if db and redis and pkl:
+                    child._persistence_api = PersistenceAPI(db, redis, pkl, child.name)
+            except ImportError:
+                pass
 
         # Register in registry
         if self._registry:
@@ -423,6 +464,12 @@ class Actor(ABC):
     # ─── Persistence ──────────────────────────────────────────────────────────
 
     async def _save_persistent_state(self):
+        """Save state to disk. Called on stop() after on_stop()."""
+        if self._persistence_api is not None:
+            # New path: state is written per-key via persist(), nothing to batch-save.
+            # But keep pickle save for agent.state (arbitrary objects) backward compat.
+            return
+        # Legacy pickle path
         path = self._persistence_dir / "state.pkl"
         try:
             with open(path, "wb") as f:
@@ -431,6 +478,20 @@ class Actor(ABC):
             logger.error(f"[{self.name}] Failed to save state: {e}")
 
     async def _load_persistent_state(self):
+        """Load state from disk. Called on start() before on_start()."""
+        if self._persistence_api is not None:
+            # New path: state is loaded per-key via recall(), nothing to batch-load.
+            # But load legacy pickle for backward compat if it exists.
+            path = self._persistence_dir / "state.pkl"
+            if path.exists():
+                try:
+                    with open(path, "rb") as f:
+                        self._persistent_state = pickle.load(f)
+                    logger.info(f"[{self.name}] Loaded legacy persistent state (will migrate on first persist).")
+                except Exception as e:
+                    logger.error(f"[{self.name}] Failed to load legacy state: {e}")
+            return
+        # Legacy pickle path
         path = self._persistence_dir / "state.pkl"
         if path.exists():
             try:
@@ -441,24 +502,43 @@ class Actor(ABC):
                 logger.error(f"[{self.name}] Failed to load state: {e}")
 
     def persist(self, key: str, value: Any):
+        """
+        Persist a key-value pair. Routes to the correct backend:
+          - Known structured keys → SQLite
+          - Known ephemeral keys → Redis
+          - Everything else → Pickle
+
+        If the new PersistenceAPI is not available, falls back to legacy
+        pickle behavior (writes entire dict to disk on every call).
+        """
+        if self._persistence_api is not None:
+            self._persistence_api.set(key, value)
+            return
+
+        # Legacy pickle path — write to disk immediately
         self._persistent_state[key] = value
-        # Write to disk immediately so state survives Ctrl+C and crashes
         path = self._persistence_dir / "state.pkl"
         try:
             with open(path, "wb") as f:
                 pickle.dump(self._persistent_state, f)
         except Exception as e:
             logger.debug(f"[{self.name}] persist write failed: {e}")
-        # Save to disk immediately so state survives crashes and Ctrl+C
-        path = self._persistence_dir / "state.pkl"
-        try:
-            import pickle as _pickle
-            with open(path, "wb") as f:
-                _pickle.dump(self._persistent_state, f)
-        except Exception as e:
-            logger.debug(f"[{self.name}] persist write failed: {e}")
 
     def recall(self, key: str, default: Any = None) -> Any:
+        """
+        Recall a persisted value. Routes to the correct backend.
+        Returns default if the key doesn't exist.
+        """
+        if self._persistence_api is not None:
+            # Check new store first, then fall back to legacy in-memory dict
+            # (handles migration period where some keys are in pickle, some in new store)
+            result = self._persistence_api.get(key)
+            if result is not None:
+                return result
+            # Fallback: check legacy in-memory state (loaded from old .pkl)
+            return self._persistent_state.get(key, default)
+
+        # Legacy pickle path
         return self._persistent_state.get(key, default)
 
     # ─── MQTT ─────────────────────────────────────────────────────────────────
@@ -488,7 +568,6 @@ class Actor(ABC):
             "actor_id": self.actor_id,
             "name": self.name,
             "state": self.state.value,
-            "protected": self.protected,
             "uptime": self.metrics.uptime,
             "messages_processed": self.metrics.messages_processed,
             "restart_count": self.metrics.restart_count,

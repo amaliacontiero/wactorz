@@ -7,6 +7,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Version
 
 ## [Unreleased]
 
+### Fixed
+
+- **Ollama system prompts** — `OllamaProvider` now sends `system_prompt` as the first `role=system` chat message for both blocking and streaming `/api/chat` calls, instead of relying on an undocumented top-level `system` payload field.
+
+### Changed
+
+- **One-shot Home Assistant actuation timeouts** — intent classification now allows up to 60 seconds, while the ephemeral `OneOffActuatorAgent` resolver and main actuation wait allow up to 120 seconds for slower local models such as Ollama.
+
+### Tests
+
+- Added focused `OllamaProvider` payload tests covering non-streaming and streaming system-prompt delivery.
+
 ---
 
 

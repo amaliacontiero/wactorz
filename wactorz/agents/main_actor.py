@@ -910,7 +910,7 @@ class MainActor(LLMAgent):
             self._inject_user_facts_into_prompt()
             logger.info(f"[{self.name}] User facts updated: {list(new_facts.keys())}")
         except Exception as e:
-            logger.debug(f"[{self.name}] Facts extraction skipped: {e}")
+            logger.info(f"[{self.name}] Facts extraction skipped: {e}")
 
     async def delete_pipeline_rule(self, rule_id: str) -> str:
         """Stop all agents for a rule and remove it from registry."""
@@ -1039,11 +1039,14 @@ class MainActor(LLMAgent):
                     max_tokens=10,
                     reasoning_effort="none",
                 ),
-                timeout=5.0,
+                timeout=60.0,
             )
             token = (decision or "").strip().upper().split()[0] if decision else "OTHER"
             if token in ("HA", "PIPELINE", "OTHER", "ACTUATE"):
                 return token
+            return "OTHER"
+        except asyncio.TimeoutError:
+            logger.warning(f"[{self.name}] Intent classification timed out after 60s")
             return "OTHER"
         except Exception as e:
             logger.debug(f"[{self.name}] Intent classification failed: {e}")
@@ -1124,7 +1127,7 @@ class MainActor(LLMAgent):
                 reply_to_id=self.actor_id,
                 persistence_dir=str(self._persistence_dir.parent),
             )
-            result = await asyncio.wait_for(future, timeout=30.0)
+            result = await asyncio.wait_for(future, timeout=120.0)
             return result.get("result", "Done.")
         except asyncio.TimeoutError:
             return "Actuation timed out, please retry."
@@ -2163,11 +2166,28 @@ class MainActor(LLMAgent):
             packages = [p.strip() for p in packages.replace(",", " ").split()]
 
         if packages:
-            # Install and spawn in a background task so we don't block the user
-            logger.info(f"[{self.name}] Scheduling background install+spawn for '{name}': {packages}")
-            asyncio.create_task(self._install_then_spawn(config, name, code, packages))
-            # Return a placeholder so the caller knows spawn is in progress
-            return _SpawnPlaceholder(name)
+            # Fast-path: check which packages actually need installing.
+            # On restore (after restart), packages from the previous session
+            # are already installed — no need to wait for the installer agent
+            # which might not have started yet.
+            import importlib
+            needed = []
+            for pkg in packages:
+                import_name = pkg.replace("-", "_").split("[")[0]
+                try:
+                    importlib.import_module(import_name)
+                except ImportError:
+                    needed.append(pkg)
+
+            if needed:
+                # Some packages missing — install in background
+                logger.info(f"[{self.name}] Scheduling background install+spawn for '{name}': {needed}")
+                asyncio.create_task(self._install_then_spawn(config, name, code, needed))
+                return _SpawnPlaceholder(name)
+            else:
+                # All packages already available — spawn immediately
+                logger.info(f"[{self.name}] All deps for '{name}' already installed — spawning directly")
+                return await self._do_spawn_dynamic(config, name, code)
         else:
             return await self._do_spawn_dynamic(config, name, code)
 
@@ -2203,6 +2223,7 @@ class MainActor(LLMAgent):
             output_schema=config.get("output_schema", {}),
             llm_provider=self.llm,
             persistence_dir=str(self._persistence_dir.parent),
+            trusted=bool(config.get("trusted", False)),
         )
         
         # Register TopicContract if spawn config declares pub/sub topics

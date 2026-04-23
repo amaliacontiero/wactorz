@@ -40,6 +40,7 @@
 
     <!-- ── Favicon ──────────────────────────────────────────────────────────── -->
     <link rel="icon"             href="./favicon.svg" type="image/svg+xml" />
+    <link rel="icon"             href="./icon.ico" />
     <link rel="apple-touch-icon" href="./favicon.svg" />
     <link rel="manifest"         href="./site.webmanifest" />
     <style>
@@ -294,7 +295,41 @@
         font-size: 11px; font-style: italic;
         border: 1px solid rgba(255,220,80,0.12); border-radius: 8px;
       }
-      .af-chat-msg-time { font-size: 10px; color: rgba(255,255,255,0.3); }
+      .af-chat-msg-time { font-size: 10px; color: rgba(255,255,255,0.28); margin-left: auto; }
+      /* Agent message header row (avatar + name + time) */
+      .af-chat-msg-header {
+        display: flex; align-items: center; gap: 6px; margin-bottom: 3px;
+      }
+      .af-chat-msg-avatar {
+        width: 18px; height: 18px; border-radius: 50%;
+        object-fit: cover; flex-shrink: 0;
+        border: 1px solid rgba(255,255,255,0.1);
+        background: #0d1a38;
+      }
+      /* Body wrapper for bubble + hover copy btn */
+      .af-chat-msg-body { position: relative; }
+      .af-chat-msg-body:hover .af-chat-copy-btn { opacity: 1; }
+      .af-chat-copy-btn {
+        position: absolute; top: 6px; right: 7px;
+        background: rgba(10,15,35,0.88); border: 1px solid rgba(255,255,255,0.12);
+        border-radius: 5px; padding: 3px 5px;
+        color: rgba(255,255,255,0.4); cursor: pointer;
+        opacity: 0; transition: opacity 0.15s, color 0.15s; line-height: 1;
+      }
+      .af-chat-copy-btn:hover { color: rgba(255,255,255,0.9); }
+      /* Markdown block elements inside bubbles */
+      .af-chat-msg-bubble h1,
+      .af-chat-msg-bubble h2,
+      .af-chat-msg-bubble h3 {
+        font-weight: 600; margin: 6px 0 2px; color: #c8d8ff; line-height: 1.3;
+        white-space: normal;
+      }
+      .af-chat-msg-bubble h1 { font-size: 15px; }
+      .af-chat-msg-bubble h2 { font-size: 14px; }
+      .af-chat-msg-bubble h3 { font-size: 13px; }
+      .af-chat-msg-bubble ul,
+      .af-chat-msg-bubble ol { margin: 4px 0; padding-left: 18px; white-space: normal; }
+      .af-chat-msg-bubble li { margin: 1px 0; }
       .af-chat-msg-bubble code {
         background: rgba(0,0,0,0.3); padding: 1px 4px;
         border-radius: 3px; font-size: 11px; font-family: monospace;
@@ -934,7 +969,14 @@
         color: #7aabdf; border-color: rgba(122,171,223,0.4);
         background: rgba(122,171,223,0.1);
       }
-      .hud-sound-row { display: flex; gap: 4px; margin-top: 4px; }
+      .hud-sound-row { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
+      #btn-settings {
+        display: none; width: 100%; margin-top: 6px;
+        font-size: 11px; color: #6366f1; cursor: pointer;
+        background: rgba(99,102,241,.08); border: 1px solid rgba(99,102,241,.3);
+        border-radius: 6px; padding: 5px 8px; text-align: center; transition: all .15s;
+      }
+      #btn-settings:hover { background: rgba(99,102,241,.18); color: #a5b4fc; }
       .hud-sound-btn {
         flex: 1; font-size: 11px; color: #4a6fa8; cursor: pointer;
         padding: 3px 6px; border-radius: 6px; text-align: center;
@@ -1709,6 +1751,7 @@
         <button id="btn-beep" class="hud-sound-btn active" title="Toggle notification sound">🔔 Sound</button>
         <button id="btn-tts"  class="hud-sound-btn"       title="Toggle text-to-speech">🗣 TTS</button>
       </div>
+      <button id="btn-settings" title="App settings">⚙ Settings</button>
     </div>
 
     <!-- Theme switcher pill (hidden until multiple themes are re-enabled) -->

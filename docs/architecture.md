@@ -185,6 +185,8 @@ Discord channel
 
 All providers implement `complete(messages, system) → (text, usage)` and `stream(messages, system) → AsyncGenerator`. Cost tracking (USD per 1M tokens) is built into every provider and accumulated in `LLMAgent.metrics`.
 
+For Ollama, `system` is encoded as the first `{"role": "system"}` entry in the native `/api/chat` `messages` array for both blocking and streaming calls. This keeps local model behavior aligned with the hosted providers, which already receive system instructions through their chat-message APIs.
+
 ---
 
 ## Supervision Tree
@@ -231,7 +233,7 @@ wactorz --interface whatsapp
 wactorz --interface telegram --telegram-token $TELEGRAM_BOT_TOKEN
 
 # REST API
-wactorz --interface rest --port 8080
+wactorz --interface rest --port 8000
 
 # Custom MQTT broker (external)
 wactorz --mqtt-broker 192.168.1.10 --mqtt-port 1883
@@ -245,7 +247,8 @@ wactorz --no-monitor
 | Interface | Flag | Notes |
 |-----------|------|-------|
 | **CLI** | `--interface cli` | Default. Interactive terminal with streaming responses. |
-| **REST** | `--interface rest` | HTTP API on `--port` (default 8080). POST `/chat`, GET `/agents`. |
+| **REST** | `--interface rest` | HTTP API on `--port` (default 8000). POST `/chat`, GET `/agents`. |
+| **MCP** | separate `wactorz-mcp` process | Stdio Model Context Protocol server backed by Wactorz REST. |
 | **Discord** | `--interface discord` | Bot responds in channels and DMs. Requires `DISCORD_BOT_TOKEN`. |
 | **WhatsApp** | `--interface whatsapp` | Via Twilio. Requires `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_NUMBER`. |
 | **Telegram** | `--interface telegram` | Bot API. Requires `TELEGRAM_BOT_TOKEN`. |

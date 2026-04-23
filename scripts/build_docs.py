@@ -70,6 +70,7 @@ TEMPLATE = """\
   <title>{title} — Wactorz</title>
   <meta name="description" content="Wactorz — Actor-model multi-agent AI framework"/>
   <link rel="icon" href="https://waldiez.io/images/wactorz/favicon.svg" type="image/svg+xml" />
+  <link rel="icon" href="https://waldiez.github.io/media/images/wactorz/icon.ico" />
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet"/>
   <style>
@@ -279,13 +280,20 @@ def build(site_dir: Path = SITE) -> None:
     # Favicon placeholder (1x1 transparent ICO — avoids 404 noise in dev server)
     favicon = site_dir / "favicon.ico"
     if not favicon.exists():
-        # Minimal valid ICO file (1x1 transparent)
-        favicon.write_bytes(bytes([
-            0,0,1,0,1,0,1,1,0,0,1,0,1,0,48,0,0,0,22,0,0,0,
-            40,0,0,0,1,0,0,0,2,0,0,0,1,0,1,0,0,0,0,0,8,0,0,0,
-            0,0,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,
-            0,0,0,0,0,0,0,0,
-        ]))
+        frontend_dir = ROOT / "frontend"
+        front_icon = frontend_dir / "public" / "icon.ico"
+        if not front_icon.exists:
+            front_icon = frontend_dir / "public" / "favicon.ico"
+        if not front_icon.exists:
+            # Minimal valid ICO file (1x1 transparent)
+            favicon.write_bytes(bytes([
+                0,0,1,0,1,0,1,1,0,0,1,0,1,0,48,0,0,0,22,0,0,0,
+                40,0,0,0,1,0,0,0,2,0,0,0,1,0,1,0,0,0,0,0,8,0,0,0,
+                0,0,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,
+                0,0,0,0,0,0,0,0,
+            ]))
+        else:
+            shutil.copy(front_icon, favicon)
 
     # Copy landing page
     landing = DOCS / "_landing.html"
