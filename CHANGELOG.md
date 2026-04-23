@@ -7,17 +7,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Version
 
 ## [Unreleased]
 
+### Added
+
+- **Home Assistant addon** — full HA Supervisor addon (`ha-addon/`) supporting HAOS and Supervised installs. Configurable LLM provider, MQTT, HA token, Fuseki, Discord/Telegram integrations. Optional embedded Mosquitto (`mosquitto_embedded`) and Fuseki (`fuseki_embedded`) services bundle broker and triplestore inside the addon container — no external addons required. Data persisted to `/share/mosquitto` and `/share/fuseki`. Ingress-compatible with relative asset paths and `X-Ingress-Path` header support.
+- **MCP server** — `wactorz/mcp_server.py` exposes the actor system as an MCP (Model Context Protocol) server. Tools: `send_message`, `list_actors`, `get_actor_status`, `spawn_agent`, `stop_agent`. Resources: `wactorz://actors`, `wactorz://topics`. Configurable via `WACTORZ_MCP_*` env vars. Documented in `docs/interfaces.md`.
+- **Unified persistence layer** — `wactorz/core/persistence.py` introduces a 3-tier architecture replacing pickle-only storage: SQLite (`state/wactorz.db`) for durable structured data (spawn registry, pipeline rules, user facts, topic contracts, time-series), Redis for ephemeral fast-access data (falls back to in-memory), and Pickle for arbitrary Python objects (agent state dicts, ML models). `PersistenceAPI` provides backward-compatible `persist()`/`recall()` with automatic key-based routing. `migrate_from_pickle()` runs once on first startup to migrate existing state.
+- **Time-series SQLite tables** — `sensor_readings`, `detections`, `ha_state_changes`, and `actuations` tables with full-text and time-range query helpers (`query_sensor`, `query_detections`, `query_ha_states`, `query_actuations`). Automatic retention pruning via `prune_old_data(days=30)`.
+- **Fuseki Channel ontology and MetricsBridge** — `infra/fuseki/ontology/wactorz.ttl` extended with `af:Channel` class (`channelTopic`, `declaredSchema`, `observedSchema`, `triggersWhen`) and agent metrics properties. `FusekiClient.replace_agent_channels()` persists pub/sub topology to `urn:wactorz:channels`. `MetricsBridge` subscribes to `agents/+/metrics` MQTT and continuously updates agent metrics in the RDF graph via `upsert_agent_metrics()`.
+- **Activity feed cap** — UI activity feed is capped at 500 entries; an overflow banner appears when the limit is reached.
+- **Cost metrics persistence and final publish** — LLM cost and token metrics are persisted across restarts and published in the final heartbeat on actor stop.
+
 ### Fixed
 
 - **Ollama system prompts** — `OllamaProvider` now sends `system_prompt` as the first `role=system` chat message for both blocking and streaming `/api/chat` calls, instead of relying on an undocumented top-level `system` payload field.
+- **HA addon ingress** — corrected `X-Ingress-Path` header name; relative paths used for favicon and manifest so the base tag resolves correctly behind the HA proxy; SPARQL proxy URLs now prepend the ingress path.
+- **HA addon embedded Fuseki startup** — `shiro.ini` is regenerated on every boot so credential changes apply immediately; correct dataset config and readiness wait added.
+- **HA addon Docker layer cache** — `BUILD_VERSION` arg now busts the Docker cache on version bumps; deprecated `build.yaml` removed; base image fixed to `ghcr.io/home-assistant/aarch64-base-python:3.12-alpine3.20`.
+- **Catalog agent persistence** — fixed catalog agent spawning and persistence after the persistence layer migration.
+- **HA map agent `CancelledError`** — handled `asyncio.CancelledError` in `HomeAssistantMapAgent` to prevent noisy tracebacks on shutdown.
+- **Resource cleanup on stop** — `Actor.on_stop()` now cancels background tasks and cleans up open resources more reliably.
+- **Frontend URL resolution** — unified backend URL resolution across Tauri desktop, HA addon, and plain browser: checks `window.__WACTORZ_API_PORT`, then `window.__WACTORZ_API_BASE`, then falls back to `window.location`.
+- **CI: Linux system deps** — added missing Linux system dependencies to the Rust test job.
 
 ### Changed
 
 - **One-shot Home Assistant actuation timeouts** — intent classification now allows up to 60 seconds, while the ephemeral `OneOffActuatorAgent` resolver and main actuation wait allow up to 120 seconds for slower local models such as Ollama.
+- **Versioning** — `fbc0ccd` improved version handling; `wactorz/_version.py` remains the single source of truth.
 
 ### Tests
 
 - Added focused `OllamaProvider` payload tests covering non-streaming and streaming system-prompt delivery.
+- Added MCP server contract tests (`tests/test_mcp_server.py`); contract tests skip gracefully when optional MCP dependency is absent.
 
 ---
 
