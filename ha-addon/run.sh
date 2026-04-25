@@ -94,7 +94,6 @@ fi
 # ── Embedded Mosquitto ────────────────────────────────────────────────────────
 if [ "$MOSQUITTO_EMBEDDED" = "true" ]; then
     bashio::log.info "Starting embedded Mosquitto MQTT broker..."
-    mkdir -p /share/mosquitto
 
     cat > /tmp/mosquitto.conf << 'MQTTEOF'
 # TCP listener
@@ -106,8 +105,7 @@ listener 8083
 protocol websockets
 allow_anonymous true
 
-persistence true
-persistence_location /share/mosquitto/
+persistence false
 MQTTEOF
 
     mosquitto -c /tmp/mosquitto.conf &
