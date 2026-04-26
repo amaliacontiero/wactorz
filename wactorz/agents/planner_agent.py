@@ -26,6 +26,12 @@ from typing import Optional
 from ..core.actor import Actor, Message, MessageType
 from .llm_agent import LLMProvider
 
+try:
+    from .sparql_context import build_sparql_context as _build_sparql_context
+    _SPARQL_AVAILABLE = True
+except ImportError:
+    _SPARQL_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 _SKIP_AGENTS    = {"main", "monitor", "installer", "home-assistant-agent", "home-assistant-hardware", "home-assistant-automation", "anomaly-detector", "code-agent"}
@@ -56,6 +62,17 @@ class PlannerAgent(Actor):
         self._auto_terminate  = auto_terminate
         self._result_futures: dict[str, asyncio.Future] = {}
         self._spawned_by_planner: list[str] = []   # agents we created this run
+
+        # Fuseki endpoint for SPARQL world-model enrichment (optional)
+        try:
+            from ..config import CONFIG
+            self._fuseki_url: str = (
+                getattr(CONFIG, "fuseki_url", None)
+                or getattr(CONFIG, "fuseki_endpoint", None)
+                or "http://localhost:3030/wactorz/sparql"
+            )
+        except Exception:
+            self._fuseki_url = "http://localhost:3030/wactorz/sparql"
 
     def _current_task_description(self) -> str:
         return self._task[:60] if self._task else "waiting for task"
@@ -892,6 +909,18 @@ class PlannerAgent(Actor):
                 logger.warning(f"[{self.name}] Feasibility check error (continuing): {e}")
 
         # ── 3. Decompose into spawn configs ────────────────────────────────
+        # SPARQL enrichment: fetch durable channel schemas + relevant HA state
+        _sparql_pipeline_ctx = ""
+        if _SPARQL_AVAILABLE:
+            try:
+                _sparql_pipeline_ctx = await _build_sparql_context(
+                    task=task,
+                    fuseki_url=self._fuseki_url,
+                    timeout=3.0,
+                )
+            except Exception as _e:
+                logger.debug(f"[{self.name}] SPARQL pipeline context skipped: {_e}")
+
         # Build the prompt as a list of parts to avoid f-string escape issues
         prompt_parts = [
             "You are designing reactive automation pipelines for a multi-agent IoT system.",
@@ -928,10 +957,31 @@ class PlannerAgent(Actor):
             "",
             'TYPE 2 — "dynamic"',
             "  Purpose: any logic that needs code — state filtering, webcam, timers, HTTP webhooks, Discord, etc.",
-            "  Define these async functions (all optional except at least one must exist):",
-            "    async def setup(agent)   — runs once on start, good for subscriptions and init",
-            "    async def process(agent) — runs in a loop every poll_interval seconds",
-            "  Available APIs (ONLY these — no other agent methods exist):",
+            "  Two hooks available — pick the RIGHT ONE for the job:",
+            "    async def setup(agent)   — runs ONCE on start. For ALL subscribe-based agents.",
+            "                               Call agent.subscribe() here, then RETURN immediately.",
+            "                               The callbacks run as background tasks forever.",
+            "    async def process(agent) — called by the runner every poll_interval seconds.",
+            "                               For POLLING only (HTTP APIs, retained MQTT, timers).",
+            "                               Do work, publish result, then RETURN. That is all.",
+            "  CRITICAL — WHICH HOOK TO USE:",
+            "    Agent reacts to MQTT messages?  use setup() + agent.subscribe(). Logic in callback. Omit process().",
+            "    Agent polls an API or retained topic?  use process(). Do work, publish, RETURN. No loops, no sleep.",
+            "  CRITICAL WRONG PATTERN — causes 120s timeout crash every 2 minutes:",
+            "    async def process(agent):",
+            "        while True:                          # NEVER loop in process()",
+            "            data = await agent.mqtt_get(...) # NEVER mqtt_get in a loop",
+            "            await asyncio.sleep(30)          # NEVER sleep in process()",
+            "  CORRECT subscribe-based pattern (no timeout, no restart):",
+            "    async def setup(agent):",
+            "        async def on_msg(payload):",
+            "            await agent.publish('out/topic', payload)",
+            "        agent.subscribe('sensors/temp', on_msg)  # returns immediately",
+            "  CORRECT polling pattern (process returns after each check):",
+            "    async def process(agent):",
+            "        import random",
+            "        await agent.publish('out/topic', {'val': random.random()})",
+            "        # ends here — runner waits poll_interval then calls again",
             '    await agent.log("message")                        — structured log (ASYNC, must await)',
             '    await agent.publish("topic", {dict})              — publish to MQTT (ASYNC, must await)',
             '    await agent.alert("message")                      — trigger alert (ASYNC, must await)',
@@ -947,6 +997,8 @@ class PlannerAgent(Actor):
             '    agent.state["key"]                                — in-memory dict (cleared on restart)',
             "  CRITICAL RULES FOR DYNAMIC AGENT CODE:",
             "    NEVER use await on agent.subscribe(), agent.window(), agent.persist(), agent.recall(), agent.declare_contract()",
+            "    NEVER put a while loop or asyncio.sleep() inside process()",
+            "    NEVER call await agent.mqtt_get() in a loop inside process()",
             "    NEVER import or use aiomqtt directly — use agent.subscribe() instead",
             "    NEVER hardcode MQTT broker hostnames or ports — agent.subscribe() handles this automatically",
             "    NEVER use asyncio.create_task() for MQTT — agent.subscribe() already creates the background task",
@@ -1059,6 +1111,18 @@ class PlannerAgent(Actor):
             "═══ GENERAL RULES ═══",
             "",
             "╔══════════════════════════════════════════════════════════════════╗",
+            "║  CRITICAL — CONTINUOUS AGENT PIPELINES                          ║",
+            "║  When ALL agents in the plan are continuous (have process() or  ║",
+            "║  agent.subscribe()), do NOT add a final step that delegates to  ║",
+            "║  @main or any other agent for reporting.                        ║",
+            "║  Spawning the agent IS the complete action. The system will     ║",
+            "║  confirm success automatically — no report step is needed.      ║",
+            "║                                                                 ║",
+            "║  WRONG: [...spawn agent..., {\"agent\": \"main\", \"task\": \"report\"}] ║",
+            "║  CORRECT: [...spawn agent...]   ← stop here                    ║",
+            "╚══════════════════════════════════════════════════════════════════╝",
+            "",
+            "╔══════════════════════════════════════════════════════════════════╗",
             "║  CRITICAL — HOME ASSISTANT ACTIONS                              ║",
             "║  NEVER call HA REST API directly from dynamic agent code!       ║",
             "║  NEVER use httpx/requests to POST to /api/services/*.           ║",
@@ -1115,6 +1179,13 @@ class PlannerAgent(Actor):
                     "",
                 ]
                 if topic_samples_section else []
+            ),
+            *(  # SPARQL: durable channel schemas + relevant HA states from Fuseki
+                (lambda ctx: [
+                    "═══ FUSEKI KNOWLEDGE GRAPH (durable schemas + HA state) ═══",
+                    ctx,
+                    "",
+                ] if ctx else [])(_sparql_pipeline_ctx)
             ),
             "═══ HOME ASSISTANT ENTITIES ═══",
             ha_section,
@@ -1431,12 +1502,24 @@ class PlannerAgent(Actor):
         except Exception:
             pass
 
+        # ── SPARQL world-model enrichment (durable channel schemas + HA state) ──
+        sparql_ctx = ""
+        if _SPARQL_AVAILABLE:
+            try:
+                sparql_ctx = await _build_sparql_context(
+                    task=task,
+                    fuseki_url=self._fuseki_url,
+                    timeout=3.0,
+                )
+            except Exception as _e:
+                logger.debug(f"[{self.name}] SPARQL context skipped: {_e}")
+
         prompt = f"""You are a task planner for a multi-agent system.
 Break the task into steps. Each step is handled by one agent.
 
 AVAILABLE AGENTS (with input/output contracts):
 {workers_desc}
-{topic_schema_ctx}
+{topic_schema_ctx}{sparql_ctx}
 TASK: {task}
 
 OUTPUT RULES:
@@ -1476,6 +1559,22 @@ OUTPUT RULES:
 
     NEVER use agent.logger — it does not exist. Use await agent.log(msg) instead.
 
+    CRITICAL — process() must return after each iteration:
+      The framework calls process() repeatedly every poll_interval seconds.
+      NEVER put a while loop or asyncio.sleep() inside process() — it causes a 120s timeout.
+      NEVER call await agent.mqtt_get() in a loop inside process().
+      WRONG:  async def process(agent):
+                  while True:
+                      await agent.publish(...)
+                      await asyncio.sleep(5)   ← NEVER — this blocks and times out
+      CORRECT: async def process(agent):
+                   await agent.publish(...)    ← do the work and return
+
+    CRITICAL — setup() vs process() — pick the right one:
+      Reacts to MQTT messages → use setup() + agent.subscribe(). Omit process() entirely.
+      Polls an API or retained topic → use process(). Return after each check.
+      NEVER use process() to read from MQTT. Use agent.subscribe() in setup() instead.
+
     CRITICAL — HOME ASSISTANT ACTIONS:
       NEVER call HA REST API directly from dynamic agent code (no httpx/requests to /api/services/).
       For ANY HA device action (turn on/off lights, switches, climate, etc.):
@@ -1506,7 +1605,7 @@ OUTPUT RULES:
     "input_schema":  {{"city": "str — city name to fetch weather for"}},
     "output_schema": {{"city": "str", "temp_c": "str", "description": "str"}},
     "poll_interval": 3600,
-    "code": "async def setup(agent):\n    await agent.log('ready')\nasync def process(agent):\n    import asyncio\n    await asyncio.sleep(3600)\nasync def handle_task(agent, payload):\n    import httpx\n    city = payload.get('city', 'Athens')\n    async with httpx.AsyncClient(timeout=10) as c:\n        r = await c.get(f'https://wttr.in/{{city}}?format=j1')\n        d = r.json()\n    cur = d['current_condition'][0]\n    return {{'city': city, 'temp_c': cur['temp_C'], 'description': cur['weatherDesc'][0]['value']}}"
+    "code": "async def setup(agent):\n    await agent.log('ready')\nasync def process(agent):\n    pass  # this agent only responds to tasks, no periodic work needed\nasync def handle_task(agent, payload):\n    import httpx\n    city = payload.get('city', 'Athens')\n    async with httpx.AsyncClient(timeout=10) as c:\n        r = await c.get(f'https://wttr.in/{{city}}?format=j1')\n        d = r.json()\n    cur = d['current_condition'][0]\n    return {{'city': city, 'temp_c': cur['temp_C'], 'description': cur['weatherDesc'][0]['value']}}"
   }}
 - The FINAL synthesis step should ALWAYS be assigned to "main" (not any other agent).
   Main will combine results using its LLM. Never assign synthesis to a domain agent.
@@ -1819,10 +1918,16 @@ Example:
     async def _synthesize(self, task: str, plan: list[dict], results: dict) -> str:
         # If every step was a spawn-only continuous agent, skip LLM synthesis
         # and return a clean confirmation — no need to "summarize" spawns.
-        all_spawned = all(
+        # Filter out any spurious @main report steps the LLM may have added.
+        meaningful_steps = [
+            s for s in plan
+            if s.get("agent") not in ("main", self.name)
+            or results.get(s["step"], {}).get("spawned")
+        ]
+        all_spawned = bool(meaningful_steps) and all(
             isinstance(results.get(s["step"]), dict)
             and results[s["step"]].get("spawned")
-            for s in plan
+            for s in meaningful_steps
         )
         if all_spawned:
             agents = [s["agent"] for s in plan]

@@ -709,7 +709,9 @@ INSERT {{
   }}
 }}
 WHERE {{
+  GRAPH <{graph}> {{
 {optional_block}
+  }}
 }}
 """
         await self.sparql_update(query)

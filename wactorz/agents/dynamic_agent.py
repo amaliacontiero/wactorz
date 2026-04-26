@@ -415,6 +415,20 @@ class DynamicAgent(Actor):
         (r'\bwhile\s+True\s*:(?!.*await)',  "tight while-True loop without await — may block event loop"),
     ]
 
+    # Patterns checked specifically inside process() body — cause 120s timeout crashes
+    _PROCESS_ANTIPATTERNS = [
+        (r'asyncio\.sleep\s*\(',
+         "asyncio.sleep() inside process() — NEVER sleep in process(). "
+         "The framework loops process() every poll_interval seconds. "
+         "Move MQTT-reactive logic to setup() + agent.subscribe() instead."),
+        (r'await\s+agent\.mqtt_get\s*\(',
+         "await agent.mqtt_get() inside process() — this blocks until a message arrives. "
+         "Use agent.subscribe() in setup() for reactive MQTT logic instead."),
+        (r'while\s+True\s*:',
+         "while True loop inside process() — process() must return after each iteration. "
+         "The framework already loops it. Remove the while loop."),
+    ]
+
     def _validate_code_safety(self, code: str) -> Optional[str]:
         """
         Scan sanitized code for dangerous patterns before exec().
@@ -433,7 +447,46 @@ class DynamicAgent(Actor):
             if re.search(pattern, code):
                 logger.warning(f"[{self.name}] Safety warning: {reason}")
 
-        return None  # OK
+        # ── Detect anti-patterns specifically inside process() ─────────────
+        process_body = self._extract_function_body(code, "process")
+        if process_body:
+            for pattern, reason in self._PROCESS_ANTIPATTERNS:
+                if re.search(pattern, process_body):
+                    logger.warning(
+                        f"[{self.name}] process() anti-pattern detected — "
+                        f"this will cause 120s timeout crashes: {reason}"
+                    )
+
+        return None  # OK — warnings never block execution
+
+    @staticmethod
+    def _extract_function_body(code: str, fn_name: str) -> Optional[str]:
+        """
+        Extract the body of a top-level function by name from source code.
+        Simple indentation-based parser — good enough for LLM-generated code.
+        """
+        import re
+        lines = code.splitlines()
+        in_fn = False
+        body_lines = []
+        fn_indent = 0
+
+        for line in lines:
+            stripped = line.strip()
+            if not in_fn:
+                if re.match(rf"^(async\s+)?def\s+{fn_name}\s*\(", stripped):
+                    in_fn = True
+                    fn_indent = len(line) - len(line.lstrip())
+                continue
+            if not stripped:
+                body_lines.append(line)
+                continue
+            line_indent = len(line) - len(line.lstrip())
+            if line_indent <= fn_indent and stripped:
+                break
+            body_lines.append(line)
+
+        return "\n".join(body_lines) if body_lines else None
 
     def _compile_code(self, code: Optional[str] = None) -> Optional[str]:
         """
