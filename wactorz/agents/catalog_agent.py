@@ -118,9 +118,9 @@ def _build_catalog() -> dict:
         }
 
     # ── ha-actuator-agent ─────────────────────────────────────────────────────
-    code = _load_recipe("ha_actuator_agent.py")
+    code = _load_recipe("home_assistant_actuator_agent.py")
     if code:
-        catalog["ha-actuator-agent"] = {
+        catalog["homeassistant-actuator-agent"] = {
             "name":         "ha-actuator-agent",
             "type":         "dynamic",
             "description":  "Subscribes to an MQTT topic and calls a Home Assistant service when triggered.",

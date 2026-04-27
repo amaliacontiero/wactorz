@@ -30,8 +30,3 @@ except ImportError:
 #    __all__ += ["MLAgent", "YOLOAgent", "AnomalyDetectorAgent"]
 #except ImportError:
 #    pass
-try:
-    from .agents.home_assistant_hardware_agent import HomeAssistantHardwareAgent
-    __all__ += ["HomeAssistantHardwareAgent"]
-except ImportError:
-    pass
