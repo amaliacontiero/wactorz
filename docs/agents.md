@@ -487,7 +487,7 @@ Recipes live in `catalogue_agents/` as plain Python files exporting an `AGENT_CO
 | Recipe name | File | Description | Deps |
 |-------------|------|-------------|------|
 | `discord-notify-agent` | `discord_notify_agent.py` | Subscribes to any MQTT topic and posts a message to a Discord webhook when a triggering event arrives. Configurable cooldown, trigger key/value filter, and message template. | `aiohttp`, `aiomqtt` |
-| `ha-actuator-agent` | `ha_actuator_agent.py` | Subscribes to an MQTT topic and calls a Home Assistant service when a detection filter matches the payload. Used as the action side of HA pipelines. | `aiomqtt` |
+| `homeassistant-actuator-agent` | `home_assistant_actuator_agent.py` | Subscribes to an MQTT topic and calls a Home Assistant service when a detection filter matches the payload. Used as the action side of HA pipelines. | `aiomqtt` |
 | `image-gen-agent` | `image_gen_agent.py` | Generates images from text prompts using NVIDIA NIM FLUX.1-dev. Returns the absolute path to the saved PNG. | `requests` |
 | `doc-to-pptx-agent` | `doc_to_pptx_agent.py` | Converts PDF or TXT documents into PowerPoint presentations. Extracts embedded images from PDF; optionally uses NIM FLUX for slides without images. | `pymupdf`, `pdfplumber`, `pillow` |
 | `sinergym-collector` | `sinergym_collector_agent.py` | Collects Sinergym episode data via MQTT for RL/Bayesian training. Listens on `sinergym/env/{env_id}/observation`, buffers transitions per-episode, persists episode blobs, and signals the optimizer on collection complete. | `aiomqtt`, `numpy` |
