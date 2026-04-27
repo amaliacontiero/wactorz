@@ -39,6 +39,13 @@ export LLM_MODEL=$(get_config_safe 'llm_model' 'claude-sonnet-4-6')
 export LLM_API_KEY=$(get_config_safe 'llm_api_key' '')
 export OLLAMA_URL=$(get_config_safe 'ollama_url' 'http://localhost:11434')
 
+# Map generic LLM_API_KEY to provider-specific env vars expected by the Python app
+case "$LLM_PROVIDER" in
+    nim)    export NIM_API_KEY="$LLM_API_KEY" ;;
+    openai) export OPENAI_API_KEY="$LLM_API_KEY" ;;
+    anthropic) export ANTHROPIC_API_KEY="$LLM_API_KEY" ;;
+esac
+
 # MQTT Config (CRITICAL: ensure never empty)
 export MQTT_HOST=$(get_config_safe 'mqtt_host' 'core-mosquitto')
 export MQTT_PORT=$(get_config_safe 'mqtt_port' '1883')
