@@ -49,7 +49,7 @@ async def build_system(args):
     elif args.llm == "nim":
         provider = NIMProvider(
             model=args.nim_model,
-            api_key=os.getenv("NIM_API_KEY") or os.getenv("NVIDIA_API_KEY"),
+            api_key=os.getenv("NIM_API_KEY") or os.getenv("NVIDIA_API_KEY") or os.getenv("LLM_API_KEY"),
         )
     else:
         provider = None

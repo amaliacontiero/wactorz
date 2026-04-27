@@ -196,7 +196,7 @@ async def build_system(args: argparse.Namespace):
         nim_model = args.nim_model or CONFIG.llm_model
         provider = NIMProvider(
             model=nim_model,
-            api_key=CONFIG.nim_api_key or CONFIG.nvidia_api_key,
+            api_key=CONFIG.nim_api_key or CONFIG.nvidia_api_key or CONFIG.llm_api_key,
         )
     elif llm == "gemini":
         gemini_model = args.gemini_model or CONFIG.llm_model or "gemini-2.5-flash"
