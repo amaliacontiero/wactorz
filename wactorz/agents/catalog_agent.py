@@ -13,9 +13,9 @@ This means:
 
 USAGE (from CLI or any agent):
   @catalog spawn image-gen-agent
-  @catalog spawn doc-to-pptx-agent
+  @catalog spawn sinergym-collector
   @catalog list
-  @catalog info image-gen-agent
+  @catalog info sinergym-optimizer
 
 Or via main (natural language):
   "spawn the image generation agent"   → main finds catalog → catalog spawns it
@@ -34,8 +34,6 @@ logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # RECIPE IMPORTS
-# Load AGENT_CODE strings from demo_agent files.
-# If a file is missing the recipe is simply excluded — no crash.
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _load_recipe(filename: str) -> Optional[str]:
@@ -56,8 +54,6 @@ def _load_recipe(filename: str) -> Optional[str]:
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CATALOG
-# Each entry is a full spawn config dict — exactly what main._handle_spawn()
-# expects, minus the "code" field which is injected at load time from the file.
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _build_catalog() -> dict:
@@ -121,12 +117,135 @@ def _build_catalog() -> dict:
             "code":          code,
         }
 
+    # ── ha-actuator-agent ─────────────────────────────────────────────────────
+    code = _load_recipe("home_assistant_actuator_agent.py")
+    if code:
+        catalog["homeassistant-actuator-agent"] = {
+            "name":         "ha-actuator-agent",
+            "type":         "dynamic",
+            "description":  "Subscribes to an MQTT topic and calls a Home Assistant service when triggered.",
+            "capabilities": ["home_automation", "ha_actuator", "mqtt_subscriber"],
+            "install":      ["aiomqtt"],
+            "input_schema": {
+                "mqtt_topic":  "str  — topic to subscribe to",
+                "ha_domain":   "str  — HA domain, e.g. light",
+                "ha_service":  "str  — HA service, e.g. turn_on",
+                "entity_id":   "str  — HA entity ID",
+            },
+            "output_schema": {"actuations": "int"},
+            "poll_interval": 3600,
+            "code":          code,
+        }
+
+    # ── discord-notify-agent ──────────────────────────────────────────────────
+    code = _load_recipe("discord_notify_agent.py")
+    if code:
+        catalog["discord-notify-agent"] = {
+            "name":         "discord-notify-agent",
+            "type":         "dynamic",
+            "description":  "Subscribes to MQTT events and posts notifications to a Discord webhook.",
+            "capabilities": ["discord", "notifications", "mqtt_subscriber", "webhook", "alerting"],
+            "install":      ["aiohttp", "aiomqtt"],
+            "input_schema": {
+                "mqtt_topic":    "str — MQTT topic to subscribe to",
+                "message_tpl":   "str — message template, use {data} for payload",
+                "trigger_key":   "str — optional: only trigger when this key exists",
+                "trigger_value": "str — optional: only trigger when trigger_key equals this",
+                "cooldown_s":    "int — seconds between notifications, default 10",
+                "webhook_url":   "str — Discord webhook URL (overrides persisted value)",
+            },
+            "output_schema": {"sent": "int — number of notifications sent"},
+            "poll_interval": 3600,
+            "code":          code,
+        }
+
+    # ── sinergym-collector ────────────────────────────────────────────────────
+    code = _load_recipe("sinergym_collector_agent.py")
+    if code:
+        catalog["sinergym-collector"] = {
+            "name":         "sinergym-collector",
+            "type":         "dynamic",
+            "description":  "Collects Sinergym episode data via MQTT for RL/Bayesian training. Listens on sinergym/env/{env_id}/observation and persists (obs, action, reward) tuples.",
+            "capabilities": ["sinergym", "data_collection", "rl_training", "energy_optimization", "building_simulation"],
+            "install":      ["aiomqtt", "numpy"],
+            "input_schema": {
+                "env_id":          "str  — Sinergym env ID, e.g. Eplus-5zone-hot-continuous-v1",
+                "obs_topic":       "str  — MQTT topic for observations",
+                "target_episodes": "int  — episodes to collect before triggering optimizer, default 10",
+                "chunk_size":      "int  — persist every N episodes, default 5",
+                "optimizer_name":  "str  — optimizer agent to notify on completion, default sinergym-optimizer",
+            },
+            "output_schema": {
+                "episodes_collected": "int",
+                "total_steps":        "int",
+                "data_key":           "str — episode_{N} recall keys",
+            },
+            "poll_interval": 3600,
+            "code":          code,
+        }
+        logger.info("[catalog] Loaded sinergym-collector recipe")
+
+    # ── sinergym-optimizer ────────────────────────────────────────────────────
+    code = _load_recipe("sinergym_optimizer_agent.py")
+    if code:
+        catalog["sinergym-optimizer"] = {
+            "name":         "sinergym-optimizer",
+            "type":         "dynamic",
+            "description":  "Energy optimization agent for Sinergym: trains RL (PPO) or Bayesian (GP) policy from collected episodes, then publishes actions to sinergym/env/{env_id}/action.",
+            "capabilities": ["sinergym", "rl", "bayesian_optimization", "energy_optimization", "policy_training", "building_control"],
+            "install":      ["stable-baselines3", "scikit-learn", "numpy", "torch", "aiomqtt", "gymnasium"],
+            "input_schema": {
+                "env_id":          "str  — Sinergym env ID, e.g. Eplus-5zone-hot-continuous-v1",
+                "strategy":        "str  — rl | bayesian | rulebased | combined, default rl",
+                "collector_name":  "str  — collector agent name, default sinergym-collector",
+                "obs_dim":         "int  — observation vector length, default 35",
+                "action_dim":      "int  — action vector length, default 2",
+                "training_steps":  "int  — RL training timesteps, default 50000",
+                "deploy_on_train": "bool — start publishing actions after training, default true",
+            },
+            "output_schema": {
+                "mean_reward": "float",
+                "strategy":    "str",
+                "phase":       "str — idle | training | deploying",
+            },
+            "poll_interval": 3600,
+            "code":          code,
+        }
+        logger.info("[catalog] Loaded sinergym-optimizer recipe")
+
     # ── ADD NEW RECIPES HERE ──────────────────────────────────────────────────
-    # Pattern:
-    #   code = _load_recipe("my_new_agent.py")
-    #   if code:
-    #       catalog["my-new-agent"] = { ...spawn config..., "code": code }
+    # code = _load_recipe("my_new_agent.py")
+    # if code:
+    #     catalog["my-new-agent"] = { ...spawn config..., "code": code }
     # ─────────────────────────────────────────────────────────────────────────
+
+    # ── anomaly-detector ───────────────────────────────────────────────────
+    code = _load_recipe("anomaly_detector_agent.py")
+    if code:
+        catalog["anomaly-detector"] = {
+            "name":         "anomaly-detector",
+            "type":         "dynamic",
+            "description":  "Learns normal patterns from time-series data (HA sensors + Sinergym), detects anomalies in real-time. Statistical, range, rate-of-change, and absence detection.",
+            "capabilities": ["anomaly_detection", "time_series", "monitoring", "building_analytics",
+                             "sinergym", "energy_monitoring", "comfort_monitoring", "ml"],
+            "install":      ["aiomqtt", "numpy"],
+            "input_schema": {
+                "action":                "str  — status|report|train|reset|configure|baselines|entities",
+                "baseline_hours":        "int  — hours of history for baseline (default: 720 = 30 days)",
+                "learning_period_hours": "int  — min hours before detection starts (default: 168 = 1 week)",
+                "sensitivity":           "float — 0-1, lower=more sensitive (default: 0.3)",
+                "entities":              "list  — entity IDs to monitor (default: auto-discover)",
+            },
+            "output_schema": {
+                "anomalies_detected":  "int",
+                "baselines_ready":     "int",
+                "detection_active":    "bool",
+                "last_anomaly":        "dict|null",
+            },
+            "poll_interval": 60,
+            "code":          code,
+        }
+        logger.info("[catalog] Loaded anomaly-detector recipe")
 
     return catalog
 
@@ -159,7 +278,6 @@ class CatalogAgent(Actor):
              "timestamp": time.time()},
         )
 
-        # Publish one manifest for the catalog agent itself
         await self.publish_manifest(
             description=(
                 "Pre-built agent recipe library. "
@@ -173,11 +291,7 @@ class CatalogAgent(Actor):
                            "agents": "list", "recipe": "dict"},
         )
 
-        # Inject recipe manifests directly into main's _agent_manifests dict.
-        # Retry briefly since catalog and main start concurrently.
-        import time as _t
-
-        # Wait for main to be ready (up to 10s)
+        # Inject recipe manifests directly into main's _agent_manifests dict
         main = None
         for _ in range(20):
             main = self._registry.find_by_name("main") if self._registry else None
@@ -196,7 +310,7 @@ class CatalogAgent(Actor):
                 "publishes":     [],
                 "spawnable":     True,
                 "catalog":       self.name,
-                "timestamp":     _t.time(),
+                "timestamp":     time.time(),
             }
 
             if main and hasattr(main, "_agent_manifests"):
@@ -217,7 +331,6 @@ class CatalogAgent(Actor):
         payload = msg.payload if msg.payload is not None else {}
         result  = await self._handle(payload)
 
-        # Echo task_id so caller futures resolve
         task_id = payload.get("task") or payload.get("_task_id") if isinstance(payload, dict) else None
         if task_id:
             result["task"]     = task_id
@@ -228,13 +341,6 @@ class CatalogAgent(Actor):
             await self.send(target, MessageType.RESULT, result)
 
     async def _handle(self, payload) -> dict:
-        # Normalise to text first, then parse.
-        # Payloads arrive in three forms:
-        #   "spawn doc-to-pptx-agent"           ← raw string
-        #   {"text": "spawn doc-to-pptx-agent"} ← delegate_task() wrapping
-        #   {"action": "spawn", "agent": "..."}  ← structured dict
-
-        # ── Structured dict with explicit action key ───────────────────────
         if isinstance(payload, dict) and payload.get("action"):
             action = payload["action"].lower().strip()
             if action == "list":
@@ -245,11 +351,9 @@ class CatalogAgent(Actor):
                 return await self._action_spawn(payload.get("agent", ""), payload)
             return {"ok": False, "message": f"Unknown action '{action}'. Use: spawn | list | info"}
 
-        # ── Convenience dict shortcuts ─────────────────────────────────────
         if isinstance(payload, dict) and "spawn" in payload and isinstance(payload["spawn"], str):
             return await self._action_spawn(payload["spawn"], payload)
 
-        # ── Extract text from any remaining form ───────────────────────────
         if isinstance(payload, str):
             text = payload.strip()
         elif isinstance(payload, dict):
@@ -257,7 +361,6 @@ class CatalogAgent(Actor):
         else:
             text = ""
 
-        # ── Parse "verb agent-name" ────────────────────────────────────────
         if text:
             parts = text.split(None, 1)
             cmd   = parts[0].lower()
@@ -268,11 +371,9 @@ class CatalogAgent(Actor):
                 return self._action_info(arg)
             if cmd == "spawn":
                 return await self._action_spawn(arg, {})
-            # Bare agent name with no verb → treat as spawn
             if cmd in self._catalog:
                 return await self._action_spawn(cmd, {})
 
-        # ── Nothing parseable → helpful default ───────────────────────────
         return self._action_list()
 
     # ── Actions ────────────────────────────────────────────────────────────────
@@ -298,7 +399,6 @@ class CatalogAgent(Actor):
         if not recipe:
             available = list(self._catalog.keys())
             return {"ok": False, "message": f"'{name}' not in catalog. Available: {available}"}
-        # Return recipe without the full code string (too large for a response)
         safe = {k: v for k, v in recipe.items() if k != "code"}
         return {"ok": True, "message": f"Recipe for '{name}'", "recipe": safe}
 
@@ -314,7 +414,6 @@ class CatalogAgent(Actor):
         if not self._registry:
             return {"ok": False, "message": "No registry available — cannot spawn"}
 
-        # If already running, return success immediately
         existing = self._registry.find_by_name(name)
         if existing:
             return {"ok": True, "message": f"'{name}' is already running"}
@@ -328,18 +427,14 @@ class CatalogAgent(Actor):
         try:
             from .dynamic_agent import DynamicAgent
 
-            # ── Auto-install Python dependencies ───────────────────────────
             install = recipe.get("install", [])
             if install:
                 installer = self._registry.find_by_name("installer") if self._registry else None
                 if installer:
-                    await agent.log(f"Installing deps for '{name}': {install}") if False else None
                     logger.info(f"[{self.name}] Installing deps for '{name}': {install}")
                     import uuid as _uuid
                     task_id = f"cat_install_{_uuid.uuid4().hex[:8]}"
-                    future  = asyncio.get_event_loop().create_future()
-                    installer._result_futures = getattr(installer, "_result_futures", {})
-                    # Use main's result futures since installer replies there
+                    future  = asyncio.get_running_loop().create_future()
                     main = self._registry.find_by_name("main") if self._registry else None
                     if main:
                         main._result_futures[task_id] = future
@@ -354,9 +449,8 @@ class CatalogAgent(Actor):
                     except asyncio.TimeoutError:
                         logger.warning(f"[{self.name}] Install timeout for '{name}' — proceeding anyway")
                 else:
-                    logger.warning(f"[{self.name}] installer agent not found — skipping dep install for '{name}'")
+                    logger.warning(f"[{self.name}] installer not found — skipping dep install for '{name}'")
 
-            # Find main to get its llm_provider and persistence_dir
             main = self._registry.find_by_name("main")
             llm_provider    = getattr(main, "llm", None) if main else None
             persistence_dir = str(getattr(main, "_persistence_dir", "./state/main").parent) if main else "./state"
@@ -371,12 +465,15 @@ class CatalogAgent(Actor):
                 output_schema   = recipe.get("output_schema", {}),
                 llm_provider    = llm_provider,
                 persistence_dir = persistence_dir,
+                trusted         = True,   # catalog agents are pre-built — skip safety validator
             )
 
             if actor:
-                # Save to main's spawn registry so it survives restarts
                 if main and hasattr(main, "_save_to_spawn_registry"):
-                    main._save_to_spawn_registry(recipe)
+                    # Mark as trusted so it bypasses safety validator on restore
+                    save_config = dict(recipe)
+                    save_config["trusted"] = True
+                    main._save_to_spawn_registry(save_config)
 
                 msg = f"'{name}' spawned and running"
                 logger.info(f"[{self.name}] {msg}")
@@ -393,12 +490,10 @@ class CatalogAgent(Actor):
             logger.error(f"[{self.name}] {msg}")
             return {"ok": False, "message": msg}
 
-    # ── Public API for other agents ────────────────────────────────────────────
+    # ── Public API ─────────────────────────────────────────────────────────────
 
     def list_recipes(self) -> list[str]:
-        """Return names of all available recipes."""
         return list(self._catalog.keys())
 
     def get_recipe(self, name: str) -> Optional[dict]:
-        """Return full recipe dict (including code) or None."""
         return self._catalog.get(name)

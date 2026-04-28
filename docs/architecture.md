@@ -50,7 +50,7 @@ The framework is built on three ideas: every agent is an independent **actor** w
 
 | File | Responsibility |
 |------|----------------|
-| `actor.py` | `Actor` base class — message loop, heartbeat, persistence (`pickle`), supervisor strategy enum |
+| `actor.py` | `Actor` base class — message loop, heartbeat, persistence (SQLite / Redis / Pickle), supervisor strategy enum |
 | `registry.py` | `ActorSystem`, `ActorRegistry`, `Supervisor`, `_MQTTPublisher` (shared aiomqtt connection) |
 
 ### Built-in Agents — `wactorz/agents/`
@@ -101,11 +101,19 @@ The Supervisor wraps each actor with a `ONE_FOR_ONE` restart policy. If an actor
 
 ## Persistence
 
-Each actor persists state as a `pickle` file at `state/{actor_name}/state.pkl`. The `Actor.persist(key, value)` method writes synchronously to disk on every call. `Actor.recall(key)` reads from the in-memory dict (loaded at startup from the pickle).
+Wactorz uses a three-tier persistence layer (`wactorz/core/persistence.py`) that routes each key to the appropriate store:
 
-> **Cross-agent reads** — Agents can read another agent's pickle directly by navigating to the sibling state directory — useful when two agents need to share large datasets without going through MQTT.
+| Store | Location | Used for |
+|-------|----------|----------|
+| **SQLite** | `state/wactorz.db` | Durable structured data: spawn registry, pipeline rules, user facts, topic contracts, conversation history, time-series sensor/detection/HA-state data |
+| **Redis** | `redis://localhost:6379` (falls back to in-memory if Redis is unavailable) | Ephemeral fast-access data: observed topic samples, agent metrics, heartbeat state |
+| **Pickle** | `state/{actor_name}/state.pkl` | Arbitrary Python objects: custom agent state dicts, ML models, numpy arrays, cv2 captures |
 
-The spawn registry is stored in `state/main/state.pkl` under `_spawned_agents`. On restart, MainActor re-spawns every entry in the registry so dynamic agents and catalog agents survive reboots.
+`Actor.persist(key, value)` and `Actor.recall(key)` route automatically to the correct store based on the key name. Existing agent code works without changes.
+
+The spawn registry (`_spawned_agents`) is stored in SQLite. On restart, MainActor re-spawns every entry so dynamic agents and catalog agents survive reboots.
+
+On first startup after upgrading from an older version, `migrate_from_pickle()` reads existing `.pkl` files and moves structured keys to SQLite/Redis. Pickle files are left in place for keys that remain in pickle.
 
 ---
 
@@ -185,6 +193,8 @@ Discord channel
 
 All providers implement `complete(messages, system) → (text, usage)` and `stream(messages, system) → AsyncGenerator`. Cost tracking (USD per 1M tokens) is built into every provider and accumulated in `LLMAgent.metrics`.
 
+For Ollama, `system` is encoded as the first `{"role": "system"}` entry in the native `/api/chat` `messages` array for both blocking and streaming calls. This keeps local model behavior aligned with the hosted providers, which already receive system instructions through their chat-message APIs.
+
 ---
 
 ## Supervision Tree
@@ -231,7 +241,7 @@ wactorz --interface whatsapp
 wactorz --interface telegram --telegram-token $TELEGRAM_BOT_TOKEN
 
 # REST API
-wactorz --interface rest --port 8080
+wactorz --interface rest --port 8000
 
 # Custom MQTT broker (external)
 wactorz --mqtt-broker 192.168.1.10 --mqtt-port 1883
@@ -245,7 +255,8 @@ wactorz --no-monitor
 | Interface | Flag | Notes |
 |-----------|------|-------|
 | **CLI** | `--interface cli` | Default. Interactive terminal with streaming responses. |
-| **REST** | `--interface rest` | HTTP API on `--port` (default 8080). POST `/chat`, GET `/agents`. |
+| **REST** | `--interface rest` | HTTP API on `--port` (default 8000). POST `/chat`, GET `/agents`. |
+| **MCP** | separate `wactorz-mcp` process | Stdio Model Context Protocol server backed by Wactorz REST. |
 | **Discord** | `--interface discord` | Bot responds in channels and DMs. Requires `DISCORD_BOT_TOKEN`. |
 | **WhatsApp** | `--interface whatsapp` | Via Twilio. Requires `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_NUMBER`. |
 | **Telegram** | `--interface telegram` | Bot API. Requires `TELEGRAM_BOT_TOKEN`. |

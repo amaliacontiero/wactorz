@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["AppState","ChatRequest","RestServer","SendMessageRequest"]};
+window.SIDEBAR_ITEMS = {"struct":["AppState","ChatRequest","RestServer","RuntimeConfig","SendMessageRequest"]};

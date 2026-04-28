@@ -91,7 +91,7 @@ This replaces all previous keyword heuristics with a single LLM classification s
 | `core/topic_bus.py` | Core | TopicBus — reactive pub/sub coordination layer: TopicContract with observed schema introspection, TopicRegistry for topic-based agent discovery, SharedStateHub for retained world state, StreamWindow for temporal reasoning |
 | `agents/main_actor.py` | Agent | The LLM orchestrator — intent classification, spawns agents, routes requests, memory & user facts |
 | `agents/monitor_agent.py` | Agent | Health watcher — detects crashes, fires recovery actions, notifies user |
-| `agents/llm_agent.py` | Agent | Base LLM agent with rolling history summarization, cost tracking, streaming, and 4 providers |
+| `agents/llm_agent.py` | Agent | Base LLM agent with rolling history summarization, cost tracking, streaming, and 5 providers |
 | `agents/dynamic_agent.py` | Agent | Runtime-generated agents — executes LLM-written Python code in a sandboxed namespace |
 | `agents/planner_agent.py` | Agent | Multi-step task planner + reactive pipeline builder — decomposes tasks, fans out to workers, synthesizes results |
 | `agents/installer_agent.py` | Agent | Package manager — installs pip packages locally and on remote nodes via SSH |
@@ -103,6 +103,7 @@ This replaces all previous keyword heuristics with a single LLM classification s
 | `agents/home_assistant_state_bridge_agent.py` | Agent | HA `state_changed` → MQTT bridge |
 | `agents/home_assistant_actuator_agent.py` | Agent | Reactive MQTT→HA actuator — subscribes to topics, calls HA services |
 | `interfaces/chat_interfaces.py` | I/O | CLI (streaming), REST, Discord, WhatsApp — all call `process_user_input[_stream]` |
+| `interfaces/mcp_server.py` | I/O | MCP server exposing Wactorz and Home Assistant tools to MCP-compatible clients |
 | `monitor_server.py` | I/O | MQTT→WebSocket bridge that feeds the live dashboard |
 | `monitor.html` | I/O | Real-time web dashboard — agent cards, logs, cost meters, error alerts |
 
@@ -112,7 +113,7 @@ This replaces all previous keyword heuristics with a single LLM classification s
 
 ### LLMAgent (base)
 
-All LLM-backed agents inherit from `LLMAgent`, which inherits from `Actor`. It manages conversation history with automatic rolling summarization (persisted to disk), tracks token usage and cost across 4 providers, and supports both blocking and streaming responses.
+All LLM-backed agents inherit from `LLMAgent`, which inherits from `Actor`. It manages conversation history with automatic rolling summarization (persisted to disk), tracks token usage and cost across 5 providers, and supports both blocking and streaming responses.
 
 **Supported LLM providers:**
 
@@ -123,6 +124,8 @@ All LLM-backed agents inherit from `LLMAgent`, which inherits from `Actor`. It m
 | Ollama | _(none)_ | Local models, `--llm ollama --ollama-model llama3` |
 | NVIDIA NIM | `NIM_API_KEY` | Free tier 1000 req/month, `--llm nim --nim-model meta/llama-3.3-70b-instruct` |
 | Google Gemini | `GEMINI_API_KEY` or `GOOGLE_API_KEY` | Free tier available, `--llm gemini --gemini-model gemini-2.5-flash` |
+
+Ollama uses the native `/api/chat` endpoint. Wactorz sends `system_prompt` as the first `{"role": "system"}` chat message for both blocking and streaming requests, matching the chat message format used by modern Ollama models.
 
 ### DynamicAgent
 
@@ -163,7 +166,7 @@ async def handle_task(agent, payload):
 The user-facing orchestrator. Every message you type is processed by main, which:
 
 1. Intercepts slash-commands (`/rules`, `/memory`, `/webhook`, `/topics`, etc.) without any LLM call
-2. Classifies intent with a single LLM call: `ACTUATE`, `HA`, `PIPELINE`, or `OTHER`
+2. Classifies intent with a single LLM call: `ACTUATE`, `HA`, `PIPELINE`, or `OTHER` (60s timeout, then `OTHER`)
 3. Routes `ACTUATE` requests to an ephemeral `OneOffActuatorAgent`
 4. Routes `HA` requests to `home-assistant-agent`
 5. Routes `PIPELINE` requests to `PlannerAgent`
@@ -718,9 +721,36 @@ python -m wactorz --interface discord --discord-token YOUR_TOKEN
 
 ### REST API
 
-Start with `--interface rest` (default port 8080). Send `POST` requests to `/chat` with `{"message": "..."}`. Responses are blocking (non-streaming). Suitable for integration with other services.
+Start with `--interface rest` (default port 8000). Send `POST` requests to `/chat` with `{"message": "..."}`. Responses are blocking (non-streaming). Suitable for integration with other services.
 
 The Home Assistant map snapshot is also available at `GET /api/ha-map/latest`. It returns the latest cached map payload from `HomeAssistantMapAgent`, or `404` if no snapshot has been fetched yet.
+
+### MCP Server
+
+Install the MCP extra and run `wactorz-mcp` as a separate stdio process from your MCP client. The server proxies to the Wactorz REST interface, so start Wactorz REST first.
+
+```bash
+pip install "wactorz[mcp]"
+wactorz --interface rest --port 8000
+
+# In an MCP client config, use either:
+wactorz-mcp
+
+# Or, for editable installs where the script is not present yet:
+python -m wactorz.interfaces.mcp_server
+```
+
+MCP tools include `ask_wactorz`, `ask_agent`, `list_agents`, `list_capabilities`, `stop_agent`, `pause_agent`, `resume_agent`, `ha_list_entities`, `ha_get_state`, and `ha_call_service`. Resources include `wactorz://agents`, `wactorz://capabilities`, `wactorz://ha-map`, and `wactorz://config`.
+
+Configure it with `WACTORZ_URL` and optional `WACTORZ_API_KEY`. Direct Home Assistant tools are enabled by `HA_URL` and `HA_TOKEN`.
+
+Test with the MCP Inspector:
+
+```bash
+npx @modelcontextprotocol/inspector python -m wactorz.interfaces.mcp_server
+```
+
+Start with read-only tools such as `list_agents`, `ask_wactorz` with `/agents`, and `wactorz://config`. `ha_call_service` can change real devices, so use it only after confirming the target entity.
 
 ### Discord
 
@@ -833,9 +863,9 @@ Examples:
 Flow:
 
 1. Fetch the full Home Assistant device/entity map with location context
-2. Ask the configured LLM to resolve the natural-language request into a JSON array of Home Assistant service calls
+2. Ask the configured LLM to resolve the natural-language request into a JSON array of Home Assistant service calls (120s timeout)
 3. Execute those calls via the Home Assistant WebSocket API
-4. Send the result back to `MainActor`
+4. Send the result back to `MainActor` (120s one-shot actuation timeout)
 5. Publish metrics, unregister, stop, and delete its own persistence directory
 
 The agent is ephemeral by design. Unlike `HomeAssistantAgent`, it does not handle listing, discovery, automation CRUD, or persistent rules.
@@ -1212,6 +1242,8 @@ By default Wactorz connects to `localhost:1883`. Override with `--mqtt-host` and
 | `TWILIO_ACCOUNT_SID` | Twilio account SID (for `--interface whatsapp`) |
 | `TWILIO_AUTH_TOKEN` | Twilio auth token |
 | `TWILIO_WHATSAPP_FROM` | Twilio WhatsApp sender number |
+| `WACTORZ_URL` | Wactorz REST base URL used by the MCP server (default `http://localhost:8000`) |
+| `WACTORZ_API_KEY` | Optional MCP-to-REST API key; should match `API_KEY` when REST auth is enabled |
 
 ---
 
@@ -1272,7 +1304,7 @@ wactorz/
 │                                              TopicContract, TopicRegistry, SharedStateHub, StreamWindow
 │
 ├── agents/
-│   ├── llm_agent.py                           LLMAgent — 4 providers, rolling summarization, cost tracking
+│   ├── llm_agent.py                           LLMAgent — 5 providers, rolling summarization, cost tracking
 │   ├── main_actor.py                          MainActor — intent routing, memory, user facts, pipeline rules
 │   ├── dynamic_agent.py                       DynamicAgent — runtime code executor, error events
 │   ├── planner_agent.py                       PlannerAgent — task planning + reactive pipeline builder
@@ -1288,7 +1320,8 @@ wactorz/
 │   └── ml_agent.py                            MLAgent, YOLOAgent, AnomalyDetectorAgent
 │
 └── interfaces/
-    └── chat_interfaces.py                     CLI (with /deploy, /migrate, /nodes), REST, Discord, WhatsApp
+    ├── chat_interfaces.py                     CLI (with /deploy, /migrate, /nodes), REST, Discord, WhatsApp
+    └── mcp_server.py                          MCP tools/resources for compatible clients
 
 catalogue_agents/                              Pre-built agent recipe files (loaded by CatalogAgent at startup)
 ├── __init__.py

@@ -23,10 +23,11 @@ pip install wactorz[all]
 - **[Architecture](architecture.md)** — Actor model, supervision trees, message flow
 - **[Agents](agents.md)** — Built-in and custom agent reference
 - **[Auto-Wiring](mqtt_auto_wiring.md)** — Built-in and custom agent reference
-- **[Interfaces](interfaces.md)** — HTTP endpoints and WebSocket protocol
+- **[Interfaces](interfaces.md)** — CLI, REST, MCP, chat platforms, and dashboard
 - **[Prometheus Monitoring](prometheus.md)** — Python metrics, Prometheus, and optional dependency probes
 - **[Pipelines](pipelines.md)** — Full topic reference with payload schemas
 - **[Remote Nodes](remote-nodes.md)** — Auto-generated Python class reference
+- **[Home Assistant Addon](../ha-addon/DOCS.md)** — Install and configure the HA Supervisor addon (requires HAOS or Supervised)
 <!-- - **[Rust Docs](https://waldiez.github.io/wactorz/api/rust/)** — Rustdoc for wactorz-core and wactorz-interfaces
 - **[JS/TS Docs](https://waldiez.github.io/wactorz/api/js/)** — TypeDoc for the Babylon.js frontend -->
 

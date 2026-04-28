@@ -153,7 +153,7 @@ class OneOffActuatorAgent(Actor):
                 system=_RESOLVER_PROMPT,
                 max_tokens=1200,
             ),
-            timeout=10.0,
+            timeout=120.0,
         )
         self._accumulate_usage(usage)
         parsed = self._parse_actions_json(raw)

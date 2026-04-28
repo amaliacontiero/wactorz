@@ -1,0 +1,13 @@
+name: Require up-to-date branch
+
+on:
+  pull_request:
+    branches:
+      - dev
+
+jobs:
+  noop:
+    name: Branch freshness gate
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "This check exists only so GitHub can enforce up-to-date PR branches."

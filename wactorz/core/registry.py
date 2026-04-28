@@ -38,6 +38,9 @@ class SupervisedSpec:
     # Runtime state — managed by Supervisor, not set by caller
     actor:          Optional["Actor"] = field(default=None, repr=False)
     _restart_times: list = field(default_factory=list, repr=False)
+    # Set to True when an actor is intentionally stopped/deleted by the user,
+    # or when it has exhausted its restart budget.  The watch_loop skips retired specs.
+    retired:        bool = field(default=False, repr=False)
 
     def record_restart(self) -> bool:
         """Record a restart attempt. Returns True if still within budget."""
@@ -63,6 +66,9 @@ class ActorRegistry:
     def __init__(self):
         self._actors: dict[str, Actor] = {}
         self._lock = asyncio.Lock()
+        # Back-reference to the Supervisor — set by ActorSystem after creating both.
+        # Allows Actor.spawn() to auto-register children under supervision.
+        self._supervisor_ref: Optional["Supervisor"] = None
 
     async def register(self, actor: Actor):
         async with self._lock:
@@ -163,6 +169,24 @@ class Supervisor:
         self._order.append(name)
         return self   # fluent
 
+    def release(self, name: str):
+        """
+        Voluntarily remove an actor from supervision — the Erlang 'unlink' equivalent.
+
+        Call this BEFORE sending a stop or delete command to an actor so the
+        Supervisor doesn't race to restart it.  Safe to call even if the name
+        is not currently supervised (no-op).
+
+        This is the fix for Issue 2: stop/delete commands were setting state=STOPPED
+        but the heartbeat-silence detector would fire 35s later and restart the actor
+        anyway, because it didn't know the stop was intentional.
+        """
+        spec = self._specs.get(name)
+        if spec is not None:
+            spec.retired = True
+            spec.actor   = None
+            logger.info(f"[Supervisor] Released '{name}' from supervision (intentional stop).")
+
     # ── Startup ───────────────────────────────────────────────────────────────
 
     async def start(self):
@@ -177,23 +201,80 @@ class Supervisor:
 
     # ── Watch loop ────────────────────────────────────────────────────────────
 
+    # ── Watchdog thresholds ───────────────────────────────────────────────────
+    # An actor is considered "silent" if its heartbeat is older than this.
+    # (Actor heartbeats every 10s by default; allow 3× grace period.)
+    HEARTBEAT_TIMEOUT   = 35.0    # seconds without a heartbeat → treat as crashed
+    # An actor that has accumulated this many errors is "storming" — restart it.
+    ERROR_STORM_THRESHOLD = 10    # cumulative errors within the actor's lifetime
+
     async def _watch_loop(self):
-        """Poll supervised actors for failure and trigger restarts."""
+        """
+        Poll supervised actors for failure and trigger restarts.
+
+        Detects three Erlang-style failure modes:
+        1. state == FAILED   — actor explicitly marked itself dead (compile/setup/process exhausted)
+        2. Heartbeat silence — actor task is frozen/deadlocked and stopped updating metrics
+        3. Error storm       — actor is alive but accumulating errors beyond a safe threshold
+        """
         from .actor import ActorState
         while True:
             try:
                 await asyncio.sleep(self._poll_interval)
                 async with self._lock:
                     for name, spec in list(self._specs.items()):
+                        # ── Skip specs that are intentionally retired ──────────
+                        # retired = user-stopped/deleted OR budget-exhausted.
+                        # We never restart these — that's the whole point.
+                        if spec.retired:
+                            continue
+
                         actor = spec.actor
                         if actor is None:
                             continue
+
+                        # ── Skip actors that were intentionally stopped ─────────
+                        # STOPPED means a deliberate stop/delete command was issued.
+                        # PAUSED means the user explicitly paused it.
+                        # Neither is a crash — do NOT restart them.
+                        if actor.state in (ActorState.STOPPED, ActorState.PAUSED):
+                            continue
+
+                        # ── Mode 1: FAILED state ───────────────────────────────
                         if actor.state == ActorState.FAILED:
                             logger.warning(
                                 f"[Supervisor] '{name}' is FAILED — "
                                 f"applying {spec.strategy.value} strategy."
                             )
                             await self._apply_strategy(name, spec)
+                            continue
+
+                        # ── Mode 2: Heartbeat silence ──────────────────────────
+                        # Skip actors that just started (give them 2× the timeout to warm up).
+                        uptime = actor.metrics.uptime
+                        if uptime > self.HEARTBEAT_TIMEOUT * 2:
+                            silence = time.time() - actor.metrics.last_heartbeat
+                            if silence > self.HEARTBEAT_TIMEOUT:
+                                logger.warning(
+                                    f"[Supervisor] '{name}' last heartbeat was {silence:.0f}s ago "
+                                    f"(threshold={self.HEARTBEAT_TIMEOUT}s) — presumed crashed. "
+                                    f"Forcing FAILED and restarting."
+                                )
+                                actor.state = ActorState.FAILED
+                                await self._apply_strategy(name, spec)
+                                continue
+
+                        # ── Mode 3: Error storm ────────────────────────────────
+                        if actor.metrics.errors >= self.ERROR_STORM_THRESHOLD:
+                            logger.warning(
+                                f"[Supervisor] '{name}' has {actor.metrics.errors} errors "
+                                f"(threshold={self.ERROR_STORM_THRESHOLD}) — error storm detected. "
+                                f"Forcing FAILED and restarting."
+                            )
+                            actor.state = ActorState.FAILED
+                            await self._apply_strategy(name, spec)
+                            continue
+
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -235,17 +316,26 @@ class Supervisor:
             logger.critical(
                 f"[Supervisor] '{name}' has exhausted its restart budget "
                 f"({spec.max_restarts} restarts / {spec.restart_window}s). "
-                f"Giving up — manual intervention required."
+                f"Retiring — manual intervention required."
             )
+            # Mark retired so the watch_loop stops polling this spec permanently.
+            # Issue 1 fix: without this, the watch_loop would keep calling _restart_one
+            # every poll cycle even after budget is gone, logging the same critical
+            # message endlessly and potentially re-entering the restart path.
+            spec.retired = True
+            spec.actor   = None
             await self._notify_main(
-                f"🚨 Supervisor gave up on '{name}' after "
-                f"{spec.max_restarts} restarts. Manual intervention required."
+                f"🚨 **{name}** has crashed {spec.max_restarts} times and the Supervisor has given up. "
+                f"It is permanently stopped. Delete it and spawn a new one, or fix its code.",
+                severity="critical",
             )
             return
 
         within_budget = spec.record_restart()
         if not within_budget:
-            return  # exhausted check above already handles this edge case
+            spec.retired = True
+            spec.actor   = None
+            return
 
         if spec.restart_delay > 0:
             await asyncio.sleep(spec.restart_delay)
@@ -263,11 +353,16 @@ class Supervisor:
         new_actor = await self._spawn_actor(name, spec)
         spec.actor = new_actor
         new_actor.metrics.restart_count = len(spec._restart_times)
+        # Fresh start — reset error counter so error-storm detector doesn't
+        # immediately re-trigger on the very first poll after restart.
+        new_actor.metrics.errors = 0
 
         logger.info(f"[Supervisor] '{name}' restarted successfully.")
         await self._notify_main(
-            f"🔄 Supervisor restarted '{name}' "
-            f"(restart #{new_actor.metrics.restart_count})."
+            f"♻️ **{name}** crashed and was automatically restarted "
+            f"(restart #{new_actor.metrics.restart_count} of {spec.max_restarts}). "
+            f"It is running again.",
+            severity="warning",
         )
 
     # ── Helpers ───────────────────────────────────────────────────────────────
@@ -298,17 +393,57 @@ class Supervisor:
             pass
         spec.actor = None
 
-    async def _notify_main(self, message: str):
-        """Best-effort notification to the main actor."""
+    async def _notify_main(self, message: str, severity: str = "critical"):
+        """
+        Send a supervision event to MainActor via the actor message queue.
+
+        Uses MessageType.TASK with _monitor_notification=True so main's
+        handle_message intercepts it and queues it in _pending_notifications —
+        exactly the same path the Monitor uses.  This replaces the old direct
+        object-mutation approach (main._pending_notifications.append(...)) which
+        bypassed the message queue and could race with main's own loop.
+        """
         try:
+            if not self._registry:
+                return
             main = self._registry.find_by_name("main")
-            if main and hasattr(main, "_pending_notifications"):
-                main._pending_notifications.append({
-                    "severity": "critical",
-                    "message":  message,
-                    "source":   "supervisor",
-                    "timestamp": time.time(),
-                })
+            if main is None:
+                return
+
+            # Find any actor we can send from — use the first supervised actor,
+            # or fall back to directly appending if none are available yet.
+            sender = next(
+                (spec.actor for spec in self._specs.values()
+                 if spec.actor is not None and not spec.retired),
+                None,
+            )
+
+            if sender is not None:
+                from .actor import Message, MessageType
+                import uuid, time as _t
+                msg = Message(
+                    type=MessageType.TASK,
+                    sender_id=sender.actor_id,
+                    payload={
+                        "_monitor_notification": True,
+                        "agent_name":  "supervisor",
+                        "message":     message,
+                        "severity":    severity,
+                        "timestamp":   _t.time(),
+                    },
+                    message_id=str(uuid.uuid4()),
+                )
+                await main.receive(msg)
+            else:
+                # No running actor to send from — fall back to direct append
+                if hasattr(main, "_pending_notifications"):
+                    import time as _t
+                    main._pending_notifications.append({
+                        "severity":  severity,
+                        "message":   message,
+                        "source":    "supervisor",
+                        "timestamp": _t.time(),
+                    })
         except Exception as exc:
             logger.warning(f"[Supervisor] Could not notify main: {exc}")
 
@@ -326,6 +461,7 @@ class Supervisor:
                 "max_restarts":  spec.max_restarts,
                 "restarts_used": len(spec._restart_times),
                 "exhausted":     spec.exhausted,
+                "retired":       spec.retired,
                 "actor_state":   actor.state.value if actor else "none",
                 "actor_id":      actor.actor_id[:8] if actor else None,
             })
@@ -360,10 +496,12 @@ class ActorSystem:
         actor._mqtt_port   = self._mqtt_port
 
     @property
-    def supervisor(self) -> Supervisor:
+    def supervisor(self) -> "Supervisor":
         """Lazy-create the Supervisor bound to this system's registry and inject function."""
         if self._supervisor is None:
             self._supervisor = Supervisor(self.registry, self._inject)
+            # Give the registry a back-reference so Actor.spawn() children are auto-supervised
+            self.registry._supervisor_ref = self._supervisor
         return self._supervisor
 
     def mqtt_status(self) -> dict:

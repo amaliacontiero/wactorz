@@ -296,7 +296,7 @@ class HomeAssistantMapAgent(Actor):
             return
         try:
             await self._warm_latest_map_payload()
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             self._last_error = str(exc)
             logger.warning("[%s] initial refresh failed: %s", self.name, exc)
 

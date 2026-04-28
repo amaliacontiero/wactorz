@@ -73,15 +73,15 @@ services:
     networks:
       - wactorz-net
     ports:
-      - "${REST_EXTERNAL_PORT:-8000}:8000"     # REST API
-      - "${MONITOR_EXTERNAL_PORT:-8888}:8888"  # Web UI monitor
+      - "${REST_EXTERNAL_PORT:-8000}:8000"              # REST API
+      - "${MONITOR_PORT:-8888}:${MONITOR_PORT:-8888}"  # Web UI monitor
     volumes:
       - ./state:/app/state
     depends_on:
       mosquitto:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8888"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:${MONITOR_PORT:-8888}"]
       interval: 10s
       timeout: 5s
       retries: 5

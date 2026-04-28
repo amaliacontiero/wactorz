@@ -130,7 +130,7 @@ def get_args():
 	return args
 
 
-async def _start_web_ui(port: int, mqtt_broker: str, mqtt_port: int, actor_registry=None) -> None:
+async def _start_web_ui(port: int, mqtt_broker: str, mqtt_port: int, actor_registry=None, persistence_db=None) -> None:
     """Start the monitor web server as a quiet background asyncio task."""
     import logging as _log
     import wactorz.monitor_server as _ms
@@ -143,6 +143,8 @@ async def _start_web_ui(port: int, mqtt_broker: str, mqtt_port: int, actor_regis
     # Wire the registry in so chat is routed directly — no IOAgent needed
     if actor_registry is not None:
         _ms.registry = actor_registry
+    if persistence_db is not None:
+        _ms.db = persistence_db
 
     for _name in ("wactorz.monitor_server", "aiohttp.access", "aiohttp.server"):
         _log.getLogger(_name).setLevel(_log.WARNING)
@@ -196,7 +198,7 @@ async def build_system(args: argparse.Namespace):
         nim_model = args.nim_model or CONFIG.llm_model
         provider = NIMProvider(
             model=nim_model,
-            api_key=CONFIG.nim_api_key or CONFIG.nvidia_api_key,
+            api_key=CONFIG.nim_api_key or CONFIG.nvidia_api_key or CONFIG.llm_api_key,
         )
     elif llm == "gemini":
         gemini_model = args.gemini_model or CONFIG.llm_model or "gemini-2.5-flash"
@@ -232,51 +234,88 @@ async def build_system(args: argparse.Namespace):
     )
     logger.info("TopicBus initialised")
 
+    # ── Initialise persistence layer (SQLite + Redis + Pickle) ──────────────
+    # Replaces pickle-only storage. Redis is optional — falls back to
+    # in-memory dict if not running. Run migration once to move existing
+    # .pkl data to the new stores.
+    from wactorz.core.persistence import init_persistence, PersistenceAPI
+    _db, _redis, _pickle_store = init_persistence(
+        db_path="./state/wactorz.db",
+        redis_url=os.environ.get("REDIS_URL", "redis://localhost:6379"),
+        state_dir="./state",
+        run_migration=True,
+    )
+    logger.info("Persistence layer initialised (SQLite + %s + Pickle)",
+                "Redis" if not _redis._using_fallback else "in-memory fallback")
+
     # ── Factory helpers (called fresh on each (re)start by the Supervisor) ────
+    def _wire_persistence(actor):
+        """Attach the unified persistence API to an actor."""
+        actor._persistence_api = PersistenceAPI(_db, _redis, _pickle_store, actor.name)
+        return actor
+
     def make_provider():
         return provider   # stateless — same instance is fine
 
     def make_main():
-        return MainActor(llm_provider=make_provider(), name="main",
-                         persistence_dir="./state")
+        return _wire_persistence(
+            MainActor(llm_provider=make_provider(), name="main",
+                      persistence_dir="./state"))
 
     def make_monitor():
-        return MonitorActor(check_interval=15.0, heartbeat_timeout=60.0,
-                            auto_restart=False, persistence_dir="./state")
+        return _wire_persistence(
+            MonitorActor(check_interval=15.0, heartbeat_timeout=60.0,
+                         auto_restart=False, persistence_dir="./state"))
 
     def make_installer():
-        return InstallerAgent(name="installer", persistence_dir="./state")
-
+        return _wire_persistence(
+            InstallerAgent(name="installer", persistence_dir="./state"))
 
     def make_manual_agent():
-        return ManualAgent(llm_provider=make_provider(), name="manual-agent",
-                           persistence_dir="./state")
+        return _wire_persistence(
+            ManualAgent(llm_provider=make_provider(), name="manual-agent",
+                        persistence_dir="./state"))
 
     def make_ha_agent():
-        return HomeAssistantAgent(llm_provider=make_provider(),
-                                  name="home-assistant-agent",
-                                  persistence_dir="./state")
+        return _wire_persistence(
+            HomeAssistantAgent(llm_provider=make_provider(),
+                               name="home-assistant-agent",
+                               persistence_dir="./state"))
 
     def make_ha_map_agent():
-        return HomeAssistantMapAgent(
-            name="home-assistant-map-agent",
-            persistence_dir="./state",
-        )
+        return _wire_persistence(
+            HomeAssistantMapAgent(
+                name="home-assistant-map-agent",
+                persistence_dir="./state",
+            ))
 
     def make_ha_state_bridge():
-        return HomeAssistantStateBridgeAgent(
-            name="home-assistant-state-bridge",
-            persistence_dir="./state",
-        )
+        return _wire_persistence(
+            HomeAssistantStateBridgeAgent(
+                name="home-assistant-state-bridge",
+                persistence_dir="./state",
+            ))
 
     def make_io_agent():
-        return IOAgent(name="io-agent", persistence_dir="./state")
-
+        return _wire_persistence(
+            IOAgent(name="io-agent", persistence_dir="./state"))
 
     def make_catalog():
-        return CatalogAgent(name="catalog", persistence_dir="./state")
+        return _wire_persistence(
+            CatalogAgent(name="catalog", persistence_dir="./state"))
 
     # ── Register critical actors under the Supervisor ─────────────────────────
+    from wactorz.agents.timeseries_collector import TimeSeriesCollector
+
+    def make_ts_collector():
+        return _wire_persistence(
+            TimeSeriesCollector(
+                name="timeseries-collector",
+                retention_days=int(os.environ.get("TS_RETENTION_DAYS", "90")),
+                batch_interval=float(os.environ.get("TS_BATCH_INTERVAL", "5.0")),
+                persistence_dir="./state",
+            ))
+
     (
         system.supervisor
         .supervise("main",                       make_main,          strategy=SupervisorStrategy.ONE_FOR_ONE,  max_restarts=10, restart_delay=2.0)
@@ -288,6 +327,7 @@ async def build_system(args: argparse.Namespace):
         .supervise("home-assistant-map-agent",   make_ha_map_agent,  strategy=SupervisorStrategy.ONE_FOR_ONE,  max_restarts=5,  restart_delay=1.0)
         .supervise("home-assistant-state-bridge",make_ha_state_bridge, strategy=SupervisorStrategy.ONE_FOR_ONE, max_restarts=5, restart_delay=1.0)
         .supervise("catalog",                    make_catalog,       strategy=SupervisorStrategy.ONE_FOR_ONE,  max_restarts=10, restart_delay=2.0)
+        .supervise("timeseries-collector",       make_ts_collector,  strategy=SupervisorStrategy.ONE_FOR_ONE,  max_restarts=5,  restart_delay=2.0)
     )
 
     await system.supervisor.start()
@@ -307,12 +347,16 @@ async def app():
     
     system, main_actor = await build_system(args)
 
+    from wactorz.monitoring.otel import setup_otel, shutdown_otel
+    setup_otel(lambda: system.registry)
+
     if not args.no_monitor:
         await _start_web_ui(
             port=args.monitor_port,
             mqtt_broker=args.mqtt_broker or CONFIG.mqtt_host,
             mqtt_port=args.mqtt_port or CONFIG.mqtt_port,
             actor_registry=system.registry,
+            persistence_db=_db,
         )
 
     from wactorz.interfaces.chat_interfaces import (
@@ -357,6 +401,7 @@ async def app():
     except Exception as exc:
         logger.error(f"System error: {exc}", exc_info=True)
     finally:
+        shutdown_otel()
         await system.stop_all()
 
 def main():

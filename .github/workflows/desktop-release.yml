@@ -23,12 +23,19 @@ jobs:
         include:
           - platform: ubuntu-22.04
             args: ''
+            arch: x86_64
+
+          - platform: ubuntu-22.04
+            args: '--target aarch64-unknown-linux-gnu'
+            arch: aarch64
 
           - platform: windows-latest
             args: ''
+            arch: x86_64
 
           - platform: macos-latest
             args: '--target universal-apple-darwin'
+            arch: universal
 
     runs-on: ${{ matrix.platform }}
 
@@ -39,10 +46,10 @@ jobs:
         with:
           bun-version: latest
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          # macOS universal binary needs both targets
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || (matrix.arch == 'aarch64' && 'aarch64-unknown-linux-gnu' || '') }}
 
       - uses: Swatinem/rust-cache@v2
 
@@ -55,6 +62,9 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
+          if [ "${{ matrix.arch }}" = "aarch64" ]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          fi
 
       - name: Install frontend dependencies
         working-directory: frontend
@@ -81,8 +91,9 @@ jobs:
             | Platform | Download |
             |---|---|
             | **macOS** (Apple Silicon + Intel) | `.dmg` |
-            | **Windows** | `.msi` |
-            | **Linux** | `.AppImage` or `.deb` |
+            | **Windows** (x64) | `.msi` |
+            | **Linux** (x64) | `.AppImage`, `.deb` |
+            | **Linux** (ARM64) | `.AppImage`, `.deb` |
 
             **macOS:** if Gatekeeper blocks the app, right-click → **Open** on first launch (unsigned build).
             **Linux (.AppImage):** `chmod +x Wactorz_*.AppImage && ./Wactorz_*.AppImage`

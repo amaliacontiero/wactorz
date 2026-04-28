@@ -114,6 +114,7 @@ export class CardDashboard {
   private _streamTarget: string | null = null;
   private _streamText: string = "";
   private _lastSentTarget: string = "main-actor";
+  private _historyLoaded: Set<string> = new Set();
 
   // Event listeners (stored for cleanup)
   private _evFeed: ((e: Event) => void) | null = null;
@@ -275,7 +276,7 @@ export class CardDashboard {
     this._evFeed = (e) => {
       const item = (e as CustomEvent<{ item: FeedItem }>).detail.item;
       this.feedItems.push(item);
-      if (this.feedItems.length > 200) this.feedItems.shift();
+      if (this.feedItems.length > 500) this.feedItems.shift();
       if (this.view === "feed") this._appendFeedItemToView(item);
     };
 
@@ -289,7 +290,7 @@ export class CardDashboard {
           ? { ...msg, to: this._lastSentTarget }
           : msg;
       this.chatMessages.push(stored);
-      if (this.chatMessages.length > 200) this.chatMessages.shift();
+      if (this.chatMessages.length > 500) this.chatMessages.shift();
       if (this.view === "chat" && this._msgBelongsHere(stored)) {
         this._appendChatMsgEl(stored);
         this._scrollThread();
@@ -424,6 +425,7 @@ export class CardDashboard {
       this._renderSidebar();
       this._renderChatPaneHeader();
       this._renderChatThread();
+      this._loadHistory(this.chatTarget);
     }
 
     this.root
@@ -985,6 +987,7 @@ export class CardDashboard {
           this._renderSidebar();
           this._renderChatPaneHeader();
           this._renderChatThread();
+          this._loadHistory(agent.name);
           this._updateTargetSelect();
         });
       }
@@ -1042,6 +1045,34 @@ export class CardDashboard {
       return msg.to === this.chatTarget;
     // Regular agent messages: keyed by sender
     return msg.from === this.chatTarget;
+  }
+
+  private async _loadHistory(agentId: string): Promise<void> {
+    if (this._historyLoaded.has(agentId)) return;
+    this._historyLoaded.add(agentId);
+    const ingress: string = (window as any).__WACTORZ_INGRESS_PATH ?? "";
+    try {
+      const res = await fetch(`${ingress}/api/actors/${encodeURIComponent(agentId)}/history`);
+      if (!res.ok) return;
+      const raw: { role: string; content: string }[] = await res.json();
+      if (!raw.length) return;
+      // Assign synthetic timestamps spaced 2s apart, ending before session start
+      const base = Date.now() - raw.length * 2000 - 5000;
+      const historical: ChatMessage[] = raw.map((m, i) => ({
+        id: `hist-${agentId}-${i}`,
+        from: m.role === "user" ? "user" : agentId,
+        to: m.role === "user" ? agentId : "user",
+        content: m.content,
+        timestampMs: base + i * 2000,
+      }));
+      // Prepend only: don't duplicate messages already added live this session
+      const liveIds = new Set(this.chatMessages.map((m) => m.id));
+      const toAdd = historical.filter((m) => !liveIds.has(m.id));
+      this.chatMessages.unshift(...toAdd);
+      this._renderChatThread();
+    } catch {
+      // history unavailable — silent
+    }
   }
 
   private _renderChatThread(): void {
@@ -2056,8 +2087,9 @@ export class CardDashboard {
 
     // ── SPARQL runner ──────────────────────────────────────────────────────
     const datasetPath = encodeURIComponent(ds);
-    const sparqlUrl = `/api/fuseki/${datasetPath}/sparql`;
-    const updateUrl = `/api/fuseki/${datasetPath}/update`;
+    const _ingress: string = (window as any).__WACTORZ_INGRESS_PATH ?? "";
+    const sparqlUrl = `${_ingress}/api/fuseki/${datasetPath}/sparql`;
+    const updateUrl = `${_ingress}/api/fuseki/${datasetPath}/update`;
 
     const SPARQL_PREFIXES = `PREFIX syn:    <https://synapse.waldiez.io/ns#>
 PREFIX sosa:   <http://www.w3.org/ns/sosa/>

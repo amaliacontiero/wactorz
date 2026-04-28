@@ -150,6 +150,7 @@ pyrightconfig.json
 .vscode/
 .claude/
 .codex/
+.codex
 .gemini/
 __pycache__/
 rust/**/target/
@@ -201,6 +202,11 @@ wactorz/**/*.pyc
 myenv/
 coverage/
 
+
+yolov8n.pt
+# Add this to your .gitignore
+static/app/assets/index-Dtc9hZ49.js
+static/app/assets/index-Dtc9hZ49.js.map
 # Tauri
 frontend/src-tauri/target/
 frontend/src-tauri/gen/

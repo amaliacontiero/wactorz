@@ -8,6 +8,7 @@ Wactorz supports multiple user-facing interfaces simultaneously. All of them fun
 |-----------|------|-----------|-------|
 | **CLI** | `--interface cli` | — | Default. Interactive terminal with streaming. |
 | **REST** | `--interface rest` | — | HTTP API, suitable for programmatic access. |
+| **MCP** | separate `wactorz-mcp` process | `wactorz[mcp]` | Model Context Protocol tools for MCP clients. |
 | **Discord** | `--interface discord` | `wactorz[discord]` | Bot responds in channels and DMs. |
 | **WhatsApp** | `--interface whatsapp` | `wactorz[whatsapp]` | Via Twilio Messaging. |
 | **Telegram** | `--interface telegram` | — | Bot API, polling mode. |
@@ -54,14 +55,14 @@ wactorz --interface cli --llm gemini
 
 | | |
 |---|---|
-| **default port** | `8080` |
+| **default port** | `8000` |
 | **class** | `RESTInterface` |
 | **auth** | optional API key |
 
 Exposes Wactorz as an HTTP API. Suitable for integrating with other services, running automated tests, or building custom frontends.
 
 ```bash
-wactorz --interface rest --port 8080
+wactorz --interface rest --port 8000
 ```
 
 #### Endpoints
@@ -74,18 +75,106 @@ wactorz --interface rest --port 8080
 
 #### Authentication
 
-Set `API_KEY` in your `.env` to require a bearer token on all requests:
+Set `API_KEY` in your `.env` to require an API key on all requests:
 
 ```bash
 API_KEY=my-secret-key
 ```
 
 ```bash
-curl -X POST http://localhost:8080/chat \
-  -H "Authorization: Bearer my-secret-key" \
+curl -X POST http://localhost:8000/chat \
+  -H "X-API-Key: my-secret-key" \
   -H "Content-Type: application/json" \
   -d '{"message": "turn off the lights"}'
 ```
+
+---
+
+## MCP Server `[requires extra]`
+
+**Command:** `wactorz-mcp`
+
+| | |
+|---|---|
+| **dep** | `pip install wactorz[mcp]` |
+| **transport** | stdio |
+| **class** | `FastMCP` server in `wactorz.interfaces.mcp_server` |
+| **backend** | Wactorz REST API at `WACTORZ_URL` |
+
+The MCP server exposes Wactorz as tools and resources for MCP-compatible clients such as Claude Desktop, Cursor, Zed, and the MCP Inspector. It is a separate process from the Wactorz runtime: start Wactorz with the REST interface first, then start the MCP server from your MCP client.
+
+```bash
+# Terminal 1: start Wactorz REST
+wactorz --interface rest --port 8000
+
+# Terminal 2: smoke-test MCP tool discovery
+python -c "import asyncio, wactorz.interfaces.mcp_server as s; print([t.name for t in asyncio.run(s.mcp.list_tools())])"
+```
+
+If your editable install does not have a `wactorz-mcp` script yet, use the module form:
+
+```bash
+python -m wactorz.interfaces.mcp_server
+```
+
+#### Configuration
+
+```env
+WACTORZ_URL=http://localhost:8000
+WACTORZ_API_KEY=              # optional; sent as X-API-Key to Wactorz REST
+HA_URL=http://homeassistant.local:8123
+HA_TOKEN=                     # optional; enables direct HA tools
+```
+
+#### Tools
+
+| Tool | Description |
+|---|---|
+| `ask_wactorz(message)` | Send a message to the main orchestrator through `/chat`. |
+| `ask_agent(agent_name, message)` | Send a message to a named agent through `/chat`. |
+| `list_agents()` | List currently registered agents from `/agents`. |
+| `list_capabilities(keyword)` | Ask main for the running and spawnable capability catalog. |
+| `stop_agent(agent_id)` | Stop and unregister a non-protected actor via REST. |
+| `pause_agent(agent_id)` | Pause a non-protected actor. |
+| `resume_agent(agent_id)` | Resume a paused actor. |
+| `ha_list_entities(domain)` | List Home Assistant entities directly from HA REST. |
+| `ha_get_state(entity_id)` | Read one Home Assistant entity state. |
+| `ha_call_service(domain, service, entity_id, data_json)` | Call a Home Assistant service directly. |
+
+#### Resources
+
+| URI | Description |
+|---|---|
+| `wactorz://agents` | Current running agents as JSON. |
+| `wactorz://capabilities` | Capability catalog from main. |
+| `wactorz://ha-map` | Latest HA map snapshot from `/ha-map`. |
+| `wactorz://config` | Sanitized MCP server configuration. |
+
+#### MCP Inspector
+
+```bash
+npx @modelcontextprotocol/inspector python -m wactorz.interfaces.mcp_server
+```
+
+Run `list_agents`, `ask_wactorz` with `/agents`, and read `wactorz://config` first. Try `ha_list_entities` only after `HA_URL` and `HA_TOKEN` are configured and reachable.
+
+#### Client config example
+
+```json
+{
+  "mcpServers": {
+    "wactorz": {
+      "command": "python",
+      "args": ["-m", "wactorz.interfaces.mcp_server"],
+      "env": {
+        "WACTORZ_URL": "http://localhost:8000"
+      }
+    }
+  }
+}
+```
+
+> **Security:** Treat MCP clients as privileged. The server can route prompts into Wactorz, manage agents, and, when configured, call Home Assistant services. Do not expose the stdio MCP server directly to the internet.
 
 ---
 
