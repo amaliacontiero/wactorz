@@ -14,6 +14,7 @@ interface AppConfig {
   mqtt_port: number;
   ha_url: string;
   ha_token: string;
+  autostart: boolean;
 }
 
 function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -110,6 +111,15 @@ export class SettingsPanel {
                      placeholder="ey…" autocomplete="off" />
             </label>
           </section>
+
+          <section class="settings-section">
+            <div class="settings-section-title">System</div>
+
+            <label class="settings-label settings-label--row">
+              <input id="cfg-autostart" type="checkbox" class="settings-checkbox" />
+              Launch Wactorz automatically at login
+            </label>
+          </section>
         </div>
 
         <div class="settings-footer">
@@ -150,6 +160,8 @@ export class SettingsPanel {
     this._val("cfg-mqtt-port", String(cfg.mqtt_port));
     this._val("cfg-ha-url", cfg.ha_url);
     this._val("cfg-ha-token", cfg.ha_token);
+    const autostartEl = this.overlay.querySelector<HTMLInputElement>("#cfg-autostart");
+    if (autostartEl) autostartEl.checked = cfg.autostart;
     const note = this.overlay.querySelector<HTMLElement>(
       "#settings-restart-note",
     );
@@ -157,6 +169,7 @@ export class SettingsPanel {
   }
 
   private _collect(): AppConfig {
+    const autostartEl = this.overlay.querySelector<HTMLInputElement>("#cfg-autostart");
     return {
       api_port: 8888,
       llm_provider: this._get("cfg-llm-provider"),
@@ -166,6 +179,7 @@ export class SettingsPanel {
       mqtt_port: parseInt(this._get("cfg-mqtt-port"), 10) || 1883,
       ha_url: this._get("cfg-ha-url"),
       ha_token: this._get("cfg-ha-token"),
+      autostart: autostartEl?.checked ?? false,
     };
   }
 
@@ -268,6 +282,8 @@ export class SettingsPanel {
         outline: none; width: 100%;
       }
       .settings-input:focus { border-color: #6366f1; background: rgba(99,102,241,.08); }
+      .settings-label--row { flex-direction: row; align-items: center; gap: 8px; cursor: pointer; }
+      .settings-checkbox { width: 15px; height: 15px; accent-color: #6366f1; cursor: pointer; }
       .settings-footer {
         display: flex; align-items: center; justify-content: flex-end;
         gap: 8px; padding: 14px 20px;

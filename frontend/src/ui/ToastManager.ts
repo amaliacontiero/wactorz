@@ -251,7 +251,7 @@ const CSS = `
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function initials(name: string): string {
+export function initials(name: string): string {
   const parts = name.trim().split(/[\s\-_]+/);
   if (parts.length >= 2) {
     const a = parts[0] ? parts[0][0] ?? "" : "";
@@ -380,7 +380,7 @@ class ToastManager {
   }
 }
 
-function escHtml(s: string): string {
+export function escHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")

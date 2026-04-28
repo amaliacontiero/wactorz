@@ -17,7 +17,7 @@
     "outDir": "dist",
     "rootDir": "src",
     "paths": {},
-    "types": ["vite/client"]
+    "types": ["vite/client", "vitest/globals"]
   },
   "include": ["src"],
   "exclude": ["node_modules", "dist"]
