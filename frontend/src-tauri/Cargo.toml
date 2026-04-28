@@ -20,6 +20,8 @@ tauri-build = { version = "2.5.6", features = [] }
 tauri                    = { version = "2.10.3", features = ["tray-icon"] }
 tauri-plugin-log         = "2"
 tauri-plugin-notification = "2"
+tauri-plugin-autostart   = "2"
+tauri-plugin-window-state = "2"
 log              = "0.4"
 
 # Shared serialisation (version-pinned to match Tauri's expectations)

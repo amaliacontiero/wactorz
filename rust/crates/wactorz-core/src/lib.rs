@@ -12,12 +12,14 @@
 pub mod actor;
 pub mod message;
 pub mod metrics;
+pub mod persistence;
 pub mod publish;
 pub mod registry;
 
 pub use actor::{Actor, ActorConfig, ActorState};
 pub use message::{Message, MessageType};
 pub use metrics::{ActorMetrics, MetricsSnapshot};
+pub use persistence::ActorPersistence;
 pub use publish::EventPublisher;
 pub use registry::{
     ActorEntry, ActorFactory, ActorRegistry, ActorSystem, Supervisor, SupervisorStrategy,

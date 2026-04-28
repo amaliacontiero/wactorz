@@ -67,6 +67,9 @@ uuid = { version = "1.23.1", features = ["v4"] }
 # CLI
 clap = { version = "4.6.1", features = ["derive", "env"] }
 
+# SQLite persistence
+rusqlite = { version = "0.32", features = ["bundled"] }
+
 # Internal crates
 wactorz-core = { path = "rust/crates/wactorz-core" }
 wactorz-mqtt = { path = "rust/crates/wactorz-mqtt" }

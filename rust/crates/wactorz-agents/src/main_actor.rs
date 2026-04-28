@@ -25,7 +25,8 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use wactorz_core::{
-    Actor, ActorConfig, ActorMetrics, ActorState, ActorSystem, EventPublisher, Message,
+    Actor, ActorConfig, ActorMetrics, ActorPersistence, ActorState, ActorSystem, EventPublisher,
+    Message,
 };
 
 use crate::llm_agent::{LlmAgent, LlmConfig};
@@ -56,6 +57,7 @@ pub struct MainActor {
     mailbox_tx: mpsc::Sender<Message>,
     mailbox_rx: Option<mpsc::Receiver<Message>>,
     publisher: Option<EventPublisher>,
+    data_dir: Option<std::path::PathBuf>,
 }
 
 impl MainActor {
@@ -79,12 +81,19 @@ impl MainActor {
             mailbox_tx: tx,
             mailbox_rx: Some(rx),
             publisher: None,
+            data_dir: None,
         }
     }
 
     /// Attach an EventPublisher for MQTT output.
     pub fn with_publisher(mut self, p: EventPublisher) -> Self {
         self.publisher = Some(p);
+        self
+    }
+
+    /// Enable persistence for the embedded LLM; data is stored under `data_dir`.
+    pub fn with_persistence(mut self, data_dir: std::path::PathBuf) -> Self {
+        self.data_dir = Some(data_dir);
         self
     }
 
@@ -242,6 +251,18 @@ impl Actor for MainActor {
 
     async fn on_start(&mut self) -> Result<()> {
         self.state = ActorState::Running;
+
+        // Open persistence for the embedded LLM and restore its state.
+        if let Some(dir) = &self.data_dir {
+            match ActorPersistence::open(dir, &self.llm.config.name) {
+                Ok(db) => {
+                    self.llm.persistence = Some(db);
+                    self.llm.on_start().await?;
+                }
+                Err(e) => tracing::warn!("[{}] Could not open persistence DB: {e}", self.config.name),
+            }
+        }
+
         if let Some(pub_) = &self.publisher {
             pub_.publish(
                 wactorz_mqtt::topics::spawn(&self.config.id),

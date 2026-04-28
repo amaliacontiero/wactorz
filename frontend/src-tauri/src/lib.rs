@@ -39,6 +39,8 @@ pub struct AppConfig {
     pub ha_url: String,
     pub ha_token: String,
     pub static_dir: String,
+    /// Launch Wactorz automatically at OS login.
+    pub autostart: bool,
 }
 
 impl Default for AppConfig {
@@ -54,6 +56,7 @@ impl Default for AppConfig {
             ha_url: env_str("HA_URL", ""),
             ha_token: env_str("HA_TOKEN", ""),
             static_dir: env_str("STATIC_DIR", "static/app"),
+            autostart: false,
         }
     }
 }
@@ -150,15 +153,40 @@ fn save_config(
     state: tauri::State<ConfigState>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
     let path = config_path(&app);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    // Sync autostart registration with the saved preference.
+    let autolaunch = app.autolaunch();
+    if config.autostart {
+        let _ = autolaunch.enable();
+    } else {
+        let _ = autolaunch.disable();
     }
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())?;
     *state.0.lock().unwrap() = config;
     tracing::info!("Config saved to {}", path.display());
     Ok(())
+}
+
+#[tauri::command]
+fn get_autostart(app: tauri::AppHandle) -> bool {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().unwrap_or(false)
+}
+
+#[tauri::command]
+fn set_autostart(enabled: bool, app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let autolaunch = app.autolaunch();
+    if enabled {
+        autolaunch.enable().map_err(|e| e.to_string())
+    } else {
+        autolaunch.disable().map_err(|e| e.to_string())
+    }
 }
 // ── Tray ──────────────────────────────────────────────────────────────────────
 
@@ -212,7 +240,7 @@ fn toggle_window(app: &tauri::AppHandle) {
 
 // ── Embedded backend ──────────────────────────────────────────────────────────
 
-async fn start_backend(cfg: AppConfig) -> Result<()> {
+async fn start_backend(cfg: AppConfig, data_dir: std::path::PathBuf) -> Result<()> {
     let (publisher, mut pub_rx) = EventPublisher::channel();
     let system = ActorSystem::with_publisher(publisher.clone());
 
@@ -390,17 +418,18 @@ async fn start_backend(cfg: AppConfig) -> Result<()> {
         let lc = llm_config.clone();
         let sys = system.clone();
         let pub_ = publisher.clone();
+        let dd = data_dir.clone();
         sup.supervise(
             "main-actor",
             Arc::new(move || {
-                Box::new(
-                    MainActor::new(
-                        ActorConfig::new_with_node("main-actor", "alpha").protected(),
-                        lc.clone(),
-                        sys.clone(),
-                    )
-                    .with_publisher(pub_.clone()),
+                let mut actor = MainActor::new(
+                    ActorConfig::new_with_node("main-actor", "alpha").protected(),
+                    lc.clone(),
+                    sys.clone(),
                 )
+                .with_publisher(pub_.clone());
+                actor = actor.with_persistence(dd.clone());
+                Box::new(actor)
             }),
             SupervisorStrategy::OneForOne,
             10,
@@ -452,13 +481,36 @@ pub fn run() {
     let _ = dotenvy::dotenv();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .setup(|app| {
             let cfg = load_config(app.handle());
             let port = cfg.api_port;
 
+            // Sync autostart registration with persisted preference on every launch.
+            {
+                use tauri_plugin_autostart::ManagerExt;
+                let autolaunch = app.autolaunch();
+                if cfg.autostart {
+                    let _ = autolaunch.enable();
+                } else {
+                    let _ = autolaunch.disable();
+                }
+            }
+
+            let data_dir = app
+                .path()
+                .app_data_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+
             app.manage(ConfigState(Mutex::new(cfg.clone())));
             app.manage(BadgeState(Mutex::new(0)));
 
+            // window-state plugin restores position/size; .center() is the
+            // fallback for the very first launch when no saved state exists.
             tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
                 .title("Wactorz")
                 .inner_size(1400.0, 900.0)
@@ -471,7 +523,7 @@ pub fn run() {
             build_tray(app)?;
 
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = start_backend(cfg).await {
+                if let Err(e) = start_backend(cfg, data_dir).await {
                     tracing::error!("Embedded backend exited: {e}");
                 }
             });
@@ -492,7 +544,9 @@ pub fn run() {
             save_config,
             notify,
             add_unread,
-            clear_unread
+            clear_unread,
+            get_autostart,
+            set_autostart,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
