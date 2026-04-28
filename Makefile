@@ -201,7 +201,7 @@ coverage-rust: ## Generate Rust coverage with cargo-llvm-cov
 docs-serve: ## Build docs + serve locally on :8001
 	$(PYTHON) -W ignore::UserWarning:pdoc scripts/build_docs.py --serve
 
-docs-build: ## Build full docs site (markdown→HTML + rustdoc + typedoc) into site/
+docs-build: ## Build full docs site (markdown→HTML + rustdoc + typedoc) into static/docs/
 	$(PYTHON) -W ignore::UserWarning:pdoc scripts/build_docs.py --full
 
 publish: ## Build wheel + sdist and upload to PyPI (requires twine + API token)
