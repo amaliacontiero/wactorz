@@ -56,6 +56,7 @@ export class WSChatClient {
   private _onMode: ModeHandler | null = null;
   private _onStatePatch: StatePatchHandler | null = null;
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private _reconnectDelay = 1_000;
   private _url = "";
   private _closed = false;
 
@@ -95,6 +96,7 @@ export class WSChatClient {
   connect(url: string): void {
     this._url = url;
     this._closed = false;
+    this._reconnectDelay = 1_000;
     this._open();
   }
 
@@ -143,6 +145,7 @@ export class WSChatClient {
 
     this.ws.addEventListener("open", () => {
       console.info("[WSChat] connected →", this._url);
+      this._reconnectDelay = 1_000;
     });
 
     this.ws.addEventListener("message", (ev: MessageEvent) => {
@@ -205,9 +208,11 @@ export class WSChatClient {
 
   private _scheduleReconnect(): void {
     if (this._closed || this._reconnectTimer !== null) return;
+    const delay = this._reconnectDelay;
+    this._reconnectDelay = Math.min(this._reconnectDelay * 2, 30_000);
     this._reconnectTimer = setTimeout(() => {
       this._reconnectTimer = null;
       this._open();
-    }, 3000);
+    }, delay);
   }
 }

@@ -214,6 +214,7 @@ export class CardDashboard {
 
   removeAgent(id: string): void {
     this.agents.delete(id);
+    this._historyLoaded.delete(id);
     if (!this.root.classList.contains("cd-visible")) return;
     const card = this.root.querySelector<HTMLElement>(
       `[data-id="${CSS.escape(id)}"]`,

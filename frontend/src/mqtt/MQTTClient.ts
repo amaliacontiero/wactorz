@@ -95,6 +95,10 @@ export class MQTTClient {
       this.emit("disconnected", undefined);
     });
 
+    this.client.on("close", () => {
+      this.emit("disconnected", undefined);
+    });
+
     this.client.on("error", (err) => {
       console.error("[MQTT] Error:", err);
       this.emit("error", err);

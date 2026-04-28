@@ -16,7 +16,7 @@ const LS_TTS = "wactorz.tts";
 
 /** Patterns that indicate the user wants the reply spoken aloud. */
 const SPEAK_REQUEST =
-  /\b(speak|read|say|tell me|voice|out ?loud|aloud|read ?(it|that|this) ?out)\b/i;
+  /\b(speak|narrate|recite|read|say|tell me|voice|out ?loud|aloud|read ?(it|that|this) ?(?:out|back)|say ?(it|that|this)? ?(?:out ?loud|aloud))\b/i;
 
 export class TTSManager {
   private _beepEnabled: boolean;

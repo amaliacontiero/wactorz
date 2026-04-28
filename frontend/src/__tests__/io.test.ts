@@ -246,6 +246,16 @@ describe("IOManager.receiveAgentMessage", () => {
     expect(panel.hideTyping).toHaveBeenCalledWith("main-actor");
   });
 
+  it("suppresses message when direct_ws mode is active (double-delivery guard)", () => {
+    const mqtt = makeMqtt();
+    const panel = makeChatPanel();
+    const io = new IOManager(mqtt, panel);
+    const ws = makeWS("direct_ws");
+    io.setWSClient(ws as any);
+    io.receiveAgentMessage(msg({ to: "user" }));
+    expect(panel.appendMessage).not.toHaveBeenCalled();
+  });
+
   it("clears the last typing key if different from sender", async () => {
     const mqtt = makeMqtt();
     const panel = makeChatPanel();

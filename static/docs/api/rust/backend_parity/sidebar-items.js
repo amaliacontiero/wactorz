@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["build_expected","main","parse_args","run_scenario"],"struct":["ActorCfg","ActorResult","Expected","Fixture","Output","ProbeActor","Scenario","ScenarioResult"]};

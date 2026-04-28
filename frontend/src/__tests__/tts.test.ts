@@ -129,7 +129,10 @@ describe("TTSManager", () => {
 
   // ── speak keyword variants ────────────────────────────────────────────────
 
-  it.each(["speak", "read it out", "say it", "tell me", "voice", "aloud", "out loud", "read this out"])(
+  it.each([
+    "speak", "read it out", "say it", "tell me", "voice", "aloud", "out loud", "read this out",
+    "narrate", "recite", "read that back", "read it back", "say that aloud", "say it out loud",
+  ])(
     "checkUserIntent recognises keyword '%s'",
     async (phrase) => {
       const { TTSManager } = await freshTTS();

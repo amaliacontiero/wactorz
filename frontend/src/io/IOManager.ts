@@ -156,6 +156,9 @@ export class IOManager {
 
   /** Route an incoming agent→user chat message to the panel. */
   receiveAgentMessage(msg: ChatMessage): void {
+    // In direct_ws mode the WebSocket delivers all replies — suppress MQTT duplicates.
+    if (this._ws?.chatMode === "direct_ws") return;
+
     // Ignore agent↔agent background chatter — only handle user-directed replies.
     // Allow empty/missing `to` (older agents omit it) but drop explicit non-user targets.
     if (msg.to && msg.to !== "user") return;

@@ -274,6 +274,13 @@ describe("MQTTClient", () => {
     expect(spy).toHaveBeenCalled();
   });
 
+  it("emits 'disconnected' on TCP-level close event", () => {
+    const spy = vi.fn();
+    client.on("disconnected", spy);
+    mockHandlers["close"]?.();
+    expect(spy).toHaveBeenCalled();
+  });
+
   it("emits 'error' on broker error", () => {
     const spy = vi.fn();
     client.on("error", spy);

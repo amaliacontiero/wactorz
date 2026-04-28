@@ -252,7 +252,7 @@ describe("WSChatClient", () => {
     c.connect("ws://localhost/ws");
     ws().readyState = MockWebSocket.CLOSED;
     ws().emit("close", {});
-    vi.advanceTimersByTime(3001);
+    vi.advanceTimersByTime(1001);
     expect(instances.length).toBe(2);
   });
 
@@ -261,8 +261,41 @@ describe("WSChatClient", () => {
     c.connect("ws://localhost/ws");
     ws().emit("close", {});
     ws().emit("close", {});
-    vi.advanceTimersByTime(3001);
+    vi.advanceTimersByTime(1001);
     expect(instances.length).toBe(2);
+    c.disconnect();
+  });
+
+  it("reconnect delay doubles on each attempt (exponential backoff)", () => {
+    const c = new WSChatClient();
+    c.connect("ws://localhost/ws");
+    // First close → 1000ms delay
+    ws().emit("close", {});
+    vi.advanceTimersByTime(1001);
+    expect(instances.length).toBe(2);
+    // Second close → 2000ms delay
+    ws().emit("close", {});
+    vi.advanceTimersByTime(1001);
+    expect(instances.length).toBe(2); // not yet
+    vi.advanceTimersByTime(1001);
+    expect(instances.length).toBe(3);
+    c.disconnect();
+  });
+
+  it("reconnect delay resets to 1000ms after successful open", () => {
+    const c = new WSChatClient();
+    c.connect("ws://localhost/ws");
+    // Trigger two failures to bump delay to 2000ms
+    ws().emit("close", {});
+    vi.advanceTimersByTime(1001);
+    ws().emit("close", {});
+    vi.advanceTimersByTime(2001);
+    // Now fire "open" to reset delay
+    ws().emit("open", {});
+    ws().emit("close", {});
+    vi.advanceTimersByTime(1001);
+    // Should reconnect at 1000ms again (total 4 instances)
+    expect(instances.length).toBe(4);
     c.disconnect();
   });
 
@@ -292,7 +325,7 @@ describe("WSChatClient", () => {
     (globalThis as any).WebSocket = class { constructor() { throw new Error("no ws"); } };
     const c = new WSChatClient();
     expect(() => c.connect("ws://bad")).not.toThrow();
-    vi.advanceTimersByTime(3001);
+    vi.advanceTimersByTime(1001);
     (globalThis as any).WebSocket = original;
     c.disconnect();
   });
