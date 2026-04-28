@@ -470,9 +470,9 @@ async def find_stale_agents(
     This is a bonus utility; the planner can call it as a health check and
     include the result in its context or alert the user.
 
-    NOTE: This relies on the metricsUpdatedAt accumulation pattern in your data.
-    The query finds the MAX timestamp per agent and flags agents where that
-    max is older than the threshold.
+    The query finds the latest metricsUpdatedAt per agent (each agent has exactly
+    one value — upserted atomically) and flags agents where that timestamp is
+    older than the threshold.
     """
     q = _PREFIXES + f"""
 SELECT ?agentLabel (MAX(?ts) AS ?latestUpdate)

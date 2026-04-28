@@ -347,6 +347,9 @@ async def app():
     
     system, main_actor = await build_system(args)
 
+    from wactorz.monitoring.otel import setup_otel, shutdown_otel
+    setup_otel(lambda: system.registry)
+
     if not args.no_monitor:
         await _start_web_ui(
             port=args.monitor_port,
@@ -398,6 +401,7 @@ async def app():
     except Exception as exc:
         logger.error(f"System error: {exc}", exc_info=True)
     finally:
+        shutdown_otel()
         await system.stop_all()
 
 def main():

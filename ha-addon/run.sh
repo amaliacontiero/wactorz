@@ -81,6 +81,12 @@ export DISCORD_BOT_TOKEN=$(get_config_safe 'discord_bot_token' '')
 export TELEGRAM_BOT_TOKEN=$(get_config_safe 'telegram_bot_token' '')
 export TELEGRAM_ALLOWED_USER_ID=$(get_config_safe 'telegram_allowed_user_id' '0')
 
+OTEL_ENDPOINT=$(get_config_safe 'otel_endpoint' '')
+if [ -n "$OTEL_ENDPOINT" ]; then
+    export OTEL_EXPORTER_OTLP_ENDPOINT="$OTEL_ENDPOINT"
+    export OTEL_SERVICE_NAME=$(get_config_safe 'otel_service_name' 'wactorz')
+fi
+
 # Embedded services
 MOSQUITTO_EMBEDDED=$(get_config_safe 'mosquitto_embedded' 'false')
 FUSEKI_EMBEDDED=$(get_config_safe 'fuseki_embedded' 'false')
