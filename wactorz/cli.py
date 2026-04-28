@@ -130,7 +130,7 @@ def get_args():
 	return args
 
 
-async def _start_web_ui(port: int, mqtt_broker: str, mqtt_port: int, actor_registry=None) -> None:
+async def _start_web_ui(port: int, mqtt_broker: str, mqtt_port: int, actor_registry=None, persistence_db=None) -> None:
     """Start the monitor web server as a quiet background asyncio task."""
     import logging as _log
     import wactorz.monitor_server as _ms
@@ -143,6 +143,8 @@ async def _start_web_ui(port: int, mqtt_broker: str, mqtt_port: int, actor_regis
     # Wire the registry in so chat is routed directly — no IOAgent needed
     if actor_registry is not None:
         _ms.registry = actor_registry
+    if persistence_db is not None:
+        _ms.db = persistence_db
 
     for _name in ("wactorz.monitor_server", "aiohttp.access", "aiohttp.server"):
         _log.getLogger(_name).setLevel(_log.WARNING)
@@ -351,6 +353,7 @@ async def app():
             mqtt_broker=args.mqtt_broker or CONFIG.mqtt_host,
             mqtt_port=args.mqtt_port or CONFIG.mqtt_port,
             actor_registry=system.registry,
+            persistence_db=_db,
         )
 
     from wactorz.interfaces.chat_interfaces import (

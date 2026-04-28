@@ -45,6 +45,9 @@ MQTT_TOPICS  = ["agents/#", "system/#", "nodes/#", "io/chat"]
 # <registry> → direct mode (Option B)
 registry = None
 
+# Injected by cli.py — used to query historical cost data for deleted agents.
+db = None
+
 IO_GATEWAY_ID = "io-gateway"
 
 state = {
@@ -573,10 +576,34 @@ def _node_online(last_seen: float) -> bool:
     return (time.time() - last_seen) < 45
 
 
+def _historical_cost_usd() -> float:
+    """Sum _final_cost for agents no longer in state (deleted/restarted before rejoining)."""
+    if db is None:
+        return 0.0
+    try:
+        import json as _json
+        live_names = {a.get("name", "") for a in state["agents"].values()}
+        rows = db.conn.execute(
+            "SELECT value FROM kv_store WHERE key = '_final_cost'"
+        ).fetchall()
+        total = 0.0
+        for row in rows:
+            try:
+                entry = _json.loads(row[0])
+                if entry.get("name") not in live_names:
+                    total += entry.get("cost_usd", 0.0)
+            except Exception:
+                pass
+        return total
+    except Exception:
+        return 0.0
+
+
 def _snapshot() -> dict:
     for nd in state["nodes"].values():
         nd["online"] = _node_online(nd.get("last_seen", 0))
-    total_cost = sum(a.get("cost_usd", 0.0) for a in state["agents"].values())
+    live_cost = sum(a.get("cost_usd", 0.0) for a in state["agents"].values())
+    total_cost = live_cost + _historical_cost_usd()
     return {
         "agents":         list(state["agents"].values()),
         "nodes":          list(state["nodes"].values()),

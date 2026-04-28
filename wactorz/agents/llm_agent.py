@@ -509,6 +509,13 @@ class LLMAgent(Actor):
         self._conversation_history = clean[-self.max_history:]
         self._history_summary = self.recall("history_summary", "")
 
+        # Restore lifetime cost so heartbeats carry accurate totals after restart
+        saved_cost = self.recall("_final_cost", {})
+        if isinstance(saved_cost, dict):
+            self.total_input_tokens  += saved_cost.get("input_tokens", 0)
+            self.total_output_tokens += saved_cost.get("output_tokens", 0)
+            self.total_cost_usd      += saved_cost.get("cost_usd", 0.0)
+
         # Publish capability manifest so main's topic registry knows this agent exists
         description = (
             getattr(self, "DESCRIPTION", None)
@@ -690,6 +697,7 @@ class LLMAgent(Actor):
         self.total_input_tokens  += usage.get("input_tokens", 0)
         self.total_output_tokens += usage.get("output_tokens", 0)
         self.total_cost_usd      += usage.get("cost_usd", 0.0)
+        self._persist_cost()
 
         await self._mqtt_publish(
             f"agents/{self.actor_id}/metrics",
@@ -746,6 +754,7 @@ class LLMAgent(Actor):
         self.total_input_tokens  += usage.get("input_tokens", 0)
         self.total_output_tokens += usage.get("output_tokens", 0)
         self.total_cost_usd      += usage.get("cost_usd", 0.0)
+        self._persist_cost()
 
         await self._mqtt_publish(
             f"agents/{self.actor_id}/metrics",
@@ -754,6 +763,15 @@ class LLMAgent(Actor):
 
         # Yield final usage dict so caller can log it
         yield usage
+
+    def _persist_cost(self):
+        """Write lifetime cost to durable SQLite storage after each exchange."""
+        self.persist("_final_cost", {
+            "input_tokens":  self.total_input_tokens,
+            "output_tokens": self.total_output_tokens,
+            "cost_usd":      round(self.total_cost_usd, 6),
+            "name":          self.name,
+        })
 
     def _build_metrics(self) -> dict:
         m = super()._build_metrics()
