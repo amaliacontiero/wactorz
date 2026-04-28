@@ -178,7 +178,7 @@
 <tbody>
 <tr>
 <td><code>actor.py</code></td>
-<td><code>Actor</code> base class — message loop, heartbeat, persistence (<code>pickle</code>), supervisor strategy enum</td>
+<td><code>Actor</code> base class — message loop, heartbeat, persistence (SQLite / Redis / Pickle), supervisor strategy enum</td>
 </tr>
 <tr>
 <td><code>registry.py</code></td>
@@ -259,11 +259,36 @@
 <p>The Supervisor wraps each actor with a <code>ONE_FOR_ONE</code> restart policy. If an actor crashes, only that actor is restarted — others keep running. <code>max_restarts</code> and <code>restart_delay</code> are configurable per actor.</p>
 <hr />
 <h2 id="persistence">Persistence</h2>
-<p>Each actor persists state as a <code>pickle</code> file at <code>state/{actor_name}/state.pkl</code>. The <code>Actor.persist(key, value)</code> method writes synchronously to disk on every call. <code>Actor.recall(key)</code> reads from the in-memory dict (loaded at startup from the pickle).</p>
-<blockquote>
-<p><strong>Cross-agent reads</strong> — Agents can read another agent's pickle directly by navigating to the sibling state directory — useful when two agents need to share large datasets without going through MQTT.</p>
-</blockquote>
-<p>The spawn registry is stored in <code>state/main/state.pkl</code> under <code>_spawned_agents</code>. On restart, MainActor re-spawns every entry in the registry so dynamic agents and catalog agents survive reboots.</p>
+<p>Wactorz uses a three-tier persistence layer (<code>wactorz/core/persistence.py</code>) that routes each key to the appropriate store:</p>
+<table>
+<thead>
+<tr>
+<th>Store</th>
+<th>Location</th>
+<th>Used for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>SQLite</strong></td>
+<td><code>state/wactorz.db</code></td>
+<td>Durable structured data: spawn registry, pipeline rules, user facts, topic contracts, conversation history, time-series sensor/detection/HA-state data</td>
+</tr>
+<tr>
+<td><strong>Redis</strong></td>
+<td><code>redis://localhost:6379</code> (falls back to in-memory if Redis is unavailable)</td>
+<td>Ephemeral fast-access data: observed topic samples, agent metrics, heartbeat state</td>
+</tr>
+<tr>
+<td><strong>Pickle</strong></td>
+<td><code>state/{actor_name}/state.pkl</code></td>
+<td>Arbitrary Python objects: custom agent state dicts, ML models, numpy arrays, cv2 captures</td>
+</tr>
+</tbody>
+</table>
+<p><code>Actor.persist(key, value)</code> and <code>Actor.recall(key)</code> route automatically to the correct store based on the key name. Existing agent code works without changes.</p>
+<p>The spawn registry (<code>_spawned_agents</code>) is stored in SQLite. On restart, MainActor re-spawns every entry so dynamic agents and catalog agents survive reboots.</p>
+<p>On first startup after upgrading from an older version, <code>migrate_from_pickle()</code> reads existing <code>.pkl</code> files and moves structured keys to SQLite/Redis. Pickle files are left in place for keys that remain in pickle.</p>
 <hr />
 <h2 id="mqtt-topics">MQTT Topics</h2>
 <table>
