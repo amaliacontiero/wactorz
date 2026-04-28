@@ -273,6 +273,12 @@ class Actor(ABC):
         }
 
     async def _handle_stop(self, msg: Message):
+        # Release from supervision before stopping so the heartbeat watchdog
+        # doesn't race to restart us after we go quiet.
+        if self._registry and hasattr(self._registry, "_supervisor_ref"):
+            sup = self._registry._supervisor_ref
+            if sup is not None:
+                sup.release(self.name)
         await self.stop()
 
     async def _handle_pause(self, msg: Message):
@@ -357,6 +363,13 @@ class Actor(ABC):
                                 logger.warning(f"[{self.name}] Ignoring '{command}' — actor is protected.")
                                 continue
                             if command == "stop":
+                                # ── Erlang unlink: release from supervision FIRST ──
+                                # If we just stop without releasing, the heartbeat-silence
+                                # watchdog will fire ~35s later and restart us anyway.
+                                if self._registry and hasattr(self._registry, "_supervisor_ref"):
+                                    sup = self._registry._supervisor_ref
+                                    if sup is not None:
+                                        sup.release(self.name)
                                 await self.stop()
                                 return
                             elif command == "pause":
@@ -364,6 +377,11 @@ class Actor(ABC):
                             elif command == "resume":
                                 await self.resume()
                             elif command == "delete":
+                                # ── Erlang unlink: release from supervision FIRST ──
+                                if self._registry and hasattr(self._registry, "_supervisor_ref"):
+                                    sup = self._registry._supervisor_ref
+                                    if sup is not None:
+                                        sup.release(self.name)
                                 # If main actor knows about this agent, remove from spawn registry
                                 if self._registry:
                                     main = self._registry.find_by_name("main")
@@ -411,6 +429,10 @@ class Actor(ABC):
         - Registry (so it can send/receive messages)
         - Persistence dir defaults to same root
         - Persistence API (SQLite/Redis/Pickle routing)
+
+        Erlang/OTP supervision: if the owning ActorSystem has a Supervisor,
+        the child is automatically registered under it with ONE_FOR_ONE so it
+        will be restarted if it crashes — no child is an orphan.
         """
         # Default persistence to same root as parent
         kwargs.setdefault("persistence_dir", str(self._persistence_dir.parent))
@@ -441,6 +463,64 @@ class Actor(ABC):
 
         # Start the child
         await child.start()
+
+        # ── Erlang/OTP: register child under Supervisor so it's never an orphan ──
+        # We reach into the registry to find the ActorSystem's supervisor.
+        # If no supervisor is available this is a safe no-op.
+        try:
+            if self._registry and hasattr(self._registry, "_supervisor_ref"):
+                supervisor = self._registry._supervisor_ref
+                if supervisor is not None and child.name not in supervisor._specs:
+                    # Capture child class + kwargs for the factory closure
+                    _child_class  = actor_class
+                    _child_kwargs = dict(kwargs)
+                    _child_name   = child.name
+                    _mqtt_client  = self._mqtt_client
+                    _mqtt_broker  = self._mqtt_broker
+                    _mqtt_port    = self._mqtt_port
+                    _persistence_api = self._persistence_api
+
+                    async def _child_factory(
+                        cls=_child_class, kw=_child_kwargs,
+                        mc=_mqtt_client, mb=_mqtt_broker, mp=_mqtt_port,
+                        papi=_persistence_api
+                    ):
+                        c = cls(**kw)
+                        c._mqtt_client = mc
+                        c._mqtt_broker = mb
+                        c._mqtt_port   = mp
+                        if papi is not None:
+                            try:
+                                from .persistence import PersistenceAPI, get_db, get_redis, get_pickle_store
+                                db = get_db(); redis = get_redis(); pkl = get_pickle_store()
+                                if db and redis and pkl:
+                                    c._persistence_api = PersistenceAPI(db, redis, pkl, c.name)
+                            except ImportError:
+                                pass
+                        return c
+
+                    supervisor.supervise(
+                        child.name,
+                        _child_factory,
+                        strategy   = SupervisorStrategy.ONE_FOR_ONE,
+                        max_restarts   = 5,
+                        restart_window = 60.0,
+                        restart_delay  = 2.0,
+                    )
+                    # Point spec.actor at the already-running child so the watch loop
+                    # starts monitoring immediately without a redundant restart.
+                    supervisor._specs[child.name].actor = child
+                    if child.name not in supervisor._order:
+                        supervisor._order.append(child.name)
+                    child.supervisor_id = id(supervisor)
+                    logger.info(
+                        f"[{self.name}] Child '{child.name}' auto-registered under Supervisor."
+                    )
+        except Exception as _sup_err:
+            # Never let supervision registration crash the spawn itself
+            logger.warning(
+                f"[{self.name}] Could not auto-supervise child '{child.name}': {_sup_err}"
+            )
 
         # Immediately announce to monitor - don't wait for heartbeat loop
         await child._publish_status()

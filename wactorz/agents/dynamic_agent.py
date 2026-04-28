@@ -123,6 +123,8 @@ class DynamicAgent(Actor):
                     self._code = fixed
                     error_msg  = None
                     logger.info(f"[{self.name}] Code fixed by LLM after {attempt} attempt(s).")
+                    # ── Write fixed code back to spawn registry so restart uses it ──
+                    self._persist_fixed_code(fixed)
                     await self._mqtt_publish(
                         f"agents/{self.actor_id}/logs",
                         {"type": "log",
@@ -138,6 +140,8 @@ class DynamicAgent(Actor):
             # All attempts exhausted — publish fatal and stop
             err_exc = SyntaxError(error_msg)
             logger.error(f"[{self.name}] Code compilation failed permanently: {error_msg}")
+            # ── Erlang/OTP: mark FAILED so Supervisor's watch_loop detects us ──
+            self.state = ActorState.FAILED
             await self._publish_error(phase="compile", error=err_exc,
                                       traceback_str=error_msg, fatal=True)
             return
@@ -608,6 +612,8 @@ class DynamicAgent(Actor):
                 await self._fn_setup(self._api)
                 if attempt > 0:
                     logger.info(f"[{self.name}] setup() succeeded after {attempt} fix(es).")
+                    # ── Write fixed code back to spawn registry so restart uses it ──
+                    self._persist_fixed_code(self._code)
                     await self._mqtt_publish(
                         f"agents/{self.actor_id}/logs",
                         {"type": "log",
@@ -660,6 +666,8 @@ class DynamicAgent(Actor):
         if last_error is not None:
             err = traceback.format_exc()
             logger.error(f"[{self.name}] setup() failed permanently: {last_error}")
+            # ── Erlang/OTP: mark FAILED so Supervisor's watch_loop can see us ──
+            self.state = ActorState.FAILED
             await self._publish_error(
                 phase="setup", error=last_error, traceback_str=err, fatal=True
             )
@@ -752,8 +760,25 @@ class DynamicAgent(Actor):
     _PROCESS_TIMEOUT = 120.0    # seconds
     _HANDLE_TASK_TIMEOUT = 60.0
 
+    # ── How many consecutive process() errors before we attempt LLM self-fix ──
+    _PROCESS_LLM_FIX_THRESHOLD = 3    # try to fix after this many errors in a row
+    # How many consecutive process() errors trigger state=FAILED (Supervisor sees this)
+    _PROCESS_FAIL_THRESHOLD    = 5
+
     async def _process_loop(self):
-        """Continuously call the generated process() function."""
+        """
+        Continuously call the generated process() function.
+
+        Erlang/OTP semantics:
+        - Each error increments _consecutive_errors.
+        - At _PROCESS_LLM_FIX_THRESHOLD consecutive errors, ask the LLM to fix the code
+          and recompile in-place (self-healing).
+        - At _PROCESS_FAIL_THRESHOLD consecutive errors (or after LLM fix fails),
+          set state=FAILED — the Supervisor's _watch_loop will detect this and restart us.
+          This is the "let it crash" principle: don't spin in degraded mode forever.
+        """
+        _llm_fix_attempted = False   # only try the LLM fix once per process_loop lifetime
+
         while self.state not in (ActorState.STOPPED, ActorState.FAILED):
             if self.state == ActorState.PAUSED:
                 await asyncio.sleep(self.poll_interval)
@@ -764,6 +789,7 @@ class DynamicAgent(Actor):
                     timeout=self._PROCESS_TIMEOUT,
                 )
                 self._reset_error_count()
+                _llm_fix_attempted = False   # reset after a clean run
             except asyncio.TimeoutError:
                 self.metrics.errors += 1
                 logger.error(
@@ -777,6 +803,14 @@ class DynamicAgent(Actor):
                                   f"Wrap blocking calls (cv2, torch) in: "
                                   f"await asyncio.get_event_loop().run_in_executor(None, fn)",
                 )
+                # Erlang: escalate to FAILED after too many timeouts — Supervisor takes over
+                if self._consecutive_errors >= self._PROCESS_FAIL_THRESHOLD:
+                    logger.critical(
+                        f"[{self.name}] process() timed out {self._consecutive_errors}x "
+                        f"— setting FAILED so Supervisor can restart cleanly."
+                    )
+                    self.state = ActorState.FAILED
+                    return
                 backoff = min(2 ** self._consecutive_errors, 30)
                 await asyncio.sleep(backoff)
             except asyncio.CancelledError:
@@ -786,6 +820,56 @@ class DynamicAgent(Actor):
                 tb = traceback.format_exc()
                 logger.error(f"[{self.name}] process() error: {e}\n{tb}")
                 await self._publish_error(phase="process", error=e, traceback_str=tb)
+
+                # ── LLM self-healing: try to fix the code in-place ────────────
+                if (
+                    not _llm_fix_attempted
+                    and self._consecutive_errors >= self._PROCESS_LLM_FIX_THRESHOLD
+                    and self._llm_provider is not None
+                ):
+                    _llm_fix_attempted = True
+                    logger.warning(
+                        f"[{self.name}] {self._consecutive_errors} consecutive process() "
+                        f"errors — asking LLM to fix code in-place."
+                    )
+                    fixed = await self._fix_runtime_with_llm(self._code, str(e), tb)
+                    if fixed is not None:
+                        self._ns = {}
+                        compile_err = self._compile_code(fixed)
+                        if compile_err is None:
+                            self._code = fixed
+                            self._consecutive_errors = 0   # give the fixed code a clean slate
+                            # ── Write fixed code back to spawn registry so restart uses it ──
+                            self._persist_fixed_code(fixed)
+                            logger.info(
+                                f"[{self.name}] LLM fixed process() code — "
+                                f"resuming with patched version."
+                            )
+                            await self._mqtt_publish(
+                                f"agents/{self.actor_id}/logs",
+                                {"type": "log",
+                                 "message": "process() runtime error fixed by LLM in-place.",
+                                 "timestamp": time.time()},
+                            )
+                            await asyncio.sleep(self.poll_interval)
+                            continue
+                        else:
+                            logger.warning(
+                                f"[{self.name}] LLM fix introduced compile error: {compile_err}"
+                            )
+
+                # ── Erlang: too many errors → FAILED → Supervisor restarts us ──
+                if self._consecutive_errors >= self._PROCESS_FAIL_THRESHOLD:
+                    logger.critical(
+                        f"[{self.name}] {self._consecutive_errors} consecutive process() "
+                        f"errors — setting FAILED so Supervisor can restart cleanly."
+                    )
+                    self.state = ActorState.FAILED
+                    await self._publish_error(
+                        phase="process", error=e, traceback_str=tb, fatal=True
+                    )
+                    return
+
                 backoff = min(2 ** self._consecutive_errors, 30)
                 await asyncio.sleep(backoff)
             await asyncio.sleep(self.poll_interval)
@@ -887,10 +971,81 @@ class DynamicAgent(Actor):
         })
 
     def _reset_error_count(self):
+        """
+        Reset the process()/setup() error counter after a clean run.
+
+        Deliberately does NOT touch _cb_error_count / _cb_error_last — those
+        track subscribe callback errors which are independent of process().
+        A successful process() call doesn't mean the callback is fixed.
+        """
         if self._consecutive_errors > 0:
             logger.info(f"[{self.name}] Recovered — resetting error counter.")
             self._consecutive_errors = 0
             self._error_phase        = ""
+
+    def _persist_fixed_code(self, fixed_code: str):
+        """
+        Write the LLM-fixed code back to:
+          1. main's spawn registry  — so system restarts use the fixed code
+          2. Supervisor's factory   — so Supervisor-driven restarts use the fixed code
+
+        When the LLM fixes a runtime/syntax error it updates self._code in memory,
+        but both the spawn registry (on disk) and the Supervisor factory closure
+        (in memory) still reference the original broken code.  This method patches
+        both atomically the moment a fix is confirmed working.
+        """
+        try:
+            # ── 1. Persist to spawn registry (survives system restart) ─────
+            if self._registry:
+                main = self._registry.find_by_name("main")
+                if main is not None and hasattr(main, "_get_spawn_registry"):
+                    reg = main._get_spawn_registry()
+                    if self.name in reg:
+                        entry = dict(reg[self.name])
+                        if entry.get("code") != fixed_code:
+                            entry["code"] = fixed_code
+                            entry["_code_fixed_at"] = time.time()
+                            main._save_to_spawn_registry(entry)
+                            logger.info(
+                                f"[{self.name}] Fixed code written to spawn registry "
+                                f"({len(fixed_code)} chars)."
+                            )
+
+            # ── 2. Update Supervisor factory (survives Supervisor-driven restart) ─
+            # The factory closure captures the original kwargs including the old code.
+            # Replace it with a new closure that uses fixed_code so the next
+            # Supervisor restart spawns a working agent.
+            if self._registry and hasattr(self._registry, "_supervisor_ref"):
+                supervisor = self._registry._supervisor_ref
+                if supervisor is not None and self.name in supervisor._specs:
+                    spec = supervisor._specs[self.name]
+                    # Build a new factory that injects the fixed code
+                    _fixed = fixed_code
+                    _old_factory = spec.factory
+                    _name = self.name
+                    _mqtt_client = self._mqtt_client
+                    _mqtt_broker = self._mqtt_broker
+                    _mqtt_port   = self._mqtt_port
+                    _registry    = self._registry
+
+                    async def _fixed_factory(
+                        old_f=_old_factory, code=_fixed,
+                        mc=_mqtt_client, mb=_mqtt_broker, mp=_mqtt_port,
+                    ):
+                        # Call the original factory to get a correctly configured instance
+                        actor = await old_f() if asyncio.iscoroutinefunction(old_f) else old_f()
+                        # Patch in the fixed code before the actor starts
+                        actor._code = code
+                        return actor
+
+                    spec.factory = _fixed_factory
+                    logger.info(
+                        f"[{self.name}] Supervisor factory updated with fixed code."
+                    )
+
+        except Exception as exc:
+            logger.warning(f"[{self.name}] Could not persist fixed code: {exc}")
+
 
     def get_status(self) -> dict:
         s = super().get_status()
@@ -1141,6 +1296,22 @@ class _AgentAPI:
                 else:
                     raise
 
+        # ── Callback error tracking (actor-level, survives reconnects) ──────
+        # Stored on the actor so:
+        #   1. MQTT reconnects don't reset counts (closure vars would reset)
+        #   2. process() success doesn't clear subscribe errors (_consecutive_errors
+        #      is shared — a clean process() run was resetting callback error counts)
+        #   3. Multiple subscriptions on the same actor share one error budget
+        _cb_attr = f"_cb_err_{topic.replace('/','_').replace('#','x').replace('+','y')}"
+        if not hasattr(actor, "_cb_error_last"):
+            actor._cb_error_last:  dict[str, float] = {}
+        if not hasattr(actor, "_cb_error_count"):
+            actor._cb_error_count: dict[str, int]   = {}
+        # After this many escalations without recovery, stop the listener entirely
+        # and mark the actor FAILED so the Supervisor can restart with fresh code.
+        _CB_MAX_ESCALATIONS      = 5
+        _CB_ERROR_REPORT_INTERVAL = 30.0   # seconds between escalations per error key
+
         async def _listener():
             try:
                 import aiomqtt
@@ -1159,8 +1330,44 @@ class _AgentAPI:
                                 payload = {"raw": msg.payload.decode()}
                             try:
                                 await _safe_invoke(callback, payload)
+                                # Successful invocation — reset this topic's error budget
+                                actor._cb_error_count.pop(topic, None)
+                                actor._cb_error_last.pop(topic, None)
                             except Exception as e:
-                                logger.error(f"[{actor.name}] subscribe callback error: {e}")
+                                import time as _t, traceback as _tb
+                                now        = _t.time()
+                                last       = actor._cb_error_last.get(topic, 0)
+                                escalations = actor._cb_error_count.get(topic, 0)
+
+                                logger.error(
+                                    f"[{actor.name}] subscribe callback error "
+                                    f"(escalation #{escalations + 1}/{_CB_MAX_ESCALATIONS},"
+                                    f" topic={topic}): {e}"
+                                )
+
+                                # Rate-limit escalation to supervision
+                                if (now - last) >= _CB_ERROR_REPORT_INTERVAL:
+                                    escalations += 1
+                                    actor._cb_error_count[topic]  = escalations
+                                    actor._cb_error_last[topic]   = now
+
+                                    fatal = escalations >= _CB_MAX_ESCALATIONS
+                                    await actor._publish_error(
+                                        phase="subscribe_callback",
+                                        error=e,
+                                        traceback_str=_tb.format_exc(),
+                                        fatal=fatal,
+                                    )
+
+                                    if fatal:
+                                        # Budget exhausted — stop looping, let Supervisor restart
+                                        logger.critical(
+                                            f"[{actor.name}] subscribe callback on '{topic}' "
+                                            f"failed {escalations}x — marking FAILED for Supervisor."
+                                        )
+                                        from ..core.actor import ActorState
+                                        actor.state = ActorState.FAILED
+                                        return   # exits _listener task
                 except asyncio.CancelledError:
                     break
                 except Exception as e:

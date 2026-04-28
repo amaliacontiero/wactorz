@@ -62,6 +62,9 @@ class PlannerAgent(Actor):
         self._auto_terminate  = auto_terminate
         self._result_futures: dict[str, asyncio.Future] = {}
         self._spawned_by_planner: list[str] = []   # agents we created this run
+        # Per-agent spawn outcome: name → {"ok": bool, "error": str|None}
+        # Sent back to main in the RESULT payload so it knows what actually happened.
+        self._spawn_results: dict[str, dict] = {}
 
         # Fuseki endpoint for SPARQL world-model enrichment (optional)
         try:
@@ -119,7 +122,11 @@ class PlannerAgent(Actor):
         """Run the plan and report the result back to main (used when task set at spawn time)."""
         result = await self._run_plan(task)
         if self._reply_to_id:
-            reply = {"result": result, "text": result}
+            reply = {
+                "result":        result,
+                "text":          result,
+                "spawn_results": self._spawn_results,   # per-agent outcome dict
+            }
             if self._reply_task_id:
                 reply["_task_id"] = self._reply_task_id
             if self._spawned_by_planner:
@@ -311,10 +318,12 @@ class PlannerAgent(Actor):
                 await self._log(f"'{name}' already running — skipping")
                 wired.append(f"**{name}** (already active)")
                 rule_agents.append(name)
+                self._spawn_results[name] = {"ok": True, "status": "already_running"}
                 continue
 
             if not spawn_cfg:
                 await self._log(f"Step '{name}' has no spawn_config — skipping")
+                self._spawn_results[name] = {"ok": False, "status": "no_config", "error": "missing spawn_config"}
                 continue
 
             spawn_cfg = dict(spawn_cfg)
@@ -327,12 +336,14 @@ class PlannerAgent(Actor):
             except Exception as e:
                 await self._log(f"Spawn failed for '{name}': {e}")
                 wired.append(f"**{name}** — spawn failed: {e}")
+                self._spawn_results[name] = {"ok": False, "status": "spawn_failed", "error": str(e)}
                 continue
 
             if actor:
                 self._spawned_by_planner.append(name)
                 spawned.append(name)
                 rule_agents.append(name)
+                self._spawn_results[name] = {"ok": True, "status": "spawned"}
 
                 # Register in main's spawn registry for auto-restore on restart
                 if self._registry:
@@ -352,6 +363,7 @@ class PlannerAgent(Actor):
                 await asyncio.sleep(0.3)
             else:
                 wired.append(f"**{name}** — failed to spawn")
+                self._spawn_results[name] = {"ok": False, "status": "spawn_returned_none"}
 
         # Persist this rule into main's pipeline rules registry
         if rule_agents:

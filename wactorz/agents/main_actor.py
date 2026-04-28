@@ -1861,6 +1861,24 @@ class MainActor(LLMAgent):
             result_payload = await asyncio.wait_for(future, timeout=180.0)
             answer = result_payload.get("result") or result_payload.get("text") or ""
             spawned_names = result_payload.get("spawned", [])
+
+            # ── Log what the planner actually achieved, per agent ──────────
+            spawn_results = result_payload.get("spawn_results", {})
+            if spawn_results:
+                ok   = [n for n, r in spawn_results.items() if r.get("ok")]
+                fail = [n for n, r in spawn_results.items() if not r.get("ok")]
+                if ok:
+                    logger.info(f"[{self.name}] Planner spawned OK: {ok}")
+                if fail:
+                    logger.warning(f"[{self.name}] Planner spawn failures: "
+                                   + ", ".join(f"{n}={spawn_results[n].get('error','?')}" for n in fail))
+                    # Append failures to the user-facing answer so they're not silent
+                    fail_lines = "\n".join(
+                        f"  • **{n}**: {spawn_results[n].get('error') or spawn_results[n].get('status', 'failed')}"
+                        for n in fail
+                    )
+                    answer += f"\n\n⚠️ **Some agents failed to spawn:**\n{fail_lines}"
+
             if spawned_names:
                 answer += f"\n\n[System: Planner created new agents: {', '.join(spawned_names)} — saved for future use]"
             return answer
