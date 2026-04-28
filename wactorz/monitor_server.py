@@ -901,6 +901,19 @@ async def actor_handler(request):
     return web.json_response(_actor_payload(ag))
 
 
+async def actor_history_handler(request):
+    from aiohttp import web
+    actor_id = request.match_info["actor_id"]
+    if registry is None:
+        return web.json_response([], status=200)
+    actor = registry.get(actor_id)
+    if actor is None:
+        return web.json_response([], status=200)
+    history = actor.recall("conversation_history", []) if hasattr(actor, "recall") else []
+    visible = [m for m in history if isinstance(m, dict) and m.get("role") in ("user", "assistant")]
+    return web.json_response(visible)
+
+
 async def config_handler(request):
     """Expose non-secret runtime config so the frontend can seed its defaults."""
     from aiohttp import web
@@ -969,8 +982,10 @@ async def main(exit_on_failure: bool = False):
     # Add both /api and non-api versions to satisfy the frontend's different fetch patterns
     app.router.add_get("/api/actors",            actors_handler)
     app.router.add_get("/actors",                actors_handler)
-    app.router.add_get("/api/actors/{actor_id}", actor_handler)
-    app.router.add_get("/actors/{actor_id}",     actor_handler)
+    app.router.add_get("/api/actors/{actor_id}",         actor_handler)
+    app.router.add_get("/actors/{actor_id}",             actor_handler)
+    app.router.add_get("/api/actors/{actor_id}/history", actor_history_handler)
+    app.router.add_get("/actors/{actor_id}/history",     actor_history_handler)
     
     app.router.add_get("/api/config",            config_handler)
     app.router.add_get("/config",                config_handler)
