@@ -213,6 +213,10 @@ export class SceneManager {
     if (this.cardDashboard) this.cardDashboard.setTotalCostUsd(usd);
   }
 
+  setTotalMessages(count: number): void {
+    if (this.cardDashboard) this.cardDashboard.setTotalMessages(count);
+  }
+
   reconcileAgents(liveAgents: AgentInfo[]): void {
     const liveIds = new Set(liveAgents.map((agent) => agent.id));
     for (const id of this.agents.keys()) {

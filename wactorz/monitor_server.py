@@ -599,18 +599,44 @@ def _historical_cost_usd() -> float:
         return 0.0
 
 
+def _historical_messages() -> int:
+    """Sum _messages_processed for agents not currently live in state["agents"]."""
+    if db is None:
+        return 0
+    try:
+        import json as _json
+        live_names = {a.get("name", "") for a in state["agents"].values()}
+        rows = db.conn.execute(
+            "SELECT agent, value FROM kv_store WHERE key = '_messages_processed'"
+        ).fetchall()
+        total = 0
+        for agent_name, value in rows:
+            if agent_name not in live_names:
+                try:
+                    entry = _json.loads(value)
+                    total += entry.get("count", 0)
+                except Exception:
+                    pass
+        return total
+    except Exception:
+        return 0
+
+
 def _snapshot() -> dict:
     for nd in state["nodes"].values():
         nd["online"] = _node_online(nd.get("last_seen", 0))
     live_cost = sum(a.get("cost_usd", 0.0) for a in state["agents"].values())
     total_cost = live_cost + _historical_cost_usd()
+    live_msgs = sum(a.get("messages_processed", 0) for a in state["agents"].values())
+    total_msgs = live_msgs + _historical_messages()
     return {
-        "agents":         list(state["agents"].values()),
-        "nodes":          list(state["nodes"].values()),
-        "alerts":         state["alerts"][:10],
-        "log_feed":       state["log_feed"][:20],
-        "system_health":  state["system_health"],
-        "total_cost_usd": round(total_cost, 6),
+        "agents":           list(state["agents"].values()),
+        "nodes":            list(state["nodes"].values()),
+        "alerts":           state["alerts"][:10],
+        "log_feed":         state["log_feed"][:20],
+        "system_health":    state["system_health"],
+        "total_cost_usd":   round(total_cost, 6),
+        "total_messages":   total_msgs,
     }
 
 
@@ -942,7 +968,8 @@ async def actors_handler(request):
                 "cpu":               ag.get("cpu"),
                 "mem":               ag.get("mem"),
                 "task":              ag.get("task"),
-                "messagesProcessed": ag.get("messages_processed"),
+                "messagesProcessed": ag.get("messages_processed") if ag.get("messages_processed") is not None
+                                     else getattr(getattr(actor, "metrics", None), "messages_processed", None),
                 "costUsd":           _actor_cost(actor, ag),
             })
         return web.json_response(result)

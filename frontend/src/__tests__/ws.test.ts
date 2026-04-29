@@ -162,17 +162,17 @@ describe("WSChatClient", () => {
     c.connect("ws://localhost/ws");
     const agents = [{ agent_id: "a1", name: "alpha" }];
     ws().emit("message", { data: JSON.stringify({ state: { agents } }) });
-    expect(spy).toHaveBeenCalledWith(agents, undefined, undefined);
+    expect(spy).toHaveBeenCalledWith(agents, undefined, {});
   });
 
-  it("passes total_cost_usd from state patch to onStatePatch", () => {
+  it("passes total_cost_usd and total_messages from state patch", () => {
     const c = new WSChatClient();
     const spy = vi.fn();
     c.onStatePatch(spy);
     c.connect("ws://localhost/ws");
     const agents = [{ agent_id: "a1", name: "alpha" }];
-    ws().emit("message", { data: JSON.stringify({ state: { agents, total_cost_usd: 0.042 } }) });
-    expect(spy).toHaveBeenCalledWith(agents, undefined, 0.042);
+    ws().emit("message", { data: JSON.stringify({ state: { agents, total_cost_usd: 0.042, total_messages: 7 } }) });
+    expect(spy).toHaveBeenCalledWith(agents, undefined, { totalCostUsd: 0.042, totalMessages: 7 });
   });
 
   it("calls onStatePatch with deletedId for type='delete_agent'", () => {
@@ -183,18 +183,18 @@ describe("WSChatClient", () => {
     ws().emit("message", {
       data: JSON.stringify({ type: "delete_agent", agent_id: "gone-id", state: { agents: [] } }),
     });
-    expect(spy).toHaveBeenCalledWith([], "gone-id", undefined);
+    expect(spy).toHaveBeenCalledWith([], "gone-id", {});
   });
 
-  it("passes total_cost_usd on delete_agent patch", () => {
+  it("passes stats on delete_agent patch", () => {
     const c = new WSChatClient();
     const spy = vi.fn();
     c.onStatePatch(spy);
     c.connect("ws://localhost/ws");
     ws().emit("message", {
-      data: JSON.stringify({ type: "delete_agent", agent_id: "gone-id", state: { agents: [], total_cost_usd: 1.5 } }),
+      data: JSON.stringify({ type: "delete_agent", agent_id: "gone-id", state: { agents: [], total_cost_usd: 1.5, total_messages: 42 } }),
     });
-    expect(spy).toHaveBeenCalledWith([], "gone-id", 1.5);
+    expect(spy).toHaveBeenCalledWith([], "gone-id", { totalCostUsd: 1.5, totalMessages: 42 });
   });
 
   it("state patch without agents array passes empty array", () => {
@@ -203,7 +203,7 @@ describe("WSChatClient", () => {
     c.onStatePatch(spy);
     c.connect("ws://localhost/ws");
     ws().emit("message", { data: JSON.stringify({ state: {} }) });
-    expect(spy).toHaveBeenCalledWith([], undefined, undefined);
+    expect(spy).toHaveBeenCalledWith([], undefined, {});
   });
 
   // ── send ───────────────────────────────────────────────────────────────────

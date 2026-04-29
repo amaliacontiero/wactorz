@@ -186,11 +186,12 @@ ioManager.setWSClient(wsChat);
 
 // State patches broadcast by the server over the same /ws connection.
 // This is how pause/stop/resume state changes reach the UI without polling.
-wsChat.onStatePatch((agents, deletedId, totalCostUsd) => {
+wsChat.onStatePatch((agents, deletedId, stats) => {
   if (deletedId) {
     scene.removeAgent(deletedId);
   }
-  if (totalCostUsd !== undefined) scene.setTotalCostUsd(totalCostUsd);
+  if (stats?.totalCostUsd !== undefined) scene.setTotalCostUsd(stats.totalCostUsd);
+  if (stats?.totalMessages !== undefined) scene.setTotalMessages(stats.totalMessages);
   agents.forEach((a) => {
     if (!a.agent_id) return;
     const rawState = (a.state ?? a.status ?? "running") as string;

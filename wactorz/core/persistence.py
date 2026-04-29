@@ -589,6 +589,7 @@ _SQLITE_KEYS = {
     "conversation_history",    # must survive restarts — durable
     "history_summary",         # must survive restarts — durable
     "_final_cost",             # lifetime LLM cost — durable, queryable for deleted agents
+    "_messages_processed",     # lifetime message count — durable, survives restarts
 }
 
 # Keys that go to Redis ONLY when Redis is actually running.

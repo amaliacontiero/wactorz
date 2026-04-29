@@ -167,6 +167,10 @@ class Actor(ABC):
         self.state = ActorState.RUNNING
         self.metrics.start_time = time.time()
         await self._load_persistent_state()
+        # Restore message count from previous session
+        saved_msgs = self.recall("_messages_processed", {})
+        if isinstance(saved_msgs, dict) and saved_msgs.get("count"):
+            self.metrics.messages_processed += int(saved_msgs["count"])
         await self.on_start()
         self._tasks.append(asyncio.create_task(self._message_loop()))
         self._tasks.append(asyncio.create_task(self._heartbeat_loop()))
@@ -181,6 +185,10 @@ class Actor(ABC):
             task.cancel()
         await self.on_stop()                  # on_stop() calls persist() first
         await self._save_persistent_state()   # THEN save to disk
+
+        # ── Persist message count so overview survives restarts ──────────
+        if self.metrics.messages_processed > 0:
+            self.persist("_messages_processed", {"count": self.metrics.messages_processed})
 
         # ── Persist final cost metrics (for LLM-backed agents) ─────────
         # Cost data lives in-memory and dies with the agent object.

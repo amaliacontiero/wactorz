@@ -116,6 +116,7 @@ export class CardDashboard {
   private _lastSentTarget: string = "main-actor";
   private _historyLoaded: Set<string> = new Set();
   private _totalCostUsd: number | null = null;
+  private _totalMessages: number | null = null;
 
   // Event listeners (stored for cleanup)
   private _evFeed: ((e: Event) => void) | null = null;
@@ -194,6 +195,11 @@ export class CardDashboard {
 
   setTotalCostUsd(usd: number): void {
     this._totalCostUsd = usd;
+    if (this.view === "overview") this._renderStats();
+  }
+
+  setTotalMessages(count: number): void {
+    this._totalMessages = count;
     if (this.view === "overview") this._renderStats();
   }
 
@@ -542,7 +548,9 @@ export class CardDashboard {
     const healthy = agents.filter(
       (a) => stateLabel(a.state) === "running",
     ).length;
-    const msgs = agents.reduce((s, a) => s + (a.messagesProcessed ?? 0), 0);
+    const msgs = this._totalMessages !== null
+      ? this._totalMessages
+      : agents.reduce((s, a) => s + (a.messagesProcessed ?? 0), 0);
     const cost = this._totalCostUsd !== null
       ? this._totalCostUsd
       : agents.reduce((s, a) => s + (a.costUsd ?? 0), 0);

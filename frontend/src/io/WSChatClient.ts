@@ -38,15 +38,21 @@ export type StatePatchAgent = {
   agent_type?: string;
 };
 
+/** Snapshot-level totals computed by the backend (includes historical/deleted agents). */
+export type SnapshotStats = {
+  totalCostUsd?: number;
+  totalMessages?: number;
+};
+
 /**
  * Called whenever the server broadcasts a state patch over the WebSocket.
  * `deletedId` is set when the server explicitly deletes an agent.
- * `totalCostUsd` is the backend-computed total including deleted agents.
+ * `stats` carries backend-computed totals that include deleted agents.
  */
 export type StatePatchHandler = (
   agents: StatePatchAgent[],
   deletedId?: string,
-  totalCostUsd?: number,
+  stats?: SnapshotStats,
 ) => void;
 
 export class WSChatClient {
@@ -170,20 +176,22 @@ export class WSChatClient {
       // Server explicitly deleted an agent — remove it and apply rest of patch
       if (data["type"] === "delete_agent") {
         const patch = data["state"] as
-          | { agents?: StatePatchAgent[]; total_cost_usd?: number }
+          | { agents?: StatePatchAgent[]; total_cost_usd?: number; total_messages?: number }
           | undefined;
-        this._onStatePatch?.(
-          patch?.agents ?? [],
-          String(data["agent_id"] ?? ""),
-          patch?.total_cost_usd,
-        );
+        const stats: SnapshotStats = {};
+        if (patch?.total_cost_usd !== undefined) stats.totalCostUsd = patch.total_cost_usd;
+        if (patch?.total_messages !== undefined) stats.totalMessages = patch.total_messages;
+        this._onStatePatch?.(patch?.agents ?? [], String(data["agent_id"] ?? ""), stats);
         return;
       }
 
       // Any message with a "state" field is a state patch broadcast
       if (data["state"]) {
-        const patch = data["state"] as { agents?: StatePatchAgent[]; total_cost_usd?: number };
-        this._onStatePatch?.(patch.agents ?? [], undefined, patch.total_cost_usd);
+        const patch = data["state"] as { agents?: StatePatchAgent[]; total_cost_usd?: number; total_messages?: number };
+        const stats: SnapshotStats = {};
+        if (patch.total_cost_usd !== undefined) stats.totalCostUsd = patch.total_cost_usd;
+        if (patch.total_messages !== undefined) stats.totalMessages = patch.total_messages;
+        this._onStatePatch?.(patch.agents ?? [], undefined, stats);
         // don't return — message may also carry chat/stream content
       }
 
