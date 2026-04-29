@@ -17,8 +17,8 @@ RUN curl -fsSL \
 
 # BUILD_VERSION is passed by HA Supervisor — referencing it here busts the
 # Docker layer cache whenever the addon version is bumped in config.yaml.
-ARG BUILD_VERSION=dev
-RUN pip3 install --no-cache-dir "wactorz[all] @ git+https://github.com/waldiez/wactorz.git@dev" \
+ARG BUILD_VERSION=main
+RUN pip3 install --no-cache-dir "wactorz[all] @ git+https://github.com/waldiez/wactorz.git@main" \
     && echo "wactorz addon ${BUILD_VERSION} installed"
 
 COPY run.sh /run.sh
