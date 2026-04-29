@@ -746,15 +746,25 @@ class LLMAgent(Actor):
             and m.get("role") in ("user", "assistant")
             and m.get("content") is not None
         ]
-        async for chunk in self.llm.stream(
-            messages=safe_history,
-            system=self.system_prompt,
-        ):
-            if isinstance(chunk, dict):
-                usage = chunk
-            else:
-                full_text.append(chunk)
-                yield chunk
+        try:
+            async for chunk in self.llm.stream(
+                messages=safe_history,
+                system=self.system_prompt,
+            ):
+                if isinstance(chunk, dict):
+                    usage = chunk
+                else:
+                    full_text.append(chunk)
+                    yield chunk
+        except BaseException:
+            # Interrupted mid-stream (Ctrl+C, task cancellation, network error).
+            # Persist whatever chunks arrived so neither the user message nor
+            # the partial response are lost on restart.
+            if full_text:
+                partial = "".join(full_text)
+                self._conversation_history.append({"role": "assistant", "content": partial})
+                self.persist("conversation_history", self._conversation_history)
+            raise
 
         response = "".join(full_text)
         self._conversation_history.append({"role": "assistant", "content": response})
