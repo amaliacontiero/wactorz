@@ -226,6 +226,25 @@ wsChat.connect(`${_wsBase}/ws`);
 refreshLiveActors();
 window.setInterval(refreshLiveActors, 15000);
 
+// Seed the activity feed from SQLite conversation histories so the feed panel
+// isn't empty after a server restart.  Synthetic timestamps are spaced 2s apart,
+// ending 5s before now, so they sort before any live events.
+fetch(`${_apiBase}/api/feed`)
+  .then((r) => (r.ok ? r.json() : []))
+  .then((items: { type: string; label: string; agentName: string }[]) => {
+    if (!items.length) return;
+    const base = Date.now() - items.length * 2000 - 5000;
+    items.forEach((item, i) => {
+      pushFeed({
+        type: "chat",
+        label: item.label,
+        agentName: item.agentName,
+        timestamp: base + i * 2000,
+      });
+    });
+  })
+  .catch(() => {});
+
 // ── Seed localStorage from backend config (only for unset keys) ───────────────
 // Backend config (.env) provides defaults; a user-set localStorage value wins.
 fetch(`${_apiBase}/api/config`)

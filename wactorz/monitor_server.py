@@ -1058,6 +1058,42 @@ async def config_handler(request):
     })
 
 
+async def feed_handler(request):
+    """Return recent feed events seeded from SQLite conversation histories."""
+    from aiohttp import web
+    if db is None:
+        return web.json_response([])
+    try:
+        import json as _json
+        rows = db.conn.execute(
+            "SELECT agent, value FROM kv_store WHERE key='conversation_history'"
+        ).fetchall()
+        items = []
+        for agent_name, value in rows:
+            try:
+                history = _json.loads(value)
+                for i, msg in enumerate(history):
+                    if not isinstance(msg, dict):
+                        continue
+                    role = msg.get("role")
+                    if role not in ("user", "assistant"):
+                        continue
+                    items.append({
+                        "type": "chat",
+                        "label": str(msg.get("content", ""))[:60],
+                        "agentName": agent_name,
+                        "timestamp": i,  # order within the history; will be re-dated in frontend
+                        "_seq": i,
+                        "_agent": agent_name,
+                    })
+            except Exception:
+                pass
+        # Return chronological order (most recent last)
+        return web.json_response(items[-50:])
+    except Exception:
+        return web.json_response([])
+
+
 # ── Entry point ────────────────────────────────────────────────────────────
 
 async def main(exit_on_failure: bool = False):
@@ -1091,6 +1127,8 @@ async def main(exit_on_failure: bool = False):
     
     app.router.add_get("/api/config",            config_handler)
     app.router.add_get("/config",                config_handler)
+    app.router.add_get("/api/feed",              feed_handler)
+    app.router.add_get("/feed",                  feed_handler)
     app.router.add_get("/favicon.svg",           index_handler)
     from .fuseki_proxy import fuseki_proxy_handler
     app.router.add_post("/api/fuseki/{dataset}/sparql",  fuseki_proxy_handler)

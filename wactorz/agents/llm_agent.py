@@ -516,6 +516,14 @@ class LLMAgent(Actor):
             self.total_output_tokens += saved_cost.get("output_tokens", 0)
             self.total_cost_usd      += saved_cost.get("cost_usd", 0.0)
 
+        # Migration: if _messages_processed key doesn't exist yet, seed from
+        # conversation_history so the overview counter isn't always 0 on first
+        # start after upgrading. messages_processed was set from SQLite in
+        # actor.start() — if it's still 0 here, the key was absent.
+        if self.metrics.messages_processed == 0 and self._conversation_history:
+            user_turns = sum(1 for m in self._conversation_history if m.get("role") == "user")
+            self.metrics.messages_processed = user_turns
+
         # Publish capability manifest so main's topic registry knows this agent exists
         description = (
             getattr(self, "DESCRIPTION", None)
