@@ -337,15 +337,15 @@ async def build_system(args: argparse.Namespace):
     main_actor = system.registry.find_by_name("main")
 
     logger.info("Wactorz system started. Supervision tree active.")
-    return system, main_actor
+    return system, main_actor, _db
 
 
 async def app():
     args = get_args()
     if args.reload:
         _start_reloader()
-    
-    system, main_actor = await build_system(args)
+
+    system, main_actor, _db = await build_system(args)
 
     from wactorz.monitoring.otel import setup_otel, shutdown_otel
     setup_otel(lambda: system.registry)
