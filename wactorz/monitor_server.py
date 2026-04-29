@@ -623,48 +623,55 @@ async def mqtt_listener():
         return
 
     logger.info(f"Connecting to MQTT {MQTT_BROKER}:{MQTT_PORT}...")
-    while True:
-        try:
-            async with aiomqtt.Client(MQTT_BROKER, MQTT_PORT) as client:
-                mqtt_client_ref = client
-                logger.info("MQTT connected.")
+    try:
+        while True:
+            try:
+                async with aiomqtt.Client(MQTT_BROKER, MQTT_PORT) as client:
+                    mqtt_client_ref = client
+                    logger.info("MQTT connected.")
 
-                if registry is not None:
-                    await client.publish(
-                        f"agents/{IO_GATEWAY_ID}/spawn",
-                        json.dumps({
-                            "agentId":   IO_GATEWAY_ID,
-                            "agentName": IO_GATEWAY_ID,
-                            "agentType": "gateway",
-                            "timestamp": time.time(),
-                        }),
-                    )
+                    if registry is not None:
+                        await client.publish(
+                            f"agents/{IO_GATEWAY_ID}/spawn",
+                            json.dumps({
+                                "agentId":   IO_GATEWAY_ID,
+                                "agentName": IO_GATEWAY_ID,
+                                "agentType": "gateway",
+                                "timestamp": time.time(),
+                            }),
+                        )
 
-                for topic in MQTT_TOPICS:
-                    await client.subscribe(topic)
+                    for topic in MQTT_TOPICS:
+                        await client.subscribe(topic)
 
-                async for message in client.messages:
-                    topic   = str(message.topic)
-                    payload = message.payload.decode(errors="replace")
+                    async for message in client.messages:
+                        topic   = str(message.topic)
+                        payload = message.payload.decode(errors="replace")
 
-                    if topic == "io/chat":
-                        if registry is not None:
-                            try:
-                                asyncio.create_task(handle_chat_mqtt(json.loads(payload)))
-                            except Exception as exc:
-                                logger.error(f"[io/chat] error: {exc}")
-                        continue
+                        if topic == "io/chat":
+                            if registry is not None:
+                                try:
+                                    asyncio.create_task(handle_chat_mqtt(json.loads(payload)))
+                                except Exception as exc:
+                                    logger.error(f"[io/chat] error: {exc}")
+                            continue
 
-                    event = parse_topic(topic, payload)
-                    if event:
-                        metric    = event.get("metric", "")
-                        log_event = None if metric == "heartbeat" else event
-                        await broadcast({"type": "patch", "event": log_event, "state": _snapshot()})
+                        event = parse_topic(topic, payload)
+                        if event:
+                            metric    = event.get("metric", "")
+                            log_event = None if metric == "heartbeat" else event
+                            await broadcast({"type": "patch", "event": log_event, "state": _snapshot()})
 
-        except Exception as e:
-            mqtt_client_ref = None
-            logger.warning(f"MQTT error: {e}. Reconnecting in 5s...")
-            await asyncio.sleep(5)
+            except Exception as e:
+                mqtt_client_ref = None
+                logger.warning(f"MQTT error: {e}. Reconnecting in 5s...")
+                await asyncio.sleep(5)
+    finally:
+        # Drop ref and force GC while loop is still open so paho's __del__
+        # doesn't fire after the event loop closes (avoids RuntimeError noise).
+        import gc
+        mqtt_client_ref = None
+        gc.collect()
 
 
 # ── Startup checks ─────────────────────────────────────────────────────────

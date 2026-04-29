@@ -557,6 +557,8 @@ class ActorSystem:
         await asyncio.gather(*[a.stop() for a in actors], return_exceptions=True)
         if self._mqtt_client:
             await self._mqtt_client.disconnect()
+            self._mqtt_client = None  # drop ref so GC can collect paho client now
+        import gc; gc.collect()  # break aiomqtt↔paho ref cycle while loop is open
         logger.info("[ActorSystem] All actors stopped.")
 
     async def run_forever(self):
