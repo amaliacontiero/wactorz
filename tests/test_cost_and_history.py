@@ -167,14 +167,18 @@ class HistoricalCostTest(unittest.TestCase):
         self._ms.db = self._orig_db
         self._ms.state["agents"] = self._orig_state
 
+    def _live_names(self):
+        """Derive live_names from state["agents"] as _snapshot() does when no registry."""
+        return {a.get("name", "") for a in self._ms.state["agents"].values()}
+
     def test_returns_zero_when_db_is_none(self):
         self._ms.db = None
-        self.assertEqual(self._ms._historical_cost_usd(), 0.0)
+        self.assertEqual(self._ms._historical_cost_usd(self._live_names()), 0.0)
 
     def test_returns_zero_when_no_final_cost_rows(self):
         self._ms.db = _make_kv_db([])
         self._ms.state["agents"] = {}
-        self.assertEqual(self._ms._historical_cost_usd(), 0.0)
+        self.assertEqual(self._ms._historical_cost_usd(self._live_names()), 0.0)
 
     def test_sums_costs_for_deleted_agents(self):
         self._ms.db = _make_kv_db([
@@ -185,7 +189,7 @@ class HistoricalCostTest(unittest.TestCase):
         ])
         self._ms.state["agents"] = {}  # no live agents
 
-        total = self._ms._historical_cost_usd()
+        total = self._ms._historical_cost_usd(self._live_names())
         self.assertAlmostEqual(total, 0.08, places=6)
 
     def test_excludes_live_agent_costs(self):
@@ -200,7 +204,7 @@ class HistoricalCostTest(unittest.TestCase):
             "live-agent": {"name": "live-agent", "cost_usd": 0.10},
         }
 
-        total = self._ms._historical_cost_usd()
+        total = self._ms._historical_cost_usd(self._live_names())
         self.assertAlmostEqual(total, 0.04, places=6)
 
     def test_ignores_malformed_rows(self):
@@ -214,7 +218,7 @@ class HistoricalCostTest(unittest.TestCase):
         self._ms.db = types.SimpleNamespace(conn=conn)
         self._ms.state["agents"] = {}
 
-        total = self._ms._historical_cost_usd()
+        total = self._ms._historical_cost_usd(self._live_names())
         self.assertAlmostEqual(total, 0.02, places=6)
 
 

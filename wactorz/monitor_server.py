@@ -576,13 +576,12 @@ def _node_online(last_seen: float) -> bool:
     return (time.time() - last_seen) < 45
 
 
-def _historical_cost_usd() -> float:
-    """Sum _final_cost for agents no longer in state (deleted/restarted before rejoining)."""
+def _historical_cost_usd(live_names: set) -> float:
+    """Sum _final_cost for agents not in live_names."""
     if db is None:
         return 0.0
     try:
         import json as _json
-        live_names = {a.get("name", "") for a in state["agents"].values()}
         rows = db.conn.execute(
             "SELECT value FROM kv_store WHERE key = '_final_cost'"
         ).fetchall()
@@ -599,13 +598,12 @@ def _historical_cost_usd() -> float:
         return 0.0
 
 
-def _historical_messages() -> int:
-    """Sum _messages_processed for agents not currently live in state["agents"]."""
+def _historical_messages(live_names: set) -> int:
+    """Sum _messages_processed for agents not in live_names."""
     if db is None:
         return 0
     try:
         import json as _json
-        live_names = {a.get("name", "") for a in state["agents"].values()}
         rows = db.conn.execute(
             "SELECT agent, value FROM kv_store WHERE key = '_messages_processed'"
         ).fetchall()
@@ -625,10 +623,28 @@ def _historical_messages() -> int:
 def _snapshot() -> dict:
     for nd in state["nodes"].values():
         nd["online"] = _node_online(nd.get("last_seen", 0))
-    live_cost = sum(a.get("cost_usd", 0.0) for a in state["agents"].values())
-    total_cost = live_cost + _historical_cost_usd()
-    live_msgs = sum(a.get("messages_processed", 0) for a in state["agents"].values())
-    total_msgs = live_msgs + _historical_messages()
+
+    # Prefer MQTT-derived data from state["agents"]; fall back to live actor
+    # objects for the window between restart and first MQTT heartbeat (0.5s).
+    if registry is not None:
+        live_names = {a.name for a in registry.all_actors()}
+        live_cost = sum(
+            state["agents"].get(a.actor_id, {}).get("cost_usd")
+            or getattr(a, "total_cost_usd", 0.0)
+            for a in registry.all_actors()
+        )
+        live_msgs = sum(
+            state["agents"].get(a.actor_id, {}).get("messages_processed")
+            or getattr(getattr(a, "metrics", None), "messages_processed", 0)
+            for a in registry.all_actors()
+        )
+    else:
+        live_names = {a.get("name", "") for a in state["agents"].values()}
+        live_cost = sum(a.get("cost_usd", 0.0) for a in state["agents"].values())
+        live_msgs = sum(a.get("messages_processed", 0) for a in state["agents"].values())
+
+    total_cost = live_cost + _historical_cost_usd(live_names)
+    total_msgs = live_msgs + _historical_messages(live_names)
     return {
         "agents":           list(state["agents"].values()),
         "nodes":            list(state["nodes"].values()),
