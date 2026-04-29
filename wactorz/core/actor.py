@@ -183,8 +183,17 @@ class Actor(ABC):
         self.state = ActorState.STOPPED
         for task in self._tasks:
             task.cancel()
-        await self.on_stop()                  # on_stop() calls persist() first
-        await self._save_persistent_state()   # THEN save to disk
+        # Shield cleanup from CancelledError — chat tasks run as fire-and-forget
+        # asyncio tasks outside actor._tasks and get cancelled by asyncio.run()
+        # cleanup BEFORE these awaits if we don't shield them.
+        try:
+            await asyncio.shield(self.on_stop())
+        except (asyncio.CancelledError, Exception):
+            pass
+        try:
+            await asyncio.shield(self._save_persistent_state())
+        except (asyncio.CancelledError, Exception):
+            pass
 
         # ── Persist message count so overview survives restarts ──────────
         if self.metrics.messages_processed > 0:

@@ -685,6 +685,7 @@ class LLMAgent(Actor):
 
         self.metrics.messages_processed += 1
         self._conversation_history.append({"role": "user", "content": user_message})
+        self.persist("conversation_history", self._conversation_history)
 
         safe_history = [
             {"role": m["role"], "content": str(m["content"])}
@@ -733,6 +734,7 @@ class LLMAgent(Actor):
 
         self.metrics.messages_processed += 1
         self._conversation_history.append({"role": "user", "content": user_message})
+        self.persist("conversation_history", self._conversation_history)
 
         full_text = []
         usage     = {}
