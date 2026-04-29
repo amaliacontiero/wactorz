@@ -902,6 +902,29 @@ def _actor_payload(ag: dict) -> dict:
     }
 
 
+def _actor_cost(actor, ag: dict):
+    """Return the most accurate cost available: MQTT-derived first, then live object, then SQLite."""
+    mqtt_cost = ag.get("cost_usd")
+    if mqtt_cost is not None:
+        return mqtt_cost
+    live_cost = getattr(actor, "total_cost_usd", None)
+    if live_cost:
+        return round(live_cost, 6)
+    if db is not None:
+        try:
+            import json as _json
+            row = db.conn.execute(
+                "SELECT value FROM kv_store WHERE agent=? AND key='_final_cost'",
+                (actor.name,),
+            ).fetchone()
+            if row:
+                entry = _json.loads(row[0])
+                return entry.get("cost_usd")
+        except Exception:
+            pass
+    return None
+
+
 async def actors_handler(request):
     from aiohttp import web
     # Prefer the live registry (injected by cli.py) — actor objects carry the
@@ -920,7 +943,7 @@ async def actors_handler(request):
                 "mem":               ag.get("mem"),
                 "task":              ag.get("task"),
                 "messagesProcessed": ag.get("messages_processed"),
-                "costUsd":           ag.get("cost_usd"),
+                "costUsd":           _actor_cost(actor, ag),
             })
         return web.json_response(result)
     return web.json_response([_actor_payload(ag) for ag in state["agents"].values()])
@@ -938,12 +961,30 @@ async def actor_handler(request):
 async def actor_history_handler(request):
     from aiohttp import web
     actor_id = request.match_info["actor_id"]
-    if registry is None:
-        return web.json_response([], status=200)
-    actor = registry.get(actor_id)
-    if actor is None:
-        return web.json_response([], status=200)
-    history = actor.recall("conversation_history", []) if hasattr(actor, "recall") else []
+
+    # Resolve actor: the frontend sends the agent NAME (not UUID), so try
+    # direct UUID lookup first, then fall back to name-based lookup.
+    actor = None
+    if registry is not None:
+        actor = registry.get(actor_id) or registry.find_by_name(actor_id)
+
+    if actor is not None and hasattr(actor, "recall"):
+        history = actor.recall("conversation_history", [])
+    elif db is not None:
+        # Actor not in registry (deleted or name-only lookup) — read from SQLite.
+        # actor_id might be a display name (e.g. "main") — try it directly.
+        try:
+            import json as _json
+            row = db.conn.execute(
+                "SELECT value FROM kv_store WHERE agent=? AND key='conversation_history'",
+                (actor_id,),
+            ).fetchone()
+            history = _json.loads(row[0]) if row else []
+        except Exception:
+            history = []
+    else:
+        history = []
+
     visible = [m for m in history if isinstance(m, dict) and m.get("role") in ("user", "assistant")]
     return web.json_response(visible)
 

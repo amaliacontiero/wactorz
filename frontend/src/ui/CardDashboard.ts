@@ -115,6 +115,7 @@ export class CardDashboard {
   private _streamText: string = "";
   private _lastSentTarget: string = "main-actor";
   private _historyLoaded: Set<string> = new Set();
+  private _totalCostUsd: number | null = null;
 
   // Event listeners (stored for cleanup)
   private _evFeed: ((e: Event) => void) | null = null;
@@ -191,6 +192,11 @@ export class CardDashboard {
     this.root.remove();
   }
 
+  setTotalCostUsd(usd: number): void {
+    this._totalCostUsd = usd;
+    if (this.view === "overview") this._renderStats();
+  }
+
   // ── Agent events ──────────────────────────────────────────────────────────
 
   addAgent(agent: AgentInfo): void {
@@ -213,8 +219,10 @@ export class CardDashboard {
   }
 
   removeAgent(id: string): void {
+    const removed = this.agents.get(id);
     this.agents.delete(id);
-    this._historyLoaded.delete(id);
+    // _historyLoaded is keyed by agent NAME, not UUID — look up name before deleting
+    if (removed) this._historyLoaded.delete(removed.name);
     if (!this.root.classList.contains("cd-visible")) return;
     const card = this.root.querySelector<HTMLElement>(
       `[data-id="${CSS.escape(id)}"]`,
@@ -535,7 +543,9 @@ export class CardDashboard {
       (a) => stateLabel(a.state) === "running",
     ).length;
     const msgs = agents.reduce((s, a) => s + (a.messagesProcessed ?? 0), 0);
-    const cost = agents.reduce((s, a) => s + (a.costUsd ?? 0), 0);
+    const cost = this._totalCostUsd !== null
+      ? this._totalCostUsd
+      : agents.reduce((s, a) => s + (a.costUsd ?? 0), 0);
     const events = this.feedItems.length;
 
     [

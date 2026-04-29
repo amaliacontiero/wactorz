@@ -41,10 +41,12 @@ export type StatePatchAgent = {
 /**
  * Called whenever the server broadcasts a state patch over the WebSocket.
  * `deletedId` is set when the server explicitly deletes an agent.
+ * `totalCostUsd` is the backend-computed total including deleted agents.
  */
 export type StatePatchHandler = (
   agents: StatePatchAgent[],
   deletedId?: string,
+  totalCostUsd?: number,
 ) => void;
 
 export class WSChatClient {
@@ -168,19 +170,20 @@ export class WSChatClient {
       // Server explicitly deleted an agent — remove it and apply rest of patch
       if (data["type"] === "delete_agent") {
         const patch = data["state"] as
-          | { agents?: StatePatchAgent[] }
+          | { agents?: StatePatchAgent[]; total_cost_usd?: number }
           | undefined;
         this._onStatePatch?.(
           patch?.agents ?? [],
           String(data["agent_id"] ?? ""),
+          patch?.total_cost_usd,
         );
         return;
       }
 
       // Any message with a "state" field is a state patch broadcast
       if (data["state"]) {
-        const patch = data["state"] as { agents?: StatePatchAgent[] };
-        this._onStatePatch?.(patch.agents ?? []);
+        const patch = data["state"] as { agents?: StatePatchAgent[]; total_cost_usd?: number };
+        this._onStatePatch?.(patch.agents ?? [], undefined, patch.total_cost_usd);
         // don't return — message may also carry chat/stream content
       }
 
