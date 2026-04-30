@@ -812,6 +812,8 @@ class MainActor(LLMAgent):
         await self._restore_spawned_agents()
         # Listen for remote node heartbeats so we know what's online
         self._tasks.append(asyncio.create_task(self._node_heartbeat_listener()))
+        # Detect nodes that go silent and clean up their agents
+        self._tasks.append(asyncio.create_task(self._node_offline_watcher()))
         # Listen for agent capability manifests to build topic registry
         self._tasks.append(asyncio.create_task(self._manifest_listener()))
         # Inject persisted user facts into system prompt
@@ -834,6 +836,62 @@ class MainActor(LLMAgent):
             del reg[name]
             self.persist(SPAWN_REGISTRY_KEY, reg)
             logger.info(f"[{self.name}] Removed '{name}' from spawn registry.")
+
+    async def _clear_agent_manifest(self, name: str, actor_id: Optional[str] = None):
+        """
+        Clear an agent's manifest from main's in-memory caches AND from the
+        retained MQTT manifest topic. Without this, list_capabilities() will
+        keep reporting the agent (with running=false but never disappearing),
+        and on next restart it would be re-loaded from the retained message.
+
+        Call this whenever an agent is stopped/deleted/replaced.
+        """
+        # Drop from in-memory caches immediately
+        self._agent_manifests.pop(name, None)
+        for topic, entries in list(self._topic_registry.items()):
+            self._topic_registry[topic] = [m for m in entries if m.get("name") != name]
+            if not self._topic_registry[topic]:
+                self._topic_registry.pop(topic, None)
+        # Publish empty retained payload to clear the broker-side retained manifest.
+        # Need actor_id for the topic — fall back to looking it up from the registry
+        # (only works if the actor is still alive — best-effort).
+        if not actor_id and self._registry:
+            target = self._registry.find_by_name(name)
+            if target:
+                actor_id = target.actor_id
+        if actor_id:
+            await self._mqtt_publish(
+                f"agents/{actor_id}/manifest", b"", retain=True
+            )
+            logger.debug(f"[{self.name}] Cleared retained manifest for '{name}'")
+
+    def _record_agent_deletion(self, name: str, reason: str = "user request"):
+        """
+        Inject a system-style note into conversation history that an agent was
+        deleted. This is critical because the LLM otherwise sees its own earlier
+        turn ("Spawned 'chat-agent'") and assumes the agent still exists when
+        the user later asks to spawn one with the same name.
+
+        Strengthens the running-agents system prompt block with explicit textual
+        evidence inside the message stream — which models weight more heavily
+        than system-prompt assertions.
+        """
+        try:
+            note = (
+                f"[SYSTEM] Agent '{name}' was deleted ({reason}). "
+                f"It is no longer running. If the user asks to spawn an agent "
+                f"with this name again, treat it as a fresh spawn — do NOT claim "
+                f"it already exists."
+            )
+            self._conversation_history.append({"role": "user", "content": note})
+            self._conversation_history.append({
+                "role": "assistant",
+                "content": f"Acknowledged — '{name}' has been removed from my view.",
+            })
+            self.persist("conversation_history", self._conversation_history)
+            logger.info(f"[{self.name}] Recorded deletion note for '{name}' in history")
+        except Exception as e:
+            logger.warning(f"[{self.name}] Failed to record deletion note: {e}")
 
     # ── Pipeline rules registry ────────────────────────────────────────────
     # Stores grouped rules: one entry per user request, listing all agents spawned for it.
@@ -871,21 +929,142 @@ class MainActor(LLMAgent):
     def get_user_facts(self) -> dict:
         return self.recall("_user_facts") or {}
 
-    def _inject_user_facts_into_prompt(self):
-        """Prepend known user facts to the system prompt so the LLM always has them."""
-        facts = self.get_user_facts()
-        if not facts:
-            return
-        facts_lines = "\n".join(f"  {k}: {v}" for k, v in facts.items())
-        facts_block = f"\n\n== KNOWN USER FACTS (always keep in mind) ==\n{facts_lines}"
-        # Avoid duplicating if already injected
-        marker = "== KNOWN USER FACTS"
-        base_prompt = ORCHESTRATOR_PROMPT
-        if marker in self.system_prompt:
-            # Replace existing facts block
-            self.system_prompt = base_prompt + facts_block
+    def _get_running_agents_summary(self) -> str:
+        """
+        Build a short, authoritative description of currently running agents
+        by reading the live registry (same source the planner uses).
+        Returns empty string if registry is unavailable or only main is running.
+        """
+        if not self._registry:
+            return ""
+        skip = {"main", "monitor", "installer"}
+        lines = []
+        for actor in self._registry.all_actors():
+            if actor.name in skip:
+                continue
+            desc = (
+                getattr(actor, "DESCRIPTION", None)
+                or getattr(actor, "description", "")
+                or (getattr(actor, "system_prompt", "") or "")[:80]
+                or type(actor).__name__
+            )
+            # Single-line summary, trimmed
+            desc = " ".join(str(desc).split())[:120]
+            lines.append(f"  {actor.name} — {desc}" if desc else f"  {actor.name}")
+        if not lines:
+            return ""
+        return "\n".join(lines)
+
+    def _prefix_with_live_context(self, user_text: str) -> str:
+        """
+        Wrap the user's message with a `[CURRENT SYSTEM STATE]` block so the LLM
+        sees the live agent list INSIDE the user message — not just the system
+        prompt.
+
+        Why both? Models weight in-message content more heavily than system prompts
+        for "what is true right now" questions. Having the same list in both places
+        is belt-and-braces: the system prompt sets the rule ("trust this list"),
+        the per-message prefix supplies fresh evidence the rule applies to.
+
+        The prefix is wrapped in clear delimiters so it's visually obvious to the
+        model that it's context, not the user's actual question.
+        """
+        live_names = []
+        if self._registry:
+            skip = {"main", "monitor", "installer"}
+            for actor in self._registry.all_actors():
+                if actor.name not in skip:
+                    live_names.append(actor.name)
+        live_names.sort()
+
+        if live_names:
+            ctx = (
+                "[CURRENT SYSTEM STATE — auto-injected, NOT from the user]\n"
+                f"Currently running agents (live, just queried): {', '.join(live_names)}\n"
+                "If the user asks what agents exist or are running, answer using EXACTLY\n"
+                "this list. Do not add agents from your memory of earlier turns.\n"
+                "[END SYSTEM STATE]\n\n"
+            )
         else:
-            self.system_prompt = self.system_prompt + facts_block
+            ctx = (
+                "[CURRENT SYSTEM STATE — auto-injected, NOT from the user]\n"
+                "Currently running agents (live, just queried): NONE\n"
+                "No user-spawned agents exist right now. If the user asks what's running,\n"
+                "say so plainly. Do not invent agents from earlier in the conversation.\n"
+                "[END SYSTEM STATE]\n\n"
+            )
+        return ctx + user_text
+
+    def _rebuild_system_prompt(self):
+        """
+        Reconstruct the system prompt from ORCHESTRATOR_PROMPT plus dynamic blocks:
+          1. Currently running agents (live registry — authoritative, refreshed each call)
+          2. Known user facts (persisted)
+
+        This is the single source of truth for the system prompt. It MUST be called
+        before every LLM turn so main never answers from a stale view of the world.
+        Both blocks are appended in a fixed order so the prompt is deterministic.
+
+        IMPORTANT: ORCHESTRATOR_PROMPT references agent.capabilities() — that's
+        documentation aimed at spawned DynamicAgents which have an _AgentAPI.
+        Main itself has NO such method. Without an explicit override, the LLM
+        reads the documentation, "calls" the function (it can't), and confabulates
+        the result based on conversation history. We prepend an OVERRIDE block that
+        tells main directly: the running-agents list below IS the result of that
+        lookup, do not pretend to call anything.
+        """
+        # ── Override block for main specifically ──
+        override = (
+            "== MAIN-SPECIFIC OVERRIDE (read this FIRST) ==\n"
+            "You are 'main'. You are NOT a DynamicAgent. You do NOT have an `agent` object.\n"
+            "You CANNOT call agent.capabilities(), agent.send_to(), agent.topics(), "
+            "agent.subscribe(), agent.window(), agent.mqtt_get(), or any other agent.* method.\n"
+            "Those methods exist for OTHER agents you SPAWN. They do not exist for you.\n\n"
+            "If you see those methods mentioned later in this prompt, that is reference\n"
+            "documentation for code you WRITE inside <spawn> blocks — NOT a tool you can\n"
+            "invoke yourself. Never write 'Let me call agent.capabilities()' in a reply.\n"
+            "Never fabricate the output of such a call.\n\n"
+            "When the user asks what agents exist, what's running, or anything about\n"
+            "current system state, READ THE 'CURRENTLY RUNNING AGENTS' BLOCK BELOW.\n"
+            "That block IS your capability lookup — already done for you, refreshed live\n"
+            "on every turn. Do not pretend to perform a separate lookup.\n"
+        )
+
+        prompt = override + "\n" + ORCHESTRATOR_PROMPT
+
+        # ── Block 1: live running agents (so main knows the truth, not its memory) ──
+        # Wording is deliberately strong: the LLM tends to trust earlier conversation
+        # turns ("I just spawned X") over the system prompt. We need to override that.
+        agents_summary = self._get_running_agents_summary()
+        header = (
+            "\n\n== CURRENTLY RUNNING AGENTS (LIVE GROUND TRUTH — overrides conversation history) ==\n"
+            "This block is regenerated from the live registry on EVERY turn. It is the ONLY\n"
+            "authoritative source for which agents exist. If something is not on this list,\n"
+            "it does NOT exist right now — even if conversation history says you spawned it.\n"
+            "Agents can be deleted by the user at any time, and the conversation will not\n"
+            "necessarily mention it. ALWAYS trust this list over your memory of past turns.\n\n"
+            "When the user asks what agents are running, list EXACTLY these names — no\n"
+            "more, no less. Do not invent entries from memory. Do not include agents from\n"
+            "earlier turns that aren't here now.\n\n"
+            "When the user asks to spawn an agent and that name is NOT on this list:\n"
+            "spawn it. Do NOT say 'it already exists' — that claim is based on stale memory.\n"
+        )
+        if agents_summary:
+            prompt += header + agents_summary
+        else:
+            prompt += header + "  (no user-spawned agents are currently running)"
+
+        # ── Block 2: persisted user facts ──
+        facts = self.get_user_facts()
+        if facts:
+            facts_lines = "\n".join(f"  {k}: {v}" for k, v in facts.items())
+            prompt += f"\n\n== KNOWN USER FACTS (always keep in mind) ==\n{facts_lines}"
+
+        self.system_prompt = prompt
+
+    def _inject_user_facts_into_prompt(self):
+        """Backward-compatible alias — delegates to the unified rebuild."""
+        self._rebuild_system_prompt()
 
     async def _extract_and_save_facts(self, user_message: str, assistant_response: str):
         """After each exchange, ask the LLM to extract any new durable facts."""
@@ -925,8 +1104,11 @@ class MainActor(LLMAgent):
             if self._registry:
                 actor = self._registry.find_by_name(agent_name)
                 if actor:
+                    actor_id = actor.actor_id
                     await actor.stop()
-                    await self._registry.unregister(actor.actor_id)
+                    await self._registry.unregister(actor_id)
+                    await self._clear_agent_manifest(agent_name, actor_id)
+                    self._record_agent_deletion(agent_name, reason=f"pipeline rule '{rule_id}' deleted")
                     stopped.append(agent_name)
         del rules[rule_id]
         self.persist(PIPELINE_RULES_KEY, rules)
@@ -1141,10 +1323,25 @@ class MainActor(LLMAgent):
 
     # ── User input ─────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _strip_live_context(message: str) -> str:
+        """Remove the [CURRENT SYSTEM STATE...][END SYSTEM STATE] prefix if present.
+        Used before fact extraction so the auto-injected agent list doesn't get
+        treated as user-stated facts."""
+        if not isinstance(message, str) or "[CURRENT SYSTEM STATE" not in message:
+            return message
+        end_marker = "[END SYSTEM STATE]"
+        idx = message.find(end_marker)
+        if idx == -1:
+            return message
+        # Skip past the marker and any whitespace following it
+        return message[idx + len(end_marker):].lstrip("\n").lstrip()
+
     async def chat(self, user_message: str) -> str:
         response = await super().chat(user_message)
-        # Fire-and-forget fact extraction — don't block the response
-        asyncio.create_task(self._extract_and_save_facts(user_message, response))
+        # Fire-and-forget fact extraction — strip auto-injected context first
+        clean_msg = self._strip_live_context(user_message)
+        asyncio.create_task(self._extract_and_save_facts(clean_msg, response))
         return response
 
     async def chat_stream(self, user_message: str):
@@ -1155,11 +1352,41 @@ class MainActor(LLMAgent):
             else:
                 full_response.append(chunk)
                 yield chunk
-        # Extract facts from completed response
+        # Extract facts from completed response — strip auto-injected context first
         if full_response:
+            clean_msg = self._strip_live_context(user_message)
             asyncio.create_task(
-                self._extract_and_save_facts(user_message, "".join(full_response))
+                self._extract_and_save_facts(clean_msg, "".join(full_response))
             )
+
+    async def _record_external_exchange(self, user_message: str, assistant_response: str):
+        """
+        Record a turn that was handled OUTSIDE self.chat() / self.chat_stream() —
+        i.e. by the HA, ACTUATE, or PIPELINE branches that return before the LLM
+        is called on main. Without this, those exchanges vanish from history and
+        future turns have no memory of them.
+
+        Mirrors what LLMAgent.chat() does for OTHER turns:
+          - append user + assistant to _conversation_history
+          - run rolling summarization if needed
+          - persist history to disk
+          - trigger fact extraction
+        """
+        if not user_message or assistant_response is None:
+            return
+        try:
+            self.metrics.messages_processed += 1
+            self._conversation_history.append({"role": "user",      "content": user_message})
+            self._conversation_history.append({"role": "assistant", "content": str(assistant_response)})
+            # Same summarization + persistence path that LLMAgent.chat() uses
+            await self._maybe_summarize()
+            self.persist("conversation_history", self._conversation_history)
+        except Exception as e:
+            logger.warning(f"[{self.name}] Failed to record external exchange: {e}")
+        # Fire-and-forget fact extraction — same as chat()
+        asyncio.create_task(
+            self._extract_and_save_facts(user_message, str(assistant_response))
+        )
 
 
     def _drain_notifications(self) -> str:
@@ -1191,6 +1418,7 @@ class MainActor(LLMAgent):
                 "  /capabilities         — alias for /agents",
                 "  /agents stop <name>   — stop and remove an agent (local or remote)",
                 "  /agents delete <name> — alias for /agents stop",
+                "  /registry             — diagnostic: compare live registry, spawn registry, and manifest cache",
                 "  @agent-name <msg>     — send a message directly to a named agent",
                 "  @catalog list         — list available catalog recipes",
                 "  @catalog spawn <n>    — spawn a catalog agent",
@@ -1314,7 +1542,8 @@ class MainActor(LLMAgent):
                 self.persist("_user_facts", {})
                 self.persist("history_summary", "")
                 self._history_summary = ""
-                self.system_prompt = ORCHESTRATOR_PROMPT
+                # Rebuild fresh — running agents block is preserved, facts are gone
+                self._rebuild_system_prompt()
                 return note_prefix + "Memory cleared — user facts and conversation summary reset."
             if sub.startswith("forget "):
                 key = sub[7:].strip()
@@ -1431,14 +1660,22 @@ class MainActor(LLMAgent):
                     await self._mqtt_publish(
                         f"nodes/{node}/stop", {"name": agent_name}, qos=1
                     )
+                    # Clear our cached manifest so /agents listings reflect reality.
+                    # The actor_id lookup may fail (remote actor not in our registry),
+                    # but the in-memory cache cleanup still happens.
+                    await self._clear_agent_manifest(agent_name)
+                    self._record_agent_deletion(agent_name, reason=f"manually stopped via /agents on node '{node}'")
                     return note_prefix + f"Stop signal sent to '{agent_name}' on node '{node}'."
                 else:
                     # Local agent
                     if self._registry:
                         target = self._registry.find_by_name(agent_name)
                         if target:
-                            await self._registry.unregister(target.actor_id)
+                            actor_id = target.actor_id
+                            await self._registry.unregister(actor_id)
                             await target.stop()
+                            await self._clear_agent_manifest(agent_name, actor_id)
+                            self._record_agent_deletion(agent_name, reason="manually stopped via /agents")
                             return note_prefix + f"Agent '{agent_name}' stopped."
                     return note_prefix + f"Agent '{agent_name}' not found locally."
 
@@ -1491,6 +1728,97 @@ class MainActor(LLMAgent):
                     lines.append(f"    spawnable   : yes — @catalog spawn {a['name']}")
             lines.append("\nLegend: \U0001f7e2 running  \U0001f4e6 spawnable (not yet running)  \U0001f534 stopped")
             lines.append("Filter: /agents <keyword>   e.g. /agents discord")
+            return note_prefix + "\n".join(lines)
+
+        # ── /registry — diagnostic: compare all three sources of truth ──────
+        if stripped == "/registry":
+            # 1. Live in-memory registry — what's actually running in this process
+            live_names = (
+                {a.name for a in self._registry.all_actors()}
+                if self._registry else set()
+            )
+            # Skip housekeeping actors so the comparison focuses on user agents
+            housekeeping = {"main", "monitor", "installer", "home-assistant-agent",
+                            "anomaly-detector", "code-agent"}
+            live_user = live_names - housekeeping
+
+            # 2. Spawn registry — what main intends to have running (persisted)
+            spawn_reg = self._get_spawn_registry()
+            spawn_names = set(spawn_reg.keys())
+
+            # 3. Manifest cache — every agent that has ever announced itself,
+            #    including remote ones on other nodes
+            manifest_names = set(self._agent_manifests.keys()) - housekeeping
+
+            # 4. Node heartbeats — what each remote node says it's running
+            heartbeat_names: set[str] = set()
+            for nd_info in self._known_nodes.values():
+                heartbeat_names.update(nd_info.get("agents", []))
+
+            lines = ["**Agent registry diagnostic**", ""]
+
+            # ── Live registry ──
+            lines.append("\U0001f7e2 **Live registry** (running NOW in this process):")
+            if live_user:
+                for name in sorted(live_user):
+                    actor = self._registry.find_by_name(name)
+                    state = actor.state.name if actor else "?"
+                    lines.append(f"    {name}  ({state})")
+            else:
+                lines.append("    (none)")
+
+            # ── Spawn registry ──
+            lines.append("")
+            lines.append("\U0001f4be **Spawn registry** (auto-restore on restart, persisted to disk):")
+            if spawn_names:
+                for name in sorted(spawn_names):
+                    cfg  = spawn_reg.get(name, {})
+                    node = cfg.get("node", "").strip() or "local"
+                    lines.append(f"    {name}  on {node}")
+            else:
+                lines.append("    (none)")
+
+            # ── Manifest cache ──
+            lines.append("")
+            lines.append("\U0001f4e6 **Manifest cache** (announced via MQTT — includes remote agents):")
+            if manifest_names:
+                for name in sorted(manifest_names):
+                    m    = self._agent_manifests.get(name, {})
+                    node = m.get("node") or "local"
+                    lines.append(f"    {name}  on {node}")
+            else:
+                lines.append("    (none)")
+
+            # ── Discrepancy report — this is the value-add ──
+            issues = []
+            # Live but not in spawn registry → an ad-hoc spawn that won't survive restart
+            for name in sorted(live_user - spawn_names):
+                issues.append(f"\u26a0\ufe0f  '{name}' is RUNNING but NOT in spawn registry — won't auto-restore on restart")
+            # Spawn registry says local but not live → main thinks it should be running
+            for name in sorted(spawn_names - live_names):
+                cfg = spawn_reg.get(name, {})
+                if not cfg.get("node", "").strip():   # local-only check
+                    issues.append(f"\u26a0\ufe0f  '{name}' is in spawn registry but NOT running locally — start failed or was stopped without cleanup")
+            # In manifest but not live and not in spawn registry → ghost
+            ghosts = manifest_names - live_user - spawn_names - heartbeat_names
+            for name in sorted(ghosts):
+                issues.append(f"\U0001f47b '{name}' is in manifest cache but nowhere else — stale entry, run `/agents delete {name}` to clean up")
+            # In spawn registry as remote, but the node is offline / not heartbeating
+            online_nodes = {n for n, info in self._known_nodes.items()
+                             if (__import__("time").time() - info.get("last_seen", 0)) < 30}
+            for name, cfg in spawn_reg.items():
+                node = cfg.get("node", "").strip()
+                if node and node not in online_nodes:
+                    issues.append(f"\u26a0\ufe0f  '{name}' assigned to node '{node}' which is OFFLINE — agent unreachable")
+
+            lines.append("")
+            if issues:
+                lines.append("**Discrepancies found:**")
+                for s in issues:
+                    lines.append(f"  {s}")
+            else:
+                lines.append("\u2705 All three sources agree — registry is consistent.")
+
             return note_prefix + "\n".join(lines)
 
                 # ── @mention direct routing ─────────────────────────────────────────
@@ -1593,7 +1921,9 @@ class MainActor(LLMAgent):
             "@planner", "set up a pipeline", "create a rule", "set up a rule",
         )):
             result = await self._run_planner(text)
-            return note_prefix + (result or "Planner did not return a result. Please retry.")
+            response = result or "Planner did not return a result. Please retry."
+            await self._record_external_exchange(text, response)
+            return note_prefix + response
 
         # Single LLM call classifies intent: ACTUATE, HA, PIPELINE (reactive rule), OTHER
         intent = await self._classify_intent(text)
@@ -1601,20 +1931,47 @@ class MainActor(LLMAgent):
 
         if intent == "PIPELINE":
             result = await self._run_planner(text)
-            return note_prefix + (result or "Planner did not return a result. Please retry.")
-            
+            response = result or "Planner did not return a result. Please retry."
+            await self._record_external_exchange(text, response)
+            return note_prefix + response
+
         if intent == "ACTUATE":
-            return note_prefix + await self._handle_actuate_intent(text)
+            response = await self._handle_actuate_intent(text)
+            await self._record_external_exchange(text, response)
+            return note_prefix + response
 
         if intent == "HA":
             result = await self.delegate_task("home-assistant-agent", text, timeout=120.0)
             if result and isinstance(result, dict) and result.get("result"):
-                return note_prefix + str(result["result"])
-            if not result:
-                return note_prefix + "I could not reach the Home Assistant agent right now. Please retry."
-            return note_prefix + "The Home Assistant agent did not return a result. Please retry."
+                response = str(result["result"])
+            elif not result:
+                response = "I could not reach the Home Assistant agent right now. Please retry."
+            else:
+                response = "The Home Assistant agent did not return a result. Please retry."
+            await self._record_external_exchange(text, response)
+            return note_prefix + response
 
-        response = await self.chat(text)
+        # Refresh the system prompt with live registry + facts before any LLM call.
+        # This ensures the LLM never answers from a stale view of which agents exist.
+        self._rebuild_system_prompt()
+
+        # Belt-and-braces: also inject the live agent list as a prefix on the
+        # user message itself. Models trust in-message context over system-prompt
+        # claims, so this is the strongest signal we can give without using a tool.
+        # We send the prefixed text to the LLM but replace it with the clean
+        # original in conversation history afterward — otherwise stale prefixes
+        # would accumulate across turns and bloat the context window.
+        prefixed_text = self._prefix_with_live_context(text)
+        response = await self.chat(prefixed_text)
+        # Find the most recent user message in history that matches the prefixed
+        # text and replace it with the user's original. The assistant turn after
+        # it remains unchanged.
+        for i in range(len(self._conversation_history) - 1, -1, -1):
+            m = self._conversation_history[i]
+            if m.get("role") == "user" and m.get("content") == prefixed_text:
+                m["content"] = text
+                break
+        self.persist("conversation_history", self._conversation_history)
 
         # If the LLM wrote agent code but forgot the <spawn> wrapper, remind it once
         has_spawn   = "<spawn>" in response
@@ -1688,7 +2045,9 @@ class MainActor(LLMAgent):
             "@planner", "set up a pipeline", "create a rule", "set up a rule",
         )):
             result = await self._run_planner(text)
-            yield result or "Planner did not return a result. Please retry."
+            response = result or "Planner did not return a result. Please retry."
+            await self._record_external_exchange(text, response)
+            yield response
             yield {"done": True, "spawned": [], "system_msg": ""}
             return
 
@@ -1698,34 +2057,56 @@ class MainActor(LLMAgent):
 
         if intent == "PIPELINE":
             result = await self._run_planner(text)
-            yield result or "Planner did not return a result. Please retry."
+            response = result or "Planner did not return a result. Please retry."
+            await self._record_external_exchange(text, response)
+            yield response
             yield {"done": True, "spawned": [], "system_msg": ""}
             return
-            
+
         if intent == "ACTUATE":
-            result = await self._handle_actuate_intent(text)
-            yield result
+            response = await self._handle_actuate_intent(text)
+            await self._record_external_exchange(text, response)
+            yield response
             yield {"done": True, "spawned": [], "system_msg": ""}
             return
 
         if intent == "HA":
             result = await self.delegate_task("home-assistant-agent", text, timeout=120.0)
             if result and isinstance(result, dict) and result.get("result"):
-                yield str(result["result"])
+                response = str(result["result"])
             elif not result:
-                yield "I could not reach the Home Assistant agent right now. Please retry."
+                response = "I could not reach the Home Assistant agent right now. Please retry."
             else:
-                yield "The Home Assistant agent did not return a result. Please retry."
+                response = "The Home Assistant agent did not return a result. Please retry."
+            await self._record_external_exchange(text, response)
+            yield response
             yield {"done": True, "spawned": [], "system_msg": ""}
             return
 
+        # Refresh the system prompt with live registry + facts before any LLM call.
+        # This ensures the LLM never answers from a stale view of which agents exist.
+        self._rebuild_system_prompt()
+
+        # Belt-and-braces: inject live agent list as a prefix on the user message.
+        # Same as the non-streaming path — see _prefix_with_live_context for why.
+        prefixed_text = self._prefix_with_live_context(text)
+
         # Stream the LLM response chunk by chunk
         full_chunks = []
-        async for chunk in self.chat_stream(text):
+        async for chunk in self.chat_stream(prefixed_text):
             if isinstance(chunk, dict):
                 break   # usage dict — discard, already tracked inside chat_stream
             full_chunks.append(chunk)
             yield chunk
+
+        # Replace the prefixed user message in history with the clean original
+        # so future turns aren't polluted with stale prefixes.
+        for i in range(len(self._conversation_history) - 1, -1, -1):
+            m = self._conversation_history[i]
+            if m.get("role") == "user" and m.get("content") == prefixed_text:
+                m["content"] = text
+                break
+        self.persist("conversation_history", self._conversation_history)
 
         full_response = "".join(full_chunks)
 
@@ -1861,24 +2242,6 @@ class MainActor(LLMAgent):
             result_payload = await asyncio.wait_for(future, timeout=180.0)
             answer = result_payload.get("result") or result_payload.get("text") or ""
             spawned_names = result_payload.get("spawned", [])
-
-            # ── Log what the planner actually achieved, per agent ──────────
-            spawn_results = result_payload.get("spawn_results", {})
-            if spawn_results:
-                ok   = [n for n, r in spawn_results.items() if r.get("ok")]
-                fail = [n for n, r in spawn_results.items() if not r.get("ok")]
-                if ok:
-                    logger.info(f"[{self.name}] Planner spawned OK: {ok}")
-                if fail:
-                    logger.warning(f"[{self.name}] Planner spawn failures: "
-                                   + ", ".join(f"{n}={spawn_results[n].get('error','?')}" for n in fail))
-                    # Append failures to the user-facing answer so they're not silent
-                    fail_lines = "\n".join(
-                        f"  • **{n}**: {spawn_results[n].get('error') or spawn_results[n].get('status', 'failed')}"
-                        for n in fail
-                    )
-                    answer += f"\n\n⚠️ **Some agents failed to spawn:**\n{fail_lines}"
-
             if spawned_names:
                 answer += f"\n\n[System: Planner created new agents: {', '.join(spawned_names)} — saved for future use]"
             return answer
@@ -2094,6 +2457,11 @@ class MainActor(LLMAgent):
                 if self._registry:
                     await self._registry.unregister(existing.actor_id)
                 await existing.stop()
+                # Clear cached manifest in-memory so a list query during the brief
+                # window before the new agent publishes doesn't show stale data.
+                # We do NOT tombstone the MQTT topic — the new agent will reuse
+                # the same deterministic actor_id and republish immediately.
+                self._agent_manifests.pop(name, None)
                 await asyncio.sleep(0.5)
             except Exception as e:
                 logger.warning(f"[{self.name}] Error stopping old '{name}': {e}")
@@ -2559,6 +2927,12 @@ class MainActor(LLMAgent):
         Subscribe to agents/+/manifest and build a searchable topic registry.
         Retained manifests are delivered immediately on subscribe so the registry
         is populated even for agents that started before main restarted.
+
+        An EMPTY retained payload is a tombstone — it means the agent has been
+        deleted. We extract the agent_id from the topic and drop any matching
+        manifest from both the agent registry and the topic registry. Without
+        this, _agent_manifests would grow forever and stale entries would be
+        reported as still-existing (with running=false but never disappearing).
         """
         try:
             import aiomqtt
@@ -2571,8 +2945,36 @@ class MainActor(LLMAgent):
                     await client.subscribe("agents/+/manifest")
                     logger.info("[main] Subscribed to agent manifests.")
                     async for msg in client.messages:
+                        # ── Tombstone: empty payload means agent was deleted ──
+                        raw_payload = msg.payload
+                        if raw_payload is None or len(raw_payload) == 0:
+                            # Topic format: agents/{actor_id}/manifest
+                            topic_str = str(msg.topic)
+                            try:
+                                target_id = topic_str.split("/")[1]
+                            except IndexError:
+                                continue
+                            # Find the manifest entry for this actor_id and drop it.
+                            # Manifests are keyed by name, but each contains an actor_id.
+                            removed_name = None
+                            for name, manifest in list(self._agent_manifests.items()):
+                                if manifest.get("actor_id") == target_id or name == target_id:
+                                    self._agent_manifests.pop(name, None)
+                                    removed_name = name
+                                    break
+                            if removed_name:
+                                # Also drop from topic registry
+                                for topic, entries in list(self._topic_registry.items()):
+                                    self._topic_registry[topic] = [
+                                        m for m in entries if m.get("name") != removed_name
+                                    ]
+                                    if not self._topic_registry[topic]:
+                                        self._topic_registry.pop(topic, None)
+                                logger.info(f"[main] Manifest tombstone — removed '{removed_name}'")
+                            continue
+
                         try:
-                            data = json.loads(msg.payload.decode())
+                            data = json.loads(raw_payload.decode())
                         except Exception:
                             continue
                         if not isinstance(data, dict):
@@ -2639,6 +3041,8 @@ class MainActor(LLMAgent):
                     try:
                         await self._registry.unregister(local.actor_id)
                         await local.stop()
+                        # In-memory only — remote will republish its own manifest
+                        self._agent_manifests.pop(agent_name, None)
                         await asyncio.sleep(0.3)
                     except Exception as e:
                         logger.warning(f"[{self.name}] Could not stop local '{agent_name}': {e}")
@@ -2664,6 +3068,12 @@ class MainActor(LLMAgent):
         """
         Subscribe to nodes/+/heartbeat so main knows which remote nodes are online.
         Updates self._known_nodes which is used by list_nodes() and the LLM context.
+
+        Also detects agents that silently vanished from a node (crash, OOM kill,
+        manual kill, deploy gone wrong) by diffing each heartbeat's agent list
+        against what we last saw. Anything that disappeared and is still in the
+        spawn registry as belonging to this node is treated as a deletion event:
+        manifest cleared, registry entry removed, history note added.
         """
         try:
             import aiomqtt
@@ -2691,9 +3101,39 @@ class MainActor(LLMAgent):
 
                         if topic.endswith("/heartbeat"):
                             import time as _t
+                            new_agents = data.get("agents", [])
+                            # ── Diff against previous snapshot for this node ──
+                            prev = self._known_nodes.get(node_name, {})
+                            prev_agents = set(prev.get("agents", []))
+                            curr_agents = set(new_agents)
+                            disappeared = prev_agents - curr_agents
+                            if disappeared:
+                                # Only count as silent-loss if the spawn registry still
+                                # claims the agent should be on this node. Migration
+                                # updates the registry before the old node stops the
+                                # agent, so a migrated agent won't trip this check.
+                                reg = self._get_spawn_registry()
+                                for agent_name in disappeared:
+                                    cfg = reg.get(agent_name)
+                                    if not cfg:
+                                        continue   # already deleted via /agents — nothing to do
+                                    if cfg.get("node", "").strip() != node_name:
+                                        continue   # migrated away — expected disappearance
+                                    logger.warning(
+                                        f"[main] Agent '{agent_name}' silently disappeared "
+                                        f"from node '{node_name}' (crash/kill suspected)"
+                                    )
+                                    # Same cleanup as a manual delete, minus the node-side
+                                    # stop signal (it's already gone there).
+                                    self._remove_from_spawn_registry(agent_name)
+                                    await self._clear_agent_manifest(agent_name)
+                                    self._record_agent_deletion(
+                                        agent_name,
+                                        reason=f"vanished from node '{node_name}' (crash or external kill)",
+                                    )
                             self._known_nodes[node_name] = {
                                 "last_seen": _t.time(),
-                                "agents":   data.get("agents", []),
+                                "agents":   new_agents,
                                 "node_id":  data.get("node_id", ""),
                             }
                         elif topic.endswith("/migrate_result"):
@@ -2718,6 +3158,72 @@ class MainActor(LLMAgent):
                 if self.state.value not in ("stopped", "failed"):
                     logger.warning(f"[main] Node heartbeat listener error: {e}. Reconnecting in 5s…")
                     await asyncio.sleep(5)
+
+    async def _node_offline_watcher(self):
+        """
+        Periodically check for nodes that have gone silent. If a node has not
+        sent a heartbeat in NODE_OFFLINE_GRACE_S, treat all its agents as gone
+        and drop the node from our tracking.
+
+        Uses a longer threshold (90s) than the visual "offline" indicator (30s)
+        so brief network blips don't trigger false deletion notes. The visual
+        indicator stays at 30s for snappy UX; this watcher waits long enough
+        to be sure the node is genuinely down.
+        """
+        import time as _t
+        NODE_OFFLINE_GRACE_S = 90.0
+        CHECK_INTERVAL_S      = 15.0
+
+        while self.state.value not in ("stopped", "failed"):
+            try:
+                await asyncio.sleep(CHECK_INTERVAL_S)
+                now = _t.time()
+                # Snapshot to avoid mutation-during-iteration
+                stale_nodes = [
+                    (name, info)
+                    for name, info in list(self._known_nodes.items())
+                    if (now - info.get("last_seen", 0)) > NODE_OFFLINE_GRACE_S
+                ]
+                if not stale_nodes:
+                    continue
+
+                reg = self._get_spawn_registry()
+                for node_name, info in stale_nodes:
+                    logger.warning(
+                        f"[main] Node '{node_name}' has been silent for >"
+                        f"{NODE_OFFLINE_GRACE_S:.0f}s — treating as offline"
+                    )
+                    # Find all agents that belong to this node according to the
+                    # spawn registry (the heartbeat's last-known agent list may
+                    # be stale).
+                    lost = [
+                        n for n, cfg in reg.items()
+                        if cfg.get("node", "").strip() == node_name
+                    ]
+                    for agent_name in lost:
+                        self._remove_from_spawn_registry(agent_name)
+                        await self._clear_agent_manifest(agent_name)
+                        self._record_agent_deletion(
+                            agent_name,
+                            reason=f"node '{node_name}' went offline",
+                        )
+                    # Drop the node from our tracking. If it comes back, the
+                    # heartbeat listener will re-add it as a fresh entry.
+                    self._known_nodes.pop(node_name, None)
+                    if lost:
+                        self._pending_notifications.append({
+                            "_monitor_notification": True,
+                            "message": (
+                                f"Node '{node_name}' is offline. "
+                                f"Lost agents: {', '.join(lost)}."
+                            ),
+                            "severity": "warning",
+                            "timestamp": now,
+                        })
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[main] Node offline watcher error: {e}")
 
     # ── Delegation ─────────────────────────────────────────────────────────
 
@@ -2789,9 +3295,16 @@ class MainActor(LLMAgent):
         if node:
             await self._update_node_desired_state(node, remove_name=name)
             await self._mqtt_publish(f"nodes/{node}/stop", {"name": name}, qos=1)
+            # Clear cached manifest for the remote agent
+            await self._clear_agent_manifest(name)
+            self._record_agent_deletion(name, reason=f"deleted from node '{node}'")
+            return
 
         if self._registry:
             target = self._registry.find_by_name(name)
             if target:
-                await self._registry.unregister(target.actor_id)
+                actor_id = target.actor_id
+                await self._registry.unregister(actor_id)
                 await target.stop()
+                await self._clear_agent_manifest(name, actor_id)
+                self._record_agent_deletion(name, reason="deleted")
