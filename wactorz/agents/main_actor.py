@@ -981,6 +981,10 @@ class MainActor(LLMAgent):
         for actor in self._registry.all_actors():
             if actor.name in skip:
                 continue
+            # Skip transient planner instances — they're supervisors of their
+            # spawned pipeline agents and not user-facing capabilities.
+            if actor.name.startswith("planner-"):
+                continue
             desc = (
                 getattr(actor, "DESCRIPTION", None)
                 or getattr(actor, "description", "")
@@ -1012,8 +1016,11 @@ class MainActor(LLMAgent):
         if self._registry:
             skip = {"main", "monitor", "installer"}
             for actor in self._registry.all_actors():
-                if actor.name not in skip:
-                    live_names.append(actor.name)
+                if actor.name in skip:
+                    continue
+                if actor.name.startswith("planner-"):
+                    continue
+                live_names.append(actor.name)
         live_names.sort()
 
         if live_names:
@@ -1969,7 +1976,7 @@ class MainActor(LLMAgent):
         logger.info(f"[{self.name}] Intent: {intent} — {text[:60]}")
 
         if intent == "PIPELINE":
-            result = await self._run_planner(text)
+            result = await self._run_planner(text, is_pipeline_intent=True)
             response = result or "Planner did not return a result. Please retry."
             await self._record_external_exchange(text, response)
             return note_prefix + response
@@ -2107,7 +2114,7 @@ class MainActor(LLMAgent):
         logger.info(f"[{self.name}] Intent: {intent} — {text[:60]}")
 
         if intent == "PIPELINE":
-            result = await self._run_planner(text)
+            result = await self._run_planner(text, is_pipeline_intent=True)
             response = result or "Planner did not return a result. Please retry."
             await self._record_external_exchange(text, response)
             yield response
@@ -2247,15 +2254,30 @@ class MainActor(LLMAgent):
 
         return False
 
-    async def _run_planner(self, task: str) -> Optional[str]:
-        """Spawn a PlannerAgent, hand it the task, wait for the result."""
+    async def _run_planner(self, task: str, is_pipeline_intent: bool = False) -> Optional[str]:
+        """Spawn a PlannerAgent, hand it the task, wait for the result.
+
+        is_pipeline_intent: when True, the caller has classified this as a
+        reactive-rule task ("if X then Y", "wherever Z happens..."). For these,
+        we DELIBERATELY skip the conversation-history enrichment because:
+          - Pipelines are imperative declarations, not follow-ups.
+          - Including unrelated prior turns has been observed to bleed irrelevant
+            context into the planner's LLM (e.g. a prior "door open" pipeline
+            poisoning a fresh "camera person detection" pipeline, causing the
+            planner to generate a door-themed agent name and code).
+          - Pronoun resolution — the main reason enrichment exists — rarely
+            applies to pipeline declarations.
+        """
         from .planner_agent import PlannerAgent
         import uuid
 
         # Enrich vague follow-up tasks with recent conversation context
-        # so the planner has the full picture (e.g. which entity was found)
+        # so the planner has the full picture (e.g. which entity was found).
+        # PIPELINE intent skips this — see docstring.
         enriched_task = task
-        if self._conversation_history and len(task.split()) < 15:
+        if (not is_pipeline_intent
+                and self._conversation_history
+                and len(task.split()) < 15):
             # Short/vague task — inject last 3 exchanges as context
             recent = self._conversation_history[-6:]  # 3 user+assistant pairs
             ctx_lines = []
