@@ -26,12 +26,6 @@ from typing import Optional
 from ..core.actor import Actor, Message, MessageType
 from .llm_agent import LLMProvider
 
-try:
-    from .sparql_context import build_sparql_context as _build_sparql_context
-    _SPARQL_AVAILABLE = True
-except ImportError:
-    _SPARQL_AVAILABLE = False
-
 logger = logging.getLogger(__name__)
 
 _SKIP_AGENTS    = {"main", "monitor", "installer", "home-assistant-agent", "home-assistant-hardware", "home-assistant-automation", "anomaly-detector", "code-agent"}
@@ -62,20 +56,6 @@ class PlannerAgent(Actor):
         self._auto_terminate  = auto_terminate
         self._result_futures: dict[str, asyncio.Future] = {}
         self._spawned_by_planner: list[str] = []   # agents we created this run
-        # Per-agent spawn outcome: name → {"ok": bool, "error": str|None}
-        # Sent back to main in the RESULT payload so it knows what actually happened.
-        self._spawn_results: dict[str, dict] = {}
-
-        # Fuseki endpoint for SPARQL world-model enrichment (optional)
-        try:
-            from ..config import CONFIG
-            self._fuseki_url: str = (
-                getattr(CONFIG, "fuseki_url", None)
-                or getattr(CONFIG, "fuseki_endpoint", None)
-                or "http://localhost:3030/wactorz/sparql"
-            )
-        except Exception:
-            self._fuseki_url = "http://localhost:3030/wactorz/sparql"
 
     def _current_task_description(self) -> str:
         return self._task[:60] if self._task else "waiting for task"
@@ -122,11 +102,7 @@ class PlannerAgent(Actor):
         """Run the plan and report the result back to main (used when task set at spawn time)."""
         result = await self._run_plan(task)
         if self._reply_to_id:
-            reply = {
-                "result":        result,
-                "text":          result,
-                "spawn_results": self._spawn_results,   # per-agent outcome dict
-            }
+            reply = {"result": result, "text": result}
             if self._reply_task_id:
                 reply["_task_id"] = self._reply_task_id
             if self._spawned_by_planner:
@@ -318,12 +294,10 @@ class PlannerAgent(Actor):
                 await self._log(f"'{name}' already running — skipping")
                 wired.append(f"**{name}** (already active)")
                 rule_agents.append(name)
-                self._spawn_results[name] = {"ok": True, "status": "already_running"}
                 continue
 
             if not spawn_cfg:
                 await self._log(f"Step '{name}' has no spawn_config — skipping")
-                self._spawn_results[name] = {"ok": False, "status": "no_config", "error": "missing spawn_config"}
                 continue
 
             spawn_cfg = dict(spawn_cfg)
@@ -336,14 +310,12 @@ class PlannerAgent(Actor):
             except Exception as e:
                 await self._log(f"Spawn failed for '{name}': {e}")
                 wired.append(f"**{name}** — spawn failed: {e}")
-                self._spawn_results[name] = {"ok": False, "status": "spawn_failed", "error": str(e)}
                 continue
 
             if actor:
                 self._spawned_by_planner.append(name)
                 spawned.append(name)
                 rule_agents.append(name)
-                self._spawn_results[name] = {"ok": True, "status": "spawned"}
 
                 # Register in main's spawn registry for auto-restore on restart
                 if self._registry:
@@ -363,7 +335,6 @@ class PlannerAgent(Actor):
                 await asyncio.sleep(0.3)
             else:
                 wired.append(f"**{name}** — failed to spawn")
-                self._spawn_results[name] = {"ok": False, "status": "spawn_returned_none"}
 
         # Persist this rule into main's pipeline rules registry
         if rule_agents:
@@ -921,18 +892,6 @@ class PlannerAgent(Actor):
                 logger.warning(f"[{self.name}] Feasibility check error (continuing): {e}")
 
         # ── 3. Decompose into spawn configs ────────────────────────────────
-        # SPARQL enrichment: fetch durable channel schemas + relevant HA state
-        _sparql_pipeline_ctx = ""
-        if _SPARQL_AVAILABLE:
-            try:
-                _sparql_pipeline_ctx = await _build_sparql_context(
-                    task=task,
-                    fuseki_url=self._fuseki_url,
-                    timeout=3.0,
-                )
-            except Exception as _e:
-                logger.debug(f"[{self.name}] SPARQL pipeline context skipped: {_e}")
-
         # Build the prompt as a list of parts to avoid f-string escape issues
         prompt_parts = [
             "You are designing reactive automation pipelines for a multi-agent IoT system.",
@@ -969,31 +928,10 @@ class PlannerAgent(Actor):
             "",
             'TYPE 2 — "dynamic"',
             "  Purpose: any logic that needs code — state filtering, webcam, timers, HTTP webhooks, Discord, etc.",
-            "  Two hooks available — pick the RIGHT ONE for the job:",
-            "    async def setup(agent)   — runs ONCE on start. For ALL subscribe-based agents.",
-            "                               Call agent.subscribe() here, then RETURN immediately.",
-            "                               The callbacks run as background tasks forever.",
-            "    async def process(agent) — called by the runner every poll_interval seconds.",
-            "                               For POLLING only (HTTP APIs, retained MQTT, timers).",
-            "                               Do work, publish result, then RETURN. That is all.",
-            "  CRITICAL — WHICH HOOK TO USE:",
-            "    Agent reacts to MQTT messages?  use setup() + agent.subscribe(). Logic in callback. Omit process().",
-            "    Agent polls an API or retained topic?  use process(). Do work, publish, RETURN. No loops, no sleep.",
-            "  CRITICAL WRONG PATTERN — causes 120s timeout crash every 2 minutes:",
-            "    async def process(agent):",
-            "        while True:                          # NEVER loop in process()",
-            "            data = await agent.mqtt_get(...) # NEVER mqtt_get in a loop",
-            "            await asyncio.sleep(30)          # NEVER sleep in process()",
-            "  CORRECT subscribe-based pattern (no timeout, no restart):",
-            "    async def setup(agent):",
-            "        async def on_msg(payload):",
-            "            await agent.publish('out/topic', payload)",
-            "        agent.subscribe('sensors/temp', on_msg)  # returns immediately",
-            "  CORRECT polling pattern (process returns after each check):",
-            "    async def process(agent):",
-            "        import random",
-            "        await agent.publish('out/topic', {'val': random.random()})",
-            "        # ends here — runner waits poll_interval then calls again",
+            "  Define these async functions (all optional except at least one must exist):",
+            "    async def setup(agent)   — runs once on start, good for subscriptions and init",
+            "    async def process(agent) — runs in a loop every poll_interval seconds",
+            "  Available APIs (ONLY these — no other agent methods exist):",
             '    await agent.log("message")                        — structured log (ASYNC, must await)',
             '    await agent.publish("topic", {dict})              — publish to MQTT (ASYNC, must await)',
             '    await agent.alert("message")                      — trigger alert (ASYNC, must await)',
@@ -1009,8 +947,6 @@ class PlannerAgent(Actor):
             '    agent.state["key"]                                — in-memory dict (cleared on restart)',
             "  CRITICAL RULES FOR DYNAMIC AGENT CODE:",
             "    NEVER use await on agent.subscribe(), agent.window(), agent.persist(), agent.recall(), agent.declare_contract()",
-            "    NEVER put a while loop or asyncio.sleep() inside process()",
-            "    NEVER call await agent.mqtt_get() in a loop inside process()",
             "    NEVER import or use aiomqtt directly — use agent.subscribe() instead",
             "    NEVER hardcode MQTT broker hostnames or ports — agent.subscribe() handles this automatically",
             "    NEVER use asyncio.create_task() for MQTT — agent.subscribe() already creates the background task",
@@ -1123,18 +1059,6 @@ class PlannerAgent(Actor):
             "═══ GENERAL RULES ═══",
             "",
             "╔══════════════════════════════════════════════════════════════════╗",
-            "║  CRITICAL — CONTINUOUS AGENT PIPELINES                          ║",
-            "║  When ALL agents in the plan are continuous (have process() or  ║",
-            "║  agent.subscribe()), do NOT add a final step that delegates to  ║",
-            "║  @main or any other agent for reporting.                        ║",
-            "║  Spawning the agent IS the complete action. The system will     ║",
-            "║  confirm success automatically — no report step is needed.      ║",
-            "║                                                                 ║",
-            "║  WRONG: [...spawn agent..., {\"agent\": \"main\", \"task\": \"report\"}] ║",
-            "║  CORRECT: [...spawn agent...]   ← stop here                    ║",
-            "╚══════════════════════════════════════════════════════════════════╝",
-            "",
-            "╔══════════════════════════════════════════════════════════════════╗",
             "║  CRITICAL — HOME ASSISTANT ACTIONS                              ║",
             "║  NEVER call HA REST API directly from dynamic agent code!       ║",
             "║  NEVER use httpx/requests to POST to /api/services/*.           ║",
@@ -1191,13 +1115,6 @@ class PlannerAgent(Actor):
                     "",
                 ]
                 if topic_samples_section else []
-            ),
-            *(  # SPARQL: durable channel schemas + relevant HA states from Fuseki
-                (lambda ctx: [
-                    "═══ FUSEKI KNOWLEDGE GRAPH (durable schemas + HA state) ═══",
-                    ctx,
-                    "",
-                ] if ctx else [])(_sparql_pipeline_ctx)
             ),
             "═══ HOME ASSISTANT ENTITIES ═══",
             ha_section,
@@ -1440,7 +1357,17 @@ class PlannerAgent(Actor):
 
         workers = []
         for actor in self._registry.all_actors():
+            # Skip housekeeping agents, the running planner itself, AND any
+            # OTHER planner instances. Pipeline-mode planners stay alive as
+            # supervisors of their spawned children (see line 356, where
+            # _auto_terminate is set False for pipelines), so they accumulate
+            # in the registry across user requests. Without this filter, a
+            # new planner would see the old ones as candidate "workers" —
+            # noise that bloats the worker list passed to the LLM and risks
+            # the LLM trying to delegate to a sibling planner.
             if actor.name in _SKIP_AGENTS or actor.name == self.name:
+                continue
+            if actor.name.startswith("planner-"):
                 continue
             # Prefer manifest data (richer), fall back to live actor attrs
             manifest = manifest_map.get(actor.name, {})
@@ -1514,24 +1441,12 @@ class PlannerAgent(Actor):
         except Exception:
             pass
 
-        # ── SPARQL world-model enrichment (durable channel schemas + HA state) ──
-        sparql_ctx = ""
-        if _SPARQL_AVAILABLE:
-            try:
-                sparql_ctx = await _build_sparql_context(
-                    task=task,
-                    fuseki_url=self._fuseki_url,
-                    timeout=3.0,
-                )
-            except Exception as _e:
-                logger.debug(f"[{self.name}] SPARQL context skipped: {_e}")
-
         prompt = f"""You are a task planner for a multi-agent system.
 Break the task into steps. Each step is handled by one agent.
 
 AVAILABLE AGENTS (with input/output contracts):
 {workers_desc}
-{topic_schema_ctx}{sparql_ctx}
+{topic_schema_ctx}
 TASK: {task}
 
 OUTPUT RULES:
@@ -1571,22 +1486,6 @@ OUTPUT RULES:
 
     NEVER use agent.logger — it does not exist. Use await agent.log(msg) instead.
 
-    CRITICAL — process() must return after each iteration:
-      The framework calls process() repeatedly every poll_interval seconds.
-      NEVER put a while loop or asyncio.sleep() inside process() — it causes a 120s timeout.
-      NEVER call await agent.mqtt_get() in a loop inside process().
-      WRONG:  async def process(agent):
-                  while True:
-                      await agent.publish(...)
-                      await asyncio.sleep(5)   ← NEVER — this blocks and times out
-      CORRECT: async def process(agent):
-                   await agent.publish(...)    ← do the work and return
-
-    CRITICAL — setup() vs process() — pick the right one:
-      Reacts to MQTT messages → use setup() + agent.subscribe(). Omit process() entirely.
-      Polls an API or retained topic → use process(). Return after each check.
-      NEVER use process() to read from MQTT. Use agent.subscribe() in setup() instead.
-
     CRITICAL — HOME ASSISTANT ACTIONS:
       NEVER call HA REST API directly from dynamic agent code (no httpx/requests to /api/services/).
       For ANY HA device action (turn on/off lights, switches, climate, etc.):
@@ -1617,7 +1516,7 @@ OUTPUT RULES:
     "input_schema":  {{"city": "str — city name to fetch weather for"}},
     "output_schema": {{"city": "str", "temp_c": "str", "description": "str"}},
     "poll_interval": 3600,
-    "code": "async def setup(agent):\n    await agent.log('ready')\nasync def process(agent):\n    pass  # this agent only responds to tasks, no periodic work needed\nasync def handle_task(agent, payload):\n    import httpx\n    city = payload.get('city', 'Athens')\n    async with httpx.AsyncClient(timeout=10) as c:\n        r = await c.get(f'https://wttr.in/{{city}}?format=j1')\n        d = r.json()\n    cur = d['current_condition'][0]\n    return {{'city': city, 'temp_c': cur['temp_C'], 'description': cur['weatherDesc'][0]['value']}}"
+    "code": "async def setup(agent):\n    await agent.log('ready')\nasync def process(agent):\n    import asyncio\n    await asyncio.sleep(3600)\nasync def handle_task(agent, payload):\n    import httpx\n    city = payload.get('city', 'Athens')\n    async with httpx.AsyncClient(timeout=10) as c:\n        r = await c.get(f'https://wttr.in/{{city}}?format=j1')\n        d = r.json()\n    cur = d['current_condition'][0]\n    return {{'city': city, 'temp_c': cur['temp_C'], 'description': cur['weatherDesc'][0]['value']}}"
   }}
 - The FINAL synthesis step should ALWAYS be assigned to "main" (not any other agent).
   Main will combine results using its LLM. Never assign synthesis to a domain agent.
@@ -1775,6 +1674,18 @@ Example:
             if not code:
                 logger.warning(f"[{self.name}] Dynamic spawn config has no code for '{name}'")
                 return None
+
+            # Install required packages before spawning. Without this, agents
+            # that depend on cv2, numpy, ultralytics, etc. crash on first
+            # process() call with ModuleNotFoundError, and the self-repair
+            # loop kicks in to "fix" code that was actually fine — just
+            # missing dependencies. Mirrors MainActor._spawn_dynamic_agent.
+            packages = config.get("install", [])
+            if isinstance(packages, str):
+                packages = [p.strip() for p in packages.replace(",", " ").split() if p.strip()]
+            if packages:
+                await self._ensure_packages_installed(packages, agent_name=name)
+
             from .dynamic_agent import DynamicAgent
             actor = await self.spawn(
                 DynamicAgent,
@@ -1930,16 +1841,10 @@ Example:
     async def _synthesize(self, task: str, plan: list[dict], results: dict) -> str:
         # If every step was a spawn-only continuous agent, skip LLM synthesis
         # and return a clean confirmation — no need to "summarize" spawns.
-        # Filter out any spurious @main report steps the LLM may have added.
-        meaningful_steps = [
-            s for s in plan
-            if s.get("agent") not in ("main", self.name)
-            or results.get(s["step"], {}).get("spawned")
-        ]
-        all_spawned = bool(meaningful_steps) and all(
+        all_spawned = all(
             isinstance(results.get(s["step"]), dict)
             and results[s["step"]].get("spawned")
-            for s in meaningful_steps
+            for s in plan
         )
         if all_spawned:
             agents = [s["agent"] for s in plan]
@@ -1998,6 +1903,78 @@ Example:
             return f"[LLM error: {e}]"
 
     # ── Helpers ────────────────────────────────────────────────────────────
+
+    async def _ensure_packages_installed(self, packages: list[str], agent_name: str = "?"):
+        """
+        Check which packages from `packages` are not currently importable, and
+        delegate the install to the 'installer' agent. Blocks until install is
+        complete (or times out). Mirrors MainActor._install_packages so the
+        planner-spawn path is symmetric with the user-typed-spawn path.
+
+        Without this, dynamic agents that need third-party packages (cv2,
+        numpy, ultralytics, etc.) crash immediately on import inside their
+        process() loop. The self-repair loop then "fixes" the code by
+        replacing the import with a print statement, leaving a useless agent.
+        """
+        if not packages or not self._registry:
+            return
+
+        # Fast path: skip packages already importable in this process. The
+        # import name often differs from the pip name (e.g. 'opencv-python'
+        # imports as 'cv2'), so this is a heuristic — installs of pre-installed
+        # packages are cheap no-ops anyway.
+        import importlib
+        needed = []
+        for pkg in packages:
+            import_name = pkg.replace("-", "_").split("[")[0]
+            try:
+                importlib.import_module(import_name)
+            except ImportError:
+                needed.append(pkg)
+        if not needed:
+            await self._log(f"All packages for '{agent_name}' already available: {packages}")
+            return
+
+        installer = self._registry.find_by_name("installer")
+        if not installer:
+            logger.warning(
+                f"[{self.name}] installer agent not found — cannot install {needed} "
+                f"for '{agent_name}'. Agent will likely crash on import."
+            )
+            return
+
+        await self._log(f"Installing {needed} for '{agent_name}' via installer...")
+        import uuid
+        task_id = f"install_{uuid.uuid4().hex[:8]}"
+        future = asyncio.get_event_loop().create_future()
+        self._result_futures[task_id] = future
+        try:
+            await self.send(installer.actor_id, MessageType.TASK, {
+                "action": "install",
+                "packages": needed,
+                "task": task_id,
+                "_task_id": task_id,
+                "reply_to": self.actor_id,
+            })
+            try:
+                # 120s matches main's timeout — long enough for typical pip
+                # installs, short enough that a hung installer doesn't stall
+                # the entire pipeline indefinitely.
+                result = await asyncio.wait_for(future, timeout=120.0)
+                msg = result.get("message", str(result))
+                logger.info(f"[{self.name}] Install result for '{agent_name}': {msg}")
+                if result.get("failed"):
+                    logger.warning(
+                        f"[{self.name}] Failed to install: {result['failed']} "
+                        f"— '{agent_name}' may not work correctly"
+                    )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"[{self.name}] Install timed out for {needed} — proceeding anyway, "
+                    f"'{agent_name}' may crash on import"
+                )
+        finally:
+            self._result_futures.pop(task_id, None)
 
     async def _deferred_stop(self):
         await asyncio.sleep(2.0)
