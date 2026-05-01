@@ -367,6 +367,45 @@ This stops the old agent and starts the new one immediately:
 }
 </spawn>
 
+== DELETING AN AGENT ==
+When the user explicitly asks to remove, stop, delete, or kill an agent, emit a
+<delete> block. The framework will stop the agent, remove it from the spawn
+registry (so it does NOT auto-restore on restart), clear its manifest, and
+record the deletion in conversation history. This is the orchestrator-side
+counterpart of <spawn>.
+
+Use <delete> ONLY when the user's intent is clearly to permanently remove an
+agent. Do NOT use it to "restart" an agent — use <spawn> with "replace": true
+for that. Do NOT use it just because the user is frustrated with output —
+ask for clarification first.
+
+Format (JSON):
+<delete>
+{"name": "math-agent"}
+</delete>
+
+Or the shorthand bare-name form (when only a name is needed):
+<delete>math-agent</delete>
+
+You can include multiple <delete> blocks in one response, and you can mix
+<delete> with <spawn> in the same turn (e.g. "delete the old math-agent and
+spawn a new calculator-agent" → emit one <delete> block AND one <spawn>
+block in the same response).
+
+Protected names that you CANNOT delete: main, monitor, installer,
+home-assistant-agent, anomaly-detector, code-agent, catalog. Requests to
+delete these should be politely refused — explain they are system agents.
+
+If the user asks to delete an agent that doesn't exist, do NOT emit a
+<delete> block — just tell them it isn't running.
+
+After emitting a <delete> block, write a short user-facing confirmation in
+plain prose (the block itself is hidden from the user). Example:
+
+  User: "delete the math-agent please"
+  You:  "Removed the math-agent."
+        <delete>{"name": "math-agent"}</delete>
+
 == RULES ==
 - Always import libraries INSIDE functions (not at module level)
 - Use agent.state to pass data between setup() and process()
@@ -1987,6 +2026,11 @@ class MainActor(LLMAgent):
 
         clean, spawned = await self._process_spawn_commands(response)
 
+        # Process any <delete>{"name": "..."}</delete> blocks the LLM produced.
+        # This is the orchestrator-side counterpart of <spawn> — lets the LLM
+        # remove agents in response to user requests like "delete the math agent".
+        clean, deleted, missing = await self._process_delete_commands(clean)
+
         # Execute any @agent-name {payload} delegation patterns the LLM produced
         clean = await self._execute_llm_delegations(clean)
 
@@ -1995,18 +2039,25 @@ class MainActor(LLMAgent):
             {"type": "user_interaction", "input": text[:100], "response": clean[:200]},
         )
 
+        # Build a system footer summarizing spawn/delete actions
+        footer_parts = []
         if spawned:
             bg_names   = [a.name for a in spawned if isinstance(a, _SpawnPlaceholder)]
             live_names = [a.name for a in spawned if not isinstance(a, _SpawnPlaceholder)]
-            parts = []
             if live_names:
                 replaced = '"replace": true' in response or '"replace":true' in response
                 action   = "Replaced" if replaced else "Spawned"
-                parts.append(f"{action} {', '.join(live_names)}")
+                footer_parts.append(f"{action} {', '.join(live_names)} — will auto-restore on restart")
             if bg_names:
-                parts.append(f"Installing packages for {', '.join(bg_names)} — will appear shortly")
-            if parts:
-                clean += f"\n\n[System: {' | '.join(parts)} — will auto-restore on restart]"
+                footer_parts.append(f"Installing packages for {', '.join(bg_names)} — will appear shortly")
+        if deleted:
+            footer_parts.append(f"Deleted {', '.join(deleted)}")
+        if missing:
+            footer_parts.append(
+                f"Could not delete {', '.join(missing)} — not currently registered"
+            )
+        if footer_parts:
+            clean += f"\n\n[System: {' | '.join(footer_parts)}]"
 
         return note_prefix + clean
 
@@ -2113,6 +2164,9 @@ class MainActor(LLMAgent):
         # Process any <spawn> blocks in the completed response
         _, spawned = await self._process_spawn_commands(full_response)
 
+        # Process any <delete> blocks — orchestrator-side counterpart of <spawn>
+        _, deleted, missing = await self._process_delete_commands(full_response)
+
         # Execute any @agent-name {payload} delegation patterns the LLM produced
         # If delegations ran, yield the results as an additional chunk
         delegated = await self._execute_llm_delegations(full_response)
@@ -2124,17 +2178,20 @@ class MainActor(LLMAgent):
                 yield "\n" + "\n".join(results)
         full_response = delegated
 
-        system_msg = ""
+        system_msg_parts = []
         if spawned:
             names      = ", ".join(f"'{a.name}'" for a in spawned if not isinstance(a, _SpawnPlaceholder))
             bg_names   = [a.name for a in spawned if isinstance(a, _SpawnPlaceholder)]
-            parts = []
             if names:
                 replaced = '"replace": true' in full_response or '"replace":true' in full_response
-                parts.append(f"{'Replaced' if replaced else 'Spawned'} {names} — will auto-restore on restart")
+                system_msg_parts.append(f"{'Replaced' if replaced else 'Spawned'} {names} — will auto-restore on restart")
             if bg_names:
-                parts.append(f"Installing packages for {', '.join(bg_names)} — will appear shortly")
-            system_msg = " | ".join(parts)
+                system_msg_parts.append(f"Installing packages for {', '.join(bg_names)} — will appear shortly")
+        if deleted:
+            system_msg_parts.append(f"Deleted {', '.join(deleted)}")
+        if missing:
+            system_msg_parts.append(f"Could not delete {', '.join(missing)} — not currently registered")
+        system_msg = " | ".join(system_msg_parts)
 
         await self._mqtt_publish(
             f"agents/{self.actor_id}/logs",
@@ -2432,6 +2489,82 @@ class MainActor(LLMAgent):
 
         clean = re.sub(pattern, '', response, flags=re.DOTALL).strip()
         return clean, spawned
+
+    async def _process_delete_commands(self, response: str):
+        """
+        Scan the LLM response for <delete>{"name": "agent-name"}</delete> blocks
+        and execute them. Mirrors _process_spawn_commands so deletion has the same
+        UX as spawn: the LLM emits a tagged block, we parse and execute, and the
+        block is stripped from the user-visible response.
+
+        Returns (cleaned_response, [deleted_names], [missing_names]):
+          - cleaned_response: response with <delete> blocks removed
+          - deleted_names:    names that were actually running and got removed
+          - missing_names:    names the LLM asked to delete that didn't exist
+
+        We track the missing list separately so the response footer can tell the
+        user "you asked me to delete X but it wasn't running" instead of silently
+        dropping the request.
+        """
+        pattern = r'<delete>(.*?)</delete>'
+        deleted: list[str] = []
+        missing: list[str] = []
+
+        # Build the set of currently-known agent names ONCE up front, so a delete
+        # block that lists a name we then delete doesn't accidentally appear as
+        # "missing" if a later block references the same name.
+        known_names = set(self._agent_manifests.keys())
+        if self._registry:
+            known_names |= {a.name for a in self._registry.all_actors()}
+        # Spawn registry is the strongest signal — if it's persisted there, deletion
+        # is meaningful even if the live actor isn't currently up.
+        known_names |= set(self._get_spawn_registry().keys())
+
+        # Names main itself never deletes (housekeeping/system actors).
+        protected = {"main", "monitor", "installer", "home-assistant-agent",
+                     "anomaly-detector", "code-agent", "catalog"}
+
+        for match in re.findall(pattern, response, re.DOTALL):
+            block = match.strip()
+            try:
+                # Accept either a JSON object {"name": "x"} or a bare string "x"
+                # so the LLM has a forgiving format.
+                name: Optional[str] = None
+                stripped = block.strip()
+                if stripped.startswith("{"):
+                    payload = json.loads(stripped)
+                    if isinstance(payload, dict):
+                        name = payload.get("name") or payload.get("agent")
+                else:
+                    # Bare token form: <delete>math-agent</delete>
+                    name = stripped.strip("\"'").split()[0] if stripped else None
+                if not name or not isinstance(name, str):
+                    logger.warning(f"[{self.name}] Empty or malformed <delete> block: {block[:200]}")
+                    continue
+                name = name.strip()
+
+                if name in protected:
+                    logger.warning(f"[{self.name}] Refused to delete protected agent '{name}'")
+                    continue
+
+                if name not in known_names:
+                    logger.info(f"[{self.name}] LLM requested deletion of unknown agent '{name}'")
+                    missing.append(name)
+                    continue
+
+                logger.info(f"[{self.name}] LLM-requested deletion of '{name}'")
+                # Reuse the existing helper — it handles spawn registry, stop,
+                # manifest cleanup, history note, and remote-vs-local routing.
+                await self.delete_spawned_agent(name)
+                deleted.append(name)
+            except json.JSONDecodeError as e:
+                logger.error(f"[{self.name}] Invalid <delete> JSON: {e}\nRaw block: {block[:200]}")
+            except Exception as e:
+                logger.error(f"[{self.name}] Delete failed: {e}\nRaw block:\n{block[:500]}")
+
+        clean = re.sub(pattern, '', response, flags=re.DOTALL).strip()
+        return clean, deleted, missing
+
 
     async def _spawn_from_config(self, config: dict, save: bool = True) -> Optional[Actor]:
         name = config.get("name", "dynamic-agent")
