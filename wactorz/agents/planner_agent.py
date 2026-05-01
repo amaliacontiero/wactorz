@@ -26,6 +26,12 @@ from typing import Optional
 from ..core.actor import Actor, Message, MessageType
 from .llm_agent import LLMProvider
 
+try:
+    from .sparql_context import build_sparql_context as _build_sparql_context
+    _SPARQL_AVAILABLE = True
+except ImportError:
+    _SPARQL_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 _SKIP_AGENTS    = {"main", "monitor", "installer", "home-assistant-agent", "home-assistant-hardware", "home-assistant-automation", "anomaly-detector", "code-agent"}
@@ -45,6 +51,8 @@ class PlannerAgent(Actor):
         reply_to_id:    str = "",
         reply_task_id:  str = "",
         auto_terminate: bool = True,
+        plan_only:      bool = False,
+        approved_plan:  Optional[dict] = None,
         **kwargs,
     ):
         kwargs.setdefault("name", "planner")
@@ -54,8 +62,33 @@ class PlannerAgent(Actor):
         self._reply_to_id     = reply_to_id
         self._reply_task_id   = reply_task_id
         self._auto_terminate  = auto_terminate
+        # Dry-run support:
+        #   plan_only=True       → produce a plan, return it as JSON, do NOT spawn.
+        #   approved_plan=<dict> → skip planning, execute the supplied plan directly.
+        # These are mutually exclusive in practice but we don't enforce it — if both
+        # are set, plan_only wins (returning the supplied plan unchanged).
+        self._plan_only       = plan_only
+        self._approved_plan   = approved_plan
         self._result_futures: dict[str, asyncio.Future] = {}
         self._spawned_by_planner: list[str] = []   # agents we created this run
+        # Per-agent spawn outcome: name → {"ok": bool, "error": str|None}
+        # Sent back to main in the RESULT payload so it knows what actually happened.
+        self._spawn_results: dict[str, dict] = {}
+
+        # Fuseki endpoint for SPARQL world-model enrichment (optional).
+        # SPARQL queries enrich the planner's prompt with durable channel schemas
+        # and relevant Home Assistant state from the knowledge graph. If the
+        # config import or the endpoint is unreachable, planning continues
+        # without it — _build_sparql_context handles failures gracefully.
+        try:
+            from ..config import CONFIG
+            self._fuseki_url: str = (
+                getattr(CONFIG, "fuseki_url", None)
+                or getattr(CONFIG, "fuseki_endpoint", None)
+                or "http://localhost:3030/wactorz/sparql"
+            )
+        except Exception:
+            self._fuseki_url = "http://localhost:3030/wactorz/sparql"
 
     def _current_task_description(self) -> str:
         return self._task[:60] if self._task else "waiting for task"
@@ -102,7 +135,11 @@ class PlannerAgent(Actor):
         """Run the plan and report the result back to main (used when task set at spawn time)."""
         result = await self._run_plan(task)
         if self._reply_to_id:
-            reply = {"result": result, "text": result}
+            reply = {
+                "result":        result,
+                "text":          result,
+                "spawn_results": self._spawn_results,   # per-agent outcome dict
+            }
             if self._reply_task_id:
                 reply["_task_id"] = self._reply_task_id
             if self._spawned_by_planner:
@@ -152,11 +189,11 @@ class PlannerAgent(Actor):
 
         patterns = [
             r"\bif\b.*\bthen\b",
-            r"\bif\b.*\b(send|notify|alert|turn|open|close|post|message)\b",
-            r"\bwhen\b.*\b(detect|open|turn|send|notify|alert|is|becomes|goes|changes)\b",
+            r"\bif\b.*\b(send|notify|alert|turn|open|close|post|message|say|tell|warn|log|print|publish|emit)\b",
+            r"\bwhen\b.*\b(detect|open|turn|send|notify|alert|is|becomes|goes|changes|say|warn|log)\b",
             r"\bwhenever\b",
-            r"\bmonitor\b", r"\bwatch\b",
-            r"\balert me\b", r"\bnotify me\b",
+            r"\bmonitor\b", r"\bwatch\b", r"\bcheck\b.*\b(every|continuously|periodically|if|when)\b",
+            r"\balert me\b", r"\bnotify me\b", r"\btell me\b.*\bif\b",
             r"\bsend me\b.*\b(when|if|discord|message|notification)\b",
             r"\bsend me a\b",
             r"\bautomatically\b",
@@ -168,10 +205,12 @@ class PlannerAgent(Actor):
             # camera/detect + action = pipeline
             r"\b(camera|detect|yolo|webcam)\b.*\b(turn|open|send|notify|alert)\b",
             r"\b(person|motion|object)\b.*\bdetect.*\b(turn|open|light|send)\b",
-            # ── Spawn / continuous agent requests ──
-            # "spawn an agent to...", "create an agent that...", "I want an agent to..."
-            r"\b(spawn|create|make|start|run|launch|deploy)\b.*\bagent\b",
-            r"\b(i\s+want|i\s+need)\b.*\bagent\b.*\b(to|that|which)\b",
+            # ── Spawn / continuous agent / app requests ──
+            # "spawn an agent to...", "create an agent that...", "I want an agent to...",
+            # "spawn an app that...", "build a service that...", etc.
+            # NB: matches "agent" OR "app" OR "bot" OR "service" OR "monitor" OR "rule"
+            r"\b(spawn|create|make|start|run|launch|deploy|build|set\s+up)\b.*\b(agent|app|bot|service|monitor|rule|pipeline|listener|handler|watcher)\b",
+            r"\b(i\s+want|i\s+need|i'd\s+like)\b.*\b(agent|app|bot|service|rule|something)\b.*\b(to|that|which)\b",
             # Periodic / continuous language
             r"\bevery\s+\d+\s*(sec|min|hour|s\b|m\b|h\b)",
             r"\bcontinuously\b", r"\bconstantly\b", r"\bperiodically\b",
@@ -199,10 +238,29 @@ class PlannerAgent(Actor):
         except Exception:
             pass
 
+        # ── Approved-plan execution: skip planning entirely ────────────────
+        # Set when main is calling us back to execute a previously-approved
+        # proposal. Route directly to the pipeline executor since approved
+        # plans are by definition pipeline plans (they were generated in
+        # plan_only mode through _run_pipeline).
+        if self._approved_plan:
+            return await self._run_pipeline(task, workers)
+
         # Detect pipeline vs one-shot
         is_pipeline = PlannerAgent._is_pipeline_request(task)
         if is_pipeline:
             await self._log("Pipeline request detected — spawning persistent agents...")
+            return await self._run_pipeline(task, workers)
+
+        # ── Dry-run guard for one-shot path ────────────────────────────────
+        # The one-shot path can still produce persistent agents via
+        # _ensure_agents (it spawns missing ones declared by _decompose).
+        # If main asked for plan_only, we MUST honor it here too — otherwise
+        # any task that doesn't trip the pipeline heuristic silently spawns,
+        # bypassing approval. Force the pipeline path so we get the same
+        # approval flow regardless of which heuristic branch was taken.
+        if self._plan_only:
+            await self._log("plan_only=True on one-shot path — routing through pipeline planner for approval flow")
             return await self._run_pipeline(task, workers)
 
         # ── 1. Check cache ─────────────────────────────────────────────────
@@ -246,21 +304,30 @@ class PlannerAgent(Actor):
         """
         Builds and spawns persistent reactive agents for if/when/wherever rules.
 
-        Flow:
-          0. Topic resolution — resolve vague data references to concrete MQTT topics
-             using TopicRegistry + HA entity search. Enriches the task with specifics.
-          1. _decompose_pipeline queries HomeAssistantAgent for real entity IDs
-          2. LLM produces spawn configs (ha_actuator for HA actions, dynamic for everything else)
-          3. Each agent is spawned and registered in main's spawn registry
-          4. Rule is saved so it can be listed/deleted later
-          5. Summary returned to the user
-
-        Multiple rules in one request are fully supported.
+        Two modes governed by constructor flags (set by main):
+          - plan_only=True: build the plan, return it as a JSON string, do NOT spawn.
+            Used for dry-run / approval flow. Main parses the JSON and shows a
+            summary to the user.
+          - approved_plan=<dict>: skip planning, execute the supplied plan directly.
+            Used after the user approves a previously-generated plan.
+          - default (neither set): plan AND execute in one go (original behavior,
+            used by explicit-prefix paths like 'pipeline:' that bypass dry-run).
         """
-        # ── Step 0: Topic resolution ───────────────────────────────────────
-        # Before planning, resolve vague data references ("temperature", "motion",
-        # "energy") to concrete MQTT topics or HA entities. This lets the user
-        # say "react to temperature" without knowing the exact topic name.
+        # ── Mode A: execute pre-approved plan, skip planning ───────────────
+        if self._approved_plan:
+            plan = self._approved_plan.get("plan") or self._approved_plan.get("agents") or []
+            if not plan:
+                return "Approved plan was empty — nothing to spawn."
+            await self._log(f"Executing pre-approved plan ({len(plan)} agent(s))")
+            # Mode A doesn't run topic resolution — pass through any note that
+            # was carried in the approved envelope (set during plan_only build).
+            note = self._approved_plan.get("resolution_note", "")
+            return await self._execute_pipeline_plan(plan, task, resolution_note=note)
+
+        # ── Build the plan (always — needed for both plan_only and full run) ──
+        # Step 0: Topic resolution. Resolve vague references ("temperature",
+        # "motion") to concrete MQTT topics or HA entities so the user can say
+        # "react to temperature" without knowing the exact topic name.
         task, resolution_note = await self._resolve_data_references(task)
         if resolution_note:
             await self._log(f"Topic resolution: {resolution_note}")
@@ -276,9 +343,36 @@ class PlannerAgent(Actor):
             await self._log(f"Pipeline not feasible: {error}")
             return f"Cannot set up this pipeline:\n\n{error}"
 
+        # ── Mode B: plan_only — return the plan, don't spawn ───────────────
+        if self._plan_only:
+            await self._log(f"plan_only=True — returning plan ({len(plan)} agent(s)) for approval")
+            # Serialize the plan back to JSON so main can store it intact.
+            # Wrap in a dict with a marker so main can distinguish a plan
+            # from a normal answer string.
+            envelope = {
+                "_plan_proposal": True,
+                "task":           task,
+                "resolution_note": resolution_note or "",
+                "plan":           plan,
+            }
+            return json.dumps(envelope)
+
+        # ── Mode C: original behavior — plan AND execute ───────────────────
         await self._log(f"Pipeline plan: {len(plan)} agent(s)")
+        return await self._execute_pipeline_plan(plan, task, resolution_note=resolution_note)
+
+    async def _execute_pipeline_plan(self, plan: list[dict], task: str, resolution_note: str = "") -> str:
+        """
+        Spawn each agent in the plan, register with main, build the final summary.
+        Extracted from _run_pipeline so dry-run can reuse the same execution path
+        after a user approval.
+
+        resolution_note: optional preamble describing what topic/entity the planner
+        resolved the user's vague reference to. Empty for pre-approved plans where
+        the resolution step was skipped (note is carried in the envelope instead).
+        """
         spawned: list[str] = []
-        wired: list[str] = []
+        wired:   list[str] = []
         rule_agents: list[str] = []
 
         for step in plan:
@@ -294,10 +388,12 @@ class PlannerAgent(Actor):
                 await self._log(f"'{name}' already running — skipping")
                 wired.append(f"**{name}** (already active)")
                 rule_agents.append(name)
+                self._spawn_results[name] = {"ok": True, "status": "already_running"}
                 continue
 
             if not spawn_cfg:
                 await self._log(f"Step '{name}' has no spawn_config — skipping")
+                self._spawn_results[name] = {"ok": False, "status": "no_config", "error": "missing spawn_config"}
                 continue
 
             spawn_cfg = dict(spawn_cfg)
@@ -310,12 +406,14 @@ class PlannerAgent(Actor):
             except Exception as e:
                 await self._log(f"Spawn failed for '{name}': {e}")
                 wired.append(f"**{name}** — spawn failed: {e}")
+                self._spawn_results[name] = {"ok": False, "status": "spawn_failed", "error": str(e)}
                 continue
 
             if actor:
                 self._spawned_by_planner.append(name)
                 spawned.append(name)
                 rule_agents.append(name)
+                self._spawn_results[name] = {"ok": True, "status": "spawned"}
 
                 # Register in main's spawn registry for auto-restore on restart
                 if self._registry:
@@ -335,6 +433,7 @@ class PlannerAgent(Actor):
                 await asyncio.sleep(0.3)
             else:
                 wired.append(f"**{name}** — failed to spawn")
+                self._spawn_results[name] = {"ok": False, "status": "spawn_returned_none"}
 
         # Persist this rule into main's pipeline rules registry
         if rule_agents:
@@ -892,6 +991,21 @@ class PlannerAgent(Actor):
                 logger.warning(f"[{self.name}] Feasibility check error (continuing): {e}")
 
         # ── 3. Decompose into spawn configs ────────────────────────────────
+        # SPARQL enrichment: fetch durable channel schemas + relevant HA state
+        # from the Fuseki knowledge graph. Optional — degrades gracefully if
+        # the endpoint is unreachable, the import isn't available, or the
+        # query times out (3s ceiling).
+        _sparql_pipeline_ctx = ""
+        if _SPARQL_AVAILABLE:
+            try:
+                _sparql_pipeline_ctx = await _build_sparql_context(
+                    task=task,
+                    fuseki_url=self._fuseki_url,
+                    timeout=3.0,
+                )
+            except Exception as _e:
+                logger.debug(f"[{self.name}] SPARQL pipeline context skipped: {_e}")
+
         # Build the prompt as a list of parts to avoid f-string escape issues
         prompt_parts = [
             "You are designing reactive automation pipelines for a multi-agent IoT system.",
@@ -1115,6 +1229,13 @@ class PlannerAgent(Actor):
                     "",
                 ]
                 if topic_samples_section else []
+            ),
+            *(  # SPARQL: durable channel schemas + relevant HA states from Fuseki
+                (lambda ctx: [
+                    "═══ FUSEKI KNOWLEDGE GRAPH (durable schemas + HA state) ═══",
+                    ctx,
+                    "",
+                ] if ctx else [])(_sparql_pipeline_ctx)
             ),
             "═══ HOME ASSISTANT ENTITIES ═══",
             ha_section,
@@ -1441,12 +1562,24 @@ class PlannerAgent(Actor):
         except Exception:
             pass
 
+        # ── SPARQL world-model enrichment (durable channel schemas + HA state) ──
+        sparql_ctx = ""
+        if _SPARQL_AVAILABLE:
+            try:
+                sparql_ctx = await _build_sparql_context(
+                    task=task,
+                    fuseki_url=self._fuseki_url,
+                    timeout=3.0,
+                )
+            except Exception as _e:
+                logger.debug(f"[{self.name}] SPARQL context skipped: {_e}")
+
         prompt = f"""You are a task planner for a multi-agent system.
 Break the task into steps. Each step is handled by one agent.
 
 AVAILABLE AGENTS (with input/output contracts):
 {workers_desc}
-{topic_schema_ctx}
+{topic_schema_ctx}{sparql_ctx}
 TASK: {task}
 
 OUTPUT RULES:
