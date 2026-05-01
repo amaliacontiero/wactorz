@@ -25,6 +25,7 @@ class _SpawnPlaceholder:
 
 SPAWN_REGISTRY_KEY   = "_spawned_agents"
 PIPELINE_RULES_KEY   = "_pipeline_rules"
+PENDING_PLANS_KEY    = "_pending_plans"     # dry-run proposals awaiting user approval
 NODE_REGISTRY_KEY  = "_known_nodes"       # tracks online remote nodes
 
 ORCHESTRATOR_PROMPT = """You are the main orchestrator in a multi-agent system.
@@ -945,6 +946,135 @@ class MainActor(LLMAgent):
         self.persist(PIPELINE_RULES_KEY, rules)
         logger.info(f"[{self.name}] Pipeline rule saved: {rule['rule_id']} agents={rule.get('agents', [])}")
 
+    # ── Pending-plan registry (dry-run / approval flow) ────────────────────
+    # When PIPELINE intent fires, the planner runs in plan_only mode and returns
+    # a proposal instead of spawning. We store the proposal here, show it to the
+    # user, and wait for approval before executing. Persisted so a restart in
+    # the middle of an approval flow doesn't lose the user's pending plans.
+    #
+    # Schema: { plan_id: {
+    #     "plan_id":    str,
+    #     "task":       str,            # original user request
+    #     "created_at": float,
+    #     "status":     "pending"|"approved"|"rejected"|"superseded"|"expired",
+    #     "envelope":   dict,           # the full plan envelope from the planner
+    # } }
+    PLAN_TTL_S = 24 * 3600   # auto-expire pending plans after 24h
+
+    def get_pending_plans(self) -> dict:
+        plans = self.recall(PENDING_PLANS_KEY) or {}
+        # Expire stale entries on every read so we don't have to gc separately
+        import time as _t
+        now = _t.time()
+        expired_ids = [
+            pid for pid, p in plans.items()
+            if p.get("status") == "pending"
+            and (now - p.get("created_at", now)) > self.PLAN_TTL_S
+        ]
+        if expired_ids:
+            for pid in expired_ids:
+                plans[pid]["status"] = "expired"
+            self.persist(PENDING_PLANS_KEY, plans)
+        return plans
+
+    def save_pending_plan(self, plan: dict):
+        plans = self.recall(PENDING_PLANS_KEY) or {}
+        plans[plan["plan_id"]] = plan
+        self.persist(PENDING_PLANS_KEY, plans)
+
+    def update_plan_status(self, plan_id: str, status: str):
+        plans = self.recall(PENDING_PLANS_KEY) or {}
+        if plan_id in plans:
+            plans[plan_id]["status"] = status
+            self.persist(PENDING_PLANS_KEY, plans)
+
+    def _most_recent_pending_plan(self) -> Optional[dict]:
+        """Returns the most-recently-created plan still in 'pending' status, or None."""
+        plans = self.get_pending_plans()
+        pending = [p for p in plans.values() if p.get("status") == "pending"]
+        if not pending:
+            return None
+        return max(pending, key=lambda p: p.get("created_at", 0))
+
+    def _format_plan_proposal(self, plan: dict) -> str:
+        """
+        Render a pending plan as a human-readable summary for the user.
+
+        Goals (in priority order):
+          1. Show what the rule WILL DO in plain English (most important).
+          2. Show which inputs / topics it listens to (so user can spot
+             "did you really mean THIS sensor?").
+          3. Show side effects: notifications sent, devices controlled, files
+             written. Anything that affects the world.
+          4. Hide raw code by default — link to expansion via /plans show <id>.
+          5. Make the approval actions obvious.
+        """
+        envelope = plan.get("envelope", {})
+        agents   = envelope.get("plan", []) or envelope.get("agents", [])
+        task     = plan.get("task", envelope.get("task", "?"))
+        plan_id  = plan.get("plan_id", "?")
+
+        lines = []
+        lines.append(f"**Proposed pipeline** (id `{plan_id}`)")
+        lines.append(f"For: _{task}_")
+        lines.append("")
+        lines.append(f"This will create {len(agents)} agent(s):")
+
+        # Per-agent summary
+        for i, step in enumerate(agents, 1):
+            name = step.get("name", "?")
+            desc = step.get("description") or step.get("spawn_config", {}).get("description", "")
+            spawn_cfg = step.get("spawn_config", {})
+            agent_type = spawn_cfg.get("type", "dynamic")
+            install   = spawn_cfg.get("install", []) or []
+
+            lines.append(f"\n  {i}. **{name}** ({agent_type})")
+            if desc:
+                lines.append(f"     purpose: {desc}")
+
+            # Inputs — what it listens to
+            subs = step.get("subscribes", []) or spawn_cfg.get("subscribe", []) or []
+            if subs:
+                lines.append(f"     listens on: {', '.join(subs)}")
+
+            # Outputs — what it publishes
+            pubs = step.get("publishes", []) or spawn_cfg.get("publish", []) or []
+            if pubs:
+                lines.append(f"     publishes: {', '.join(pubs)}")
+
+            # External side effects — webhooks/notifications/HA actions
+            # Best-effort heuristic from the code or spawn_cfg fields
+            side_effects = []
+            code = spawn_cfg.get("code", "") or ""
+            if "webhook" in code.lower() or "notification" in code.lower():
+                side_effects.append("sends notification")
+            if "discord.com/api/webhooks" in code:
+                side_effects.append("posts to Discord")
+            if "api.telegram.org" in code:
+                side_effects.append("posts to Telegram")
+            if "homeassistant" in code.lower() and ("turn_on" in code or "turn_off" in code or "call_service" in code):
+                side_effects.append("controls Home Assistant device")
+            if agent_type == "ha_actuator":
+                target = spawn_cfg.get("entity_id") or spawn_cfg.get("target", "?")
+                action = spawn_cfg.get("service") or spawn_cfg.get("action", "?")
+                side_effects.append(f"calls HA: {action} on {target}")
+            if side_effects:
+                lines.append(f"     side effects: {'; '.join(side_effects)}")
+
+            # Install requirements — surfaced because user pays the cost
+            if install:
+                pkgs = ", ".join(install if isinstance(install, list) else [install])
+                lines.append(f"     installs: {pkgs}")
+
+        lines.append("")
+        lines.append("**To proceed:**")
+        lines.append("  Reply **yes** (or **approve**) to spawn the agents above.")
+        lines.append("  Reply **no** (or **reject**) to discard this plan.")
+        lines.append("  Reply with a correction (e.g. _'use the bedroom sensor instead'_) to revise.")
+        lines.append(f"  Or run `/plans show {plan_id}` to see the full code.")
+
+        return "\n".join(lines)
+
     def get_notification_urls(self) -> dict:
         """Return persisted notification webhook URLs (discord, telegram, slack, etc.)"""
         return self.recall("_notification_urls") or {}
@@ -955,14 +1085,55 @@ class MainActor(LLMAgent):
     # survive summarization and persist indefinitely.
 
     _FACTS_EXTRACT_PROMPT = (
-        "Extract durable facts from this conversation exchange that would be useful to remember "
-        "long-term. Focus on: names, locations, device entity IDs, URLs, credentials, preferences, "
-        "configurations, and any explicit statements about the user's setup.\n"
-        "Return a JSON object with short descriptive keys and concise values. "
-        "Return {} if nothing worth remembering was said.\n"
-        "Example: {\"ha_url\": \"http://192.168.1.10:8123\", \"user_name\": \"Alex\", "
-        "\"living_room_light\": \"light.wiz_rgbw_tunable_02cba0\"}\n"
-        "Output only valid JSON. No explanation, no markdown."
+        "You extract durable facts the assistant should remember about the user "
+        "long-term. Read the EXCHANGE below and return any new facts as JSON.\n\n"
+        "## What to extract — three buckets\n"
+        "Use these key prefixes so the assistant can group facts later:\n\n"
+        "**pref_*** — Personal identity, preferences, routines (slow-changing).\n"
+        "  Examples: pref_user_name, pref_location, pref_timezone, pref_language,\n"
+        "  pref_favorite_sport, pref_communication_style ('terse'/'detailed'),\n"
+        "  pref_units ('metric'/'imperial'), pref_work_hours, pref_sleep_time,\n"
+        "  pref_household_members.\n\n"
+        "**device_*** — System and device topology (the user's setup).\n"
+        "  Examples: device_ha_url, device_mqtt_broker, device_living_room_light\n"
+        "  (entity ID), device_kitchen_camera (model + entity), device_pi_node_kitchen\n"
+        "  (hardware spec), device_yolo_model_path, device_webhook_discord.\n\n"
+        "**policy_*** — Standing instructions / rules of engagement.\n"
+        "  Examples: policy_quiet_hours ('23:00-07:00'), policy_alert_channel\n"
+        "  ('telegram'), policy_temperature_unit ('celsius'),\n"
+        "  policy_low_battery_threshold ('20%'), policy_ask_before_spawn\n"
+        "  ('always for cv2/webcam'), policy_planner_style ('no follow-up\n"
+        "  questions, just pick something').\n\n"
+        "## Rules\n"
+        "  - Snake_case keys, ALWAYS prefixed with one of the three above.\n"
+        "  - Values: a short phrase, not a sentence.\n"
+        "  - SUPERSEDE: if the user updates a fact ('actually call me Yannis'),\n"
+        "    return the SAME key with the new value — the system overwrites.\n"
+        "  - Return ALL applicable facts in one object — don't pick just one.\n"
+        "  - Return {} if nothing durable was stated.\n\n"
+        "## What NOT to extract\n"
+        "  - Things the ASSISTANT said. Only the user's explicit statements.\n"
+        "  - One-off questions ('what time is it?', 'how do I do X?').\n"
+        "  - Transient state ('user is debugging Y right now').\n"
+        "  - Speculation or 'maybe' statements ('I might get a Yale lock soon').\n"
+        "  - Plain-text passwords or full API tokens. URLs and entity IDs are fine.\n"
+        "  - Facts about devices/agents that the user just deleted in this turn.\n\n"
+        "## Examples\n"
+        '  USER: "I am John, I like football"\n'
+        '  → {"pref_user_name": "John", "pref_favorite_sport": "football"}\n\n'
+        '  USER: "my home assistant is at http://192.168.1.10:8123"\n'
+        '  → {"device_ha_url": "http://192.168.1.10:8123"}\n\n'
+        '  USER: "use Telegram for alerts, not Discord"\n'
+        '  → {"policy_alert_channel": "telegram"}\n\n'
+        '  USER: "the living room light is light.wiz_rgbw_02cba0 and I prefer warm white"\n'
+        '  → {"device_living_room_light": "light.wiz_rgbw_02cba0", "pref_light_color": "warm white"}\n\n'
+        '  USER: "actually call me Yannis"\n'
+        '  → {"pref_user_name": "Yannis"}\n\n'
+        '  USER: "what time is it?"\n'
+        "  → {}\n\n"
+        '  USER: "I might switch to Zigbee2MQTT eventually"\n'
+        "  → {}\n\n"
+        "Output ONLY a valid JSON object. No prose, no markdown fences, no explanation."
     )
 
     def get_user_facts(self) -> dict:
@@ -1100,11 +1271,35 @@ class MainActor(LLMAgent):
         else:
             prompt += header + "  (no user-spawned agents are currently running)"
 
-        # ── Block 2: persisted user facts ──
+        # ── Block 2: persisted user facts, grouped by bucket ──
         facts = self.get_user_facts()
         if facts:
-            facts_lines = "\n".join(f"  {k}: {v}" for k, v in facts.items())
-            prompt += f"\n\n== KNOWN USER FACTS (always keep in mind) ==\n{facts_lines}"
+            buckets = {
+                "pref_":   ("PREFERENCES & IDENTITY", []),
+                "device_": ("DEVICES & SETUP",        []),
+                "policy_": ("STANDING POLICIES",      []),
+                "":        ("OTHER FACTS",            []),   # legacy / unprefixed
+            }
+            for k, v in facts.items():
+                placed = False
+                for prefix, (_, items) in buckets.items():
+                    if prefix and k.startswith(prefix):
+                        items.append(f"  {k[len(prefix):]}: {v}")
+                        placed = True
+                        break
+                if not placed:
+                    buckets[""][1].append(f"  {k}: {v}")
+
+            sections = []
+            for _, (heading, items) in buckets.items():
+                if items:
+                    sections.append(f"\n[{heading}]\n" + "\n".join(items))
+            if sections:
+                prompt += (
+                    "\n\n== KNOWN USER FACTS (always keep in mind) =="
+                    + "".join(sections)
+                    + "\nWhen a POLICY conflicts with a default behavior, follow the policy."
+                )
 
         self.system_prompt = prompt
 
@@ -1113,29 +1308,79 @@ class MainActor(LLMAgent):
         self._rebuild_system_prompt()
 
     async def _extract_and_save_facts(self, user_message: str, assistant_response: str):
-        """After each exchange, ask the LLM to extract any new durable facts."""
+        """
+        After each exchange, ask the LLM to extract any new durable facts.
+
+        Observability: this method logs every attempt at INFO level (start),
+        success at INFO (with extracted keys), and failures at WARNING. If you
+        suspect facts aren't being saved, search the log for
+        '[main] Facts extraction'.
+
+        Namespace normalization: the prompt asks for keys prefixed with one of
+        pref_/device_/policy_, but LLMs sometimes return raw keys ('user_name'
+        instead of 'pref_user_name'). We normalize on save so a stray unprefixed
+        key still ends up in a sensible bucket rather than the OTHER catch-all.
+        """
         if self.llm is None:
+            logger.warning(f"[{self.name}] Facts extraction skipped: no LLM provider")
             return
+        if not user_message or not user_message.strip():
+            return
+        logger.info(f"[{self.name}] Facts extraction running on: {user_message[:80]!r}")
         exchange = f"USER: {user_message[:600]}\nASSISTANT: {assistant_response[:600]}"
         try:
             raw, _ = await self.llm.complete(
                 messages=[{"role": "user", "content": exchange}],
                 system=self._FACTS_EXTRACT_PROMPT,
-                max_tokens=200,
+                max_tokens=300,
             )
-            import json as _json, re as _re
+            import json as _json
             clean = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
-            new_facts = _json.loads(clean)
-            if not isinstance(new_facts, dict) or not new_facts:
+            if not clean:
+                logger.warning(f"[{self.name}] Facts extraction returned empty string")
                 return
-            # Merge with existing facts
+            new_facts = _json.loads(clean)
+            if not isinstance(new_facts, dict):
+                logger.warning(f"[{self.name}] Facts extraction returned non-dict: {type(new_facts).__name__}")
+                return
+            if not new_facts:
+                logger.info(f"[{self.name}] Facts extraction: nothing durable in this turn")
+                return
+
+            # Normalize keys: if the LLM forgot the namespace prefix, infer one
+            # from common patterns. This keeps the bucketed display clean.
+            normalized = {}
+            for k, v in new_facts.items():
+                if k.startswith(("pref_", "device_", "policy_")):
+                    normalized[k] = v
+                    continue
+                # Heuristic guesses for common unprefixed keys
+                if k.endswith("_url") or k.endswith("_endpoint") or k.endswith("_path"):
+                    normalized[f"device_{k}"] = v
+                elif k.startswith(("user_", "favorite_", "pref_")) or k in ("name", "age", "location", "language"):
+                    normalized[f"pref_{k}"] = v
+                elif "policy" in k or "rule" in k or "threshold" in k:
+                    normalized[f"policy_{k}"] = v
+                else:
+                    normalized[f"pref_{k}"] = v   # default bucket for unknowns
+
+            # Merge with existing facts (supersede on key collision — by design)
             facts = self.get_user_facts()
-            facts.update(new_facts)
+            superseded = [k for k in normalized if k in facts and facts[k] != normalized[k]]
+            facts.update(normalized)
             self.persist("_user_facts", facts)
             self._inject_user_facts_into_prompt()
-            logger.info(f"[{self.name}] User facts updated: {list(new_facts.keys())}")
+            log_msg = f"[{self.name}] User facts updated: {list(normalized.keys())}"
+            if superseded:
+                log_msg += f" (superseded: {superseded})"
+            logger.info(log_msg)
+        except _json.JSONDecodeError as e:
+            logger.warning(
+                f"[{self.name}] Facts extraction JSON parse failed: {e}. "
+                f"Raw response (first 200 chars): {raw[:200]!r}"
+            )
         except Exception as e:
-            logger.info(f"[{self.name}] Facts extraction skipped: {e}")
+            logger.warning(f"[{self.name}] Facts extraction failed: {e!r}")
 
     async def delete_pipeline_rule(self, rule_id: str) -> str:
         """Stop all agents for a rule and remove it from registry."""
@@ -1450,6 +1695,30 @@ class MainActor(LLMAgent):
     async def process_user_input(self, text: str) -> str:
         note_prefix = self._drain_notifications()
 
+        # ── Pending-plan response detection ─────────────────────────────────
+        # If there's a dry-run plan waiting for approval and the user's message
+        # looks like "yes"/"no", handle it BEFORE any other processing. This
+        # must come first so a bare "yes" doesn't accidentally hit the intent
+        # classifier or get treated as a new prompt. Slash commands and other
+        # explicit prefixes are NOT intercepted (the user might want to inspect
+        # /plans or /registry while a plan is pending).
+        if not text.strip().startswith("/") and not text.strip().startswith("@"):
+            plan_response = await self._handle_pending_plan_response(text)
+            if plan_response is not None:
+                # Record the exchange so history reflects the approval/rejection
+                await self._record_external_exchange(text, plan_response)
+                return note_prefix + plan_response
+
+            # Pending-plan ambiguity guard: if the user has a plan pending
+            # and now types something that looks like another spawn / pipeline
+            # request, we'd otherwise silently create the new agents AND
+            # later spawn the pending ones too — duplicates galore. Warn
+            # the user and ask them to resolve the pending plan first.
+            warn = self._warn_if_pending_plan_collision(text)
+            if warn:
+                await self._record_external_exchange(text, warn)
+                return note_prefix + warn
+
         # ── Direct API intercepts — handle without LLM round-trip ──────────
         stripped = text.strip().rstrip("()")
 
@@ -1465,6 +1734,11 @@ class MainActor(LLMAgent):
                 "  /agents stop <name>   — stop and remove an agent (local or remote)",
                 "  /agents delete <name> — alias for /agents stop",
                 "  /registry             — diagnostic: compare live registry, spawn registry, and manifest cache",
+                "  /plans                — list pending pipeline proposals (dry-run)",
+                "  /plans show <id>      — inspect a proposal's full code",
+                "  /plans approve <id>   — execute a proposed pipeline",
+                "  /plans reject <id>    — discard a proposed pipeline",
+                "  pipeline! <task>      — bypass approval and execute immediately (power users)",
                 "  @agent-name <msg>     — send a message directly to a named agent",
                 "  @catalog list         — list available catalog recipes",
                 "  @catalog spawn <n>    — spawn a catalog agent",
@@ -1600,14 +1874,31 @@ class MainActor(LLMAgent):
                     self._inject_user_facts_into_prompt()
                     return note_prefix + f"Forgotten: '{key}'"
                 return note_prefix + f"No fact found with key '{key}'."
-            # Default: show memory
+            # Default: show memory, grouped by bucket so it's easy to scan
             facts = self.get_user_facts()
             summary = self._history_summary
             lines = []
             if facts:
                 lines.append(f"User facts ({len(facts)}):")
-                for k, v in facts.items():
-                    lines.append(f"  {k}: {v}")
+                buckets = [
+                    ("pref_",   "Preferences & identity"),
+                    ("device_", "Devices & setup"),
+                    ("policy_", "Standing policies"),
+                ]
+                shown = set()
+                for prefix, heading in buckets:
+                    items = [(k, v) for k, v in facts.items() if k.startswith(prefix)]
+                    if items:
+                        lines.append(f"\n  [{heading}]")
+                        for k, v in sorted(items):
+                            lines.append(f"    {k[len(prefix):]}: {v}")
+                            shown.add(k)
+                # Anything left over (legacy or unprefixed keys)
+                leftover = [(k, v) for k, v in facts.items() if k not in shown]
+                if leftover:
+                    lines.append(f"\n  [Other / legacy]")
+                    for k, v in sorted(leftover):
+                        lines.append(f"    {k}: {v}")
             else:
                 lines.append("No user facts stored yet.")
             if summary:
@@ -1867,6 +2158,89 @@ class MainActor(LLMAgent):
 
             return note_prefix + "\n".join(lines)
 
+        # ── /plans — pending dry-run proposals ──────────────────────────────
+        if stripped == "/plans" or stripped.startswith("/plans "):
+            parts = stripped.split(None, 2)
+            sub = parts[1] if len(parts) > 1 else ""
+
+            # /plans show <id>
+            if sub == "show" and len(parts) == 3:
+                pid = parts[2]
+                p = self.get_pending_plans().get(pid)
+                if not p:
+                    return note_prefix + f"No plan with id `{pid}`."
+                envelope = p.get("envelope", {})
+                agents = envelope.get("plan", [])
+                lines = [self._format_plan_proposal(p), "", "**Full agent code:**"]
+                for step in agents:
+                    name = step.get("name", "?")
+                    code = step.get("spawn_config", {}).get("code", "") or "(no code — pre-built type)"
+                    lines.append(f"\n--- {name} ---")
+                    lines.append("```python")
+                    lines.append(code[:2000])
+                    if len(code) > 2000:
+                        lines.append(f"... ({len(code) - 2000} more chars truncated)")
+                    lines.append("```")
+                return note_prefix + "\n".join(lines)
+
+            # /plans approve <id>
+            if sub == "approve" and len(parts) == 3:
+                pid = parts[2]
+                p = self.get_pending_plans().get(pid)
+                if not p:
+                    return note_prefix + f"No plan with id `{pid}`."
+                if p.get("status") != "pending":
+                    return note_prefix + f"Plan `{pid}` is `{p.get('status')}`, not pending."
+                return note_prefix + await self._execute_pending_plan(p)
+
+            # /plans reject <id>
+            if sub == "reject" and len(parts) == 3:
+                pid = parts[2]
+                p = self.get_pending_plans().get(pid)
+                if not p:
+                    return note_prefix + f"No plan with id `{pid}`."
+                if p.get("status") != "pending":
+                    return note_prefix + f"Plan `{pid}` is `{p.get('status')}`, not pending."
+                return note_prefix + self._reject_pending_plan(p)
+
+            # /plans clear — drop all non-pending plans (housekeeping)
+            if sub == "clear":
+                plans = self.recall(PENDING_PLANS_KEY) or {}
+                kept = {pid: p for pid, p in plans.items() if p.get("status") == "pending"}
+                dropped = len(plans) - len(kept)
+                self.persist(PENDING_PLANS_KEY, kept)
+                return note_prefix + f"Cleared {dropped} resolved plan(s). {len(kept)} still pending."
+
+            # /plans (no args) — list
+            plans = self.get_pending_plans()
+            pending  = [p for p in plans.values() if p.get("status") == "pending"]
+            resolved = [p for p in plans.values() if p.get("status") != "pending"]
+            lines = []
+            if pending:
+                lines.append(f"**Pending plans ({len(pending)})** — awaiting your approval")
+                for p in sorted(pending, key=lambda x: -x.get("created_at", 0)):
+                    pid     = p.get("plan_id", "?")
+                    task    = p.get("task", "?")[:60]
+                    n_agents = len(p.get("envelope", {}).get("plan", []))
+                    age_s   = int(__import__("time").time() - p.get("created_at", 0))
+                    lines.append(f"  `{pid}` ({n_agents} agent(s), {age_s}s ago) — {task}")
+                lines.append("\n  /plans show <id>      — see full plan with code")
+                lines.append("  /plans approve <id>   — execute the plan")
+                lines.append("  /plans reject <id>    — discard the plan")
+            else:
+                lines.append("No pending plans.")
+            if resolved:
+                lines.append(f"\n_Recent resolved plans ({len(resolved)})_:")
+                for p in sorted(resolved, key=lambda x: -x.get("created_at", 0))[:5]:
+                    pid    = p.get("plan_id", "?")
+                    status = p.get("status", "?")
+                    task   = p.get("task", "?")[:50]
+                    icon   = {"approved": "\u2705", "rejected": "\u274c",
+                              "expired": "\u23f0", "superseded": "\u21bb"}.get(status, "?")
+                    lines.append(f"  {icon} `{pid}` ({status}) — {task}")
+                lines.append("\n  /plans clear          — drop resolved entries")
+            return note_prefix + "\n".join(lines)
+
                 # ── @mention direct routing ─────────────────────────────────────────
         if text.startswith("@"):
             # Extract agent name and message: "@cpu-monitor-rpi-room what is the cpu?"
@@ -1976,8 +2350,7 @@ class MainActor(LLMAgent):
         logger.info(f"[{self.name}] Intent: {intent} — {text[:60]}")
 
         if intent == "PIPELINE":
-            result = await self._run_planner(text, is_pipeline_intent=True)
-            response = result or "Planner did not return a result. Please retry."
+            response = await self._propose_or_execute_pipeline(text)
             await self._record_external_exchange(text, response)
             return note_prefix + response
 
@@ -2082,6 +2455,23 @@ class MainActor(LLMAgent):
         if note_prefix:
             yield note_prefix
 
+        # ── Pending-plan response detection (same as non-streaming path) ─────
+        if not text.strip().startswith("/") and not text.strip().startswith("@"):
+            plan_response = await self._handle_pending_plan_response(text)
+            if plan_response is not None:
+                await self._record_external_exchange(text, plan_response)
+                yield plan_response
+                yield {"done": True, "spawned": [], "system_msg": ""}
+                return
+
+            # Collision guard — see process_user_input for rationale
+            warn = self._warn_if_pending_plan_collision(text)
+            if warn:
+                await self._record_external_exchange(text, warn)
+                yield warn
+                yield {"done": True, "spawned": [], "system_msg": ""}
+                return
+
         # All slash-commands and direct API intercepts are handled by process_user_input
         # Route them there to avoid duplicating all that logic here
         _stripped = text.strip().rstrip("()")
@@ -2114,8 +2504,7 @@ class MainActor(LLMAgent):
         logger.info(f"[{self.name}] Intent: {intent} — {text[:60]}")
 
         if intent == "PIPELINE":
-            result = await self._run_planner(text, is_pipeline_intent=True)
-            response = result or "Planner did not return a result. Please retry."
+            response = await self._propose_or_execute_pipeline(text)
             await self._record_external_exchange(text, response)
             yield response
             yield {"done": True, "spawned": [], "system_msg": ""}
@@ -2254,7 +2643,13 @@ class MainActor(LLMAgent):
 
         return False
 
-    async def _run_planner(self, task: str, is_pipeline_intent: bool = False) -> Optional[str]:
+    async def _run_planner(
+        self,
+        task: str,
+        is_pipeline_intent: bool = False,
+        plan_only: bool = False,
+        approved_plan: Optional[dict] = None,
+    ) -> Optional[str]:
         """Spawn a PlannerAgent, hand it the task, wait for the result.
 
         is_pipeline_intent: when True, the caller has classified this as a
@@ -2267,6 +2662,14 @@ class MainActor(LLMAgent):
             planner to generate a door-themed agent name and code).
           - Pronoun resolution — the main reason enrichment exists — rarely
             applies to pipeline declarations.
+
+        plan_only: when True, the planner builds a plan but does NOT spawn.
+        Returns a JSON string containing the plan envelope (use _parse_plan_envelope
+        to extract). Used by the dry-run flow.
+
+        approved_plan: when provided, the planner skips planning entirely and
+        executes the supplied plan directly. Used after the user approves a
+        previously-generated plan.
         """
         from .planner_agent import PlannerAgent
         import uuid
@@ -2274,8 +2677,10 @@ class MainActor(LLMAgent):
         # Enrich vague follow-up tasks with recent conversation context
         # so the planner has the full picture (e.g. which entity was found).
         # PIPELINE intent skips this — see docstring.
+        # approved_plan also skips: the plan was already built with the right context.
         enriched_task = task
         if (not is_pipeline_intent
+                and not approved_plan
                 and self._conversation_history
                 and len(task.split()) < 15):
             # Short/vague task — inject last 3 exchanges as context
@@ -2293,11 +2698,12 @@ class MainActor(LLMAgent):
                 )
 
         planner_name = f"planner-{uuid.uuid4().hex[:6]}"
-        logger.info(f"[{self.name}] Spawning planner '{planner_name}' for: {enriched_task[:60]}")
+        mode = "approved-execute" if approved_plan else ("plan-only" if plan_only else "plan-and-execute")
+        logger.info(f"[{self.name}] Spawning planner '{planner_name}' (mode={mode}) for: {enriched_task[:60]}")
 
         await self._mqtt_publish(
             f"agents/{self.actor_id}/logs",
-            {"type": "log", "message": f"Complex task detected — spawning planner...", "timestamp": __import__('time').time()},
+            {"type": "log", "message": f"Complex task detected — spawning planner ({mode})...", "timestamp": __import__('time').time()},
         )
 
         task_id = f"plan_{uuid.uuid4().hex[:8]}"
@@ -2313,6 +2719,8 @@ class MainActor(LLMAgent):
                 reply_to_id=self.actor_id,
                 reply_task_id=task_id,
                 auto_terminate=True,
+                plan_only=plan_only,
+                approved_plan=approved_plan,
                 persistence_dir=str(self._persistence_dir.parent),
             )
             if not planner:
@@ -2333,6 +2741,342 @@ class MainActor(LLMAgent):
             return None
         finally:
             self._result_futures.pop(task_id, None)
+
+    @staticmethod
+    def _parse_plan_envelope(planner_result: str) -> Optional[dict]:
+        """
+        Try to parse a planner result string as a plan envelope (the JSON dict
+        returned by plan_only mode). Returns the envelope dict if it's a valid
+        proposal, or None if the result is a regular answer (e.g. error message,
+        feasibility failure, or fallback prose).
+        """
+        if not planner_result or not planner_result.strip().startswith("{"):
+            return None
+        try:
+            envelope = json.loads(planner_result)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        if isinstance(envelope, dict) and envelope.get("_plan_proposal") is True:
+            return envelope
+        return None
+
+    def _dryrun_enabled(self, text: str) -> bool:
+        """
+        Decide whether dry-run / approval should gate this PIPELINE request.
+
+        Bypass conditions (always skip approval):
+          - Text uses the explicit bypass marker `pipeline!` or `coordinate!`
+          - User policy `policy_dryrun` is set to "off" / "false" / "disabled"
+
+        Otherwise dry-run is on by default for PIPELINE intent.
+        """
+        if not text:
+            return True
+        lowered = text.lower().lstrip()
+        for bypass in ("pipeline!", "coordinate!", "@planner!"):
+            if lowered.startswith(bypass):
+                return False
+        # Check user-set policy
+        facts = self.get_user_facts()
+        for key in ("policy_dryrun", "policy_dry_run", "policy_approval"):
+            v = str(facts.get(key, "")).strip().lower()
+            if v in ("off", "false", "disabled", "no", "skip"):
+                return False
+        return True
+
+    @staticmethod
+    def _strip_dryrun_bypass(text: str) -> str:
+        """Strip the `pipeline!` / `coordinate!` bypass marker from the user's
+        text so the planner doesn't see it as part of the task."""
+        if not text:
+            return text
+        lowered = text.lower().lstrip()
+        for bypass in ("pipeline!", "coordinate!", "@planner!"):
+            if lowered.startswith(bypass):
+                # Find the bypass in the original (case-insensitive) and skip it
+                idx = text.lower().find(bypass)
+                if idx != -1:
+                    return text[idx + len(bypass):].lstrip(" :,-")
+        return text
+
+    async def _propose_or_execute_pipeline(self, text: str) -> str:
+        """
+        Top-level entry for PIPELINE intent. Decides between dry-run (build
+        plan, ask for approval, store proposal) and immediate execution
+        (bypass marker or policy-disabled). Returns the user-facing response.
+        """
+        if not self._dryrun_enabled(text):
+            # Bypass — execute immediately as before
+            cleaned = self._strip_dryrun_bypass(text)
+            result = await self._run_planner(cleaned, is_pipeline_intent=True)
+            return result or "Planner did not return a result. Please retry."
+
+        # Dry-run path: get a plan, don't execute
+        planner_result = await self._run_planner(text, is_pipeline_intent=True, plan_only=True)
+        if not planner_result:
+            return "Planner did not return a result. Please retry."
+
+        envelope = self._parse_plan_envelope(planner_result)
+        if not envelope:
+            # Planner returned a regular answer (error, feasibility failure,
+            # or fallback prose). Pass it through unchanged.
+            return planner_result
+
+        # Store the proposal
+        import uuid as _uuid, time as _t
+        plan_id = _uuid.uuid4().hex[:8]
+        proposal = {
+            "plan_id":    plan_id,
+            "task":       text,
+            "created_at": _t.time(),
+            "status":     "pending",
+            "envelope":   envelope,
+        }
+        self.save_pending_plan(proposal)
+        return self._format_plan_proposal(proposal)
+
+    # Approval/rejection vocabulary — exact-match-only after my v2 fix.
+    # The previous version used `cleaned.startswith(w + " ")` which silently
+    # treated any sentence beginning with "ok " as approval — including
+    # corrections like "ok lets go for 55 as a threshold". The new logic
+    # requires the message to be SHORT enough that it can only be approval
+    # or rejection. See _looks_like_approval / _looks_like_rejection.
+    _APPROVE_PHRASES = {
+        "yes", "y", "yep", "yeah", "yup", "ya",
+        "ok", "okay", "k", "kk",
+        "sure", "fine", "alright",
+        "go", "go ahead", "do it", "send it", "ship it",
+        "approve", "approved", "approved!",
+        "proceed", "confirm", "confirmed",
+        "spawn it", "create it", "make it",
+    }
+    _APPROVE_EMPHASIS = {
+        "please", "now", "go", "do it", "thanks", "thx", "ahead",
+        "confirm", "confirmed", "approved", "ok", "yes", "good",
+    }
+    _REJECT_PHRASES = {
+        "no", "n", "nope", "nah",
+        "reject", "rejected",
+        "cancel", "skip", "discard", "drop it",
+        "abort", "stop", "stop it",
+        "nevermind", "never mind", "forget it",
+    }
+
+    @classmethod
+    def _looks_like_approval(cls, cleaned: str) -> bool:
+        """Strict approval detection. Only fires when the message is short
+        enough that it cannot also be a correction or a new request."""
+        if cleaned in cls._APPROVE_PHRASES:
+            return True
+        # Allow up to a 3-token expansion where every extra token is itself
+        # approval-flavored, so "yes please" / "ok do it" / "go ahead now" all
+        # match — but "ok lets go for 55 as a threshold" does NOT.
+        tokens = cleaned.split()
+        if len(tokens) <= 3 and tokens and tokens[0] in cls._APPROVE_PHRASES:
+            tail = " ".join(tokens[1:])
+            if not tail:
+                return True
+            # Tail must be entirely emphasis/approval words (or a recognized
+            # multi-word approval phrase joined back together).
+            if tail in cls._APPROVE_PHRASES or tail in cls._APPROVE_EMPHASIS:
+                return True
+            if all(t in cls._APPROVE_EMPHASIS or t in cls._APPROVE_PHRASES for t in tokens[1:]):
+                return True
+        return False
+
+    @classmethod
+    def _looks_like_rejection(cls, cleaned: str) -> bool:
+        """Strict rejection detection — same shape as approval."""
+        if cleaned in cls._REJECT_PHRASES:
+            return True
+        tokens = cleaned.split()
+        if len(tokens) <= 3 and tokens and tokens[0] in cls._REJECT_PHRASES:
+            return True   # "no thanks", "cancel that", "stop please" — all clearly negative
+        return False
+
+    # Correction-intent signals: words that suggest the user is adjusting
+    # the pending plan rather than confirming or starting fresh. Used only
+    # when a plan is pending — outside that context these words are noise.
+    _CORRECTION_HINTS = (
+        "actually", "instead", "rather", "let's", "lets", "make it",
+        "change", "change it", "use ", "set it to", "set the",
+        "should be", "needs to be", "make that", "but ",
+        " threshold", " interval", " every ", " seconds", " minutes",
+        " hours", " minutes", " degrees", "%", "celsius", "fahrenheit",
+        "increase", "decrease", "raise", "lower", "higher", "lower",
+    )
+
+    @classmethod
+    def _looks_like_correction(cls, text: str) -> bool:
+        """Heuristic: does this message look like an adjustment to a pending
+        plan rather than a fresh request? Pure heuristic — false positives
+        get a confirm-or-new prompt, false negatives fall through to OTHER
+        intent (mildly annoying but not destructive)."""
+        lowered = text.lower()
+        # Numbers + units strongly suggest correction ("change to 55%", "every 30s")
+        import re
+        if re.search(r"\b\d+(\.\d+)?\s*(%|c|°|sec|secs|seconds|min|mins|minutes|hour|hours|hr|hrs)\b", lowered):
+            return True
+        if re.search(r"\b(threshold|interval|frequency|rate|delay)\b", lowered):
+            return True
+        return any(h in lowered for h in cls._CORRECTION_HINTS)
+
+    async def _handle_pending_plan_response(self, text: str) -> Optional[str]:
+        """
+        If there is a pending plan and the user's message looks like a
+        response to it (yes/no/correction), handle it and return the result.
+        Returns None if there's no pending plan or the message clearly
+        isn't a response — the message then flows through normal processing.
+
+        Decision tree (in priority order):
+          1. Strict approval match → execute the plan.
+          2. Strict rejection match → reject and discard.
+          3. Looks-like-correction (numbers/units, "let's", "instead", etc.)
+             → revise the pending plan with this feedback.
+          4. Anything else → return None, message processed normally
+             (collision guard catches spawn-intent later).
+        """
+        pending = self._most_recent_pending_plan()
+        if not pending:
+            return None
+
+        cleaned = text.strip().lower().rstrip(".,!?")
+        if not cleaned:
+            return None
+
+        if self._looks_like_approval(cleaned):
+            return await self._execute_pending_plan(pending)
+        if self._looks_like_rejection(cleaned):
+            return self._reject_pending_plan(pending)
+        if self._looks_like_correction(text):
+            return await self._revise_pending_plan(pending, text)
+
+        # Not approval, rejection, or correction — leave the plan pending,
+        # let the message flow through normal handling. The collision guard
+        # downstream will catch spawn-intent messages and ask the user to
+        # resolve the pending plan first.
+        return None
+
+    async def _revise_pending_plan(self, proposal: dict, correction: str) -> str:
+        """
+        The user typed something that looks like an adjustment to a pending
+        plan ("let's use 55 instead", "change the interval to 30 seconds").
+        Mark the old plan superseded, re-run the planner with the original
+        task plus the correction as feedback, and present the new proposal.
+        """
+        old_id = proposal["plan_id"]
+        original_task = proposal["task"]
+        revised_task = (
+            f"{original_task}\n\n"
+            f"[User correction to the previous plan: {correction.strip()}]"
+        )
+        logger.info(f"[{self.name}] Revising plan {old_id} with correction: {correction[:80]!r}")
+        self.update_plan_status(old_id, "superseded")
+
+        # Re-run planner in plan_only mode with the enriched task
+        planner_result = await self._run_planner(revised_task, is_pipeline_intent=True, plan_only=True)
+        if not planner_result:
+            return f"Could not revise plan `{old_id}`. The planner did not respond — please retry."
+
+        envelope = self._parse_plan_envelope(planner_result)
+        if not envelope:
+            # Planner returned a regular answer — pass it through
+            return planner_result
+
+        import uuid as _uuid, time as _t
+        new_id = _uuid.uuid4().hex[:8]
+        new_proposal = {
+            "plan_id":    new_id,
+            "task":       original_task,   # keep original; correction lives in envelope
+            "created_at": _t.time(),
+            "status":     "pending",
+            "envelope":   envelope,
+            "supersedes": old_id,
+        }
+        self.save_pending_plan(new_proposal)
+        formatted = self._format_plan_proposal(new_proposal)
+        return (
+            f"📝 Got it — revising plan `{old_id}` based on your feedback.\n"
+            f"Plan `{old_id}` is now superseded by `{new_id}`:\n\n"
+            f"{formatted}"
+        )
+
+    async def _execute_pending_plan(self, proposal: dict) -> str:
+        """Execute an approved plan by calling the planner with approved_plan set."""
+        plan_id = proposal["plan_id"]
+        envelope = proposal["envelope"]
+        original_task = proposal["task"]
+        logger.info(f"[{self.name}] Executing approved plan {plan_id}")
+        self.update_plan_status(plan_id, "approved")
+
+        result = await self._run_planner(
+            original_task,
+            is_pipeline_intent=True,
+            approved_plan=envelope,
+        )
+        return f"✅ Approved plan `{plan_id}`. {result or 'Spawn complete.'}"
+
+    def _reject_pending_plan(self, proposal: dict) -> str:
+        plan_id = proposal["plan_id"]
+        self.update_plan_status(plan_id, "rejected")
+        logger.info(f"[{self.name}] Rejected plan {plan_id}")
+        return (
+            f"❌ Discarded plan `{plan_id}`. No agents were spawned.\n"
+            f"If you'd like to try again with different wording, just ask."
+        )
+
+    # Heuristic words that suggest the user wants to spawn / create / build
+    # something. Cheap pre-LLM check used by the collision guard. False
+    # positives are tolerable because the worst case is an unnecessary
+    # warning (one extra message); false NEGATIVES are what we're avoiding
+    # because they cause silent duplicate spawns.
+    _SPAWN_INTENT_WORDS = (
+        "spawn", "create", "build", "make a", "add a", "set up a", "set up an",
+        "start a", "start an", "deploy", "launch", "i want a", "i need a",
+        "generate", "produce", "watch for", "monitor", "alert me",
+        "if ", "when ", "whenever ", "trigger ", "schedule",
+        "every ", "each ",
+    )
+
+    def _warn_if_pending_plan_collision(self, text: str) -> Optional[str]:
+        """
+        If a plan is already pending and the user types something that looks
+        like another spawn / pipeline request, return a warning message and
+        do NOT process the request. This stops the silent-duplicate scenario:
+          1. user types pipeline request → plan A pending
+          2. user types ANOTHER pipeline request → would spawn agents X, Y
+          3. user later approves plan A → spawns plan A's agents too
+          4. user is now stuck with both, didn't intend either configuration
+
+        The user must resolve the pending plan first (yes/no/cancel) or
+        explicitly mark this new request to bypass.
+
+        Returns None if there's no collision and processing should continue.
+        """
+        pending = self._most_recent_pending_plan()
+        if not pending:
+            return None
+        # Bypass marker means "I know what I'm doing, just do it"
+        if not self._dryrun_enabled(text):
+            return None
+        lowered = text.lower().strip()
+        if not any(w in lowered for w in self._SPAWN_INTENT_WORDS):
+            return None
+        # Spawn-like request while a plan is pending — warn
+        pid     = pending["plan_id"]
+        ptask   = pending.get("task", "?")[:80]
+        return (
+            f"⚠️  You have a pending plan `{pid}` for: _{ptask}_\n\n"
+            f"Your new message looks like another spawn or rule request, which would\n"
+            f"create separate agents that may conflict with the pending plan once approved.\n\n"
+            f"Please resolve the pending plan first:\n"
+            f"  • Reply **yes** to approve and spawn it, then send your new request.\n"
+            f"  • Reply **no** to discard it, then send your new request.\n"
+            f"  • Or send `/plans show {pid}` to inspect, then `/plans approve {pid}` "
+            f"or `/plans reject {pid}`.\n\n"
+            f"To bypass this check for one-off requests, prefix with `pipeline!` "
+            f"(e.g. `pipeline! {text[:40]}...`)."
+        )
 
         # ── Spawn ──────────────────────────────────────────────────────────────
 
