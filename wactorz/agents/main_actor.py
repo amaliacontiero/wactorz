@@ -1032,6 +1032,21 @@ class MainActor(LLMAgent):
             if desc:
                 lines.append(f"     purpose: {desc}")
 
+            # For scheduled agents: render the schedule prominently — this is
+            # the field the user most needs to verify (did the LLM correctly
+            # interpret "5pm every weekday"?).
+            if agent_type == "scheduled":
+                schedule_spec = spawn_cfg.get("schedule") or {}
+                if isinstance(schedule_spec, dict) and schedule_spec:
+                    try:
+                        from .scheduled_agent import describe_schedule
+                        tz_name = schedule_spec.get("tz") or self.get_user_facts().get("pref_timezone")
+                        lines.append(f"     fires: {describe_schedule(schedule_spec, tz_name)}")
+                    except Exception:
+                        lines.append(f"     fires: {schedule_spec}")
+                topic = spawn_cfg.get("publish_topic") or f"schedule/{name}/fired"
+                lines.append(f"     publishes: {topic}")
+
             # Inputs — what it listens to
             subs = step.get("subscribes", []) or spawn_cfg.get("subscribe", []) or []
             if subs:
@@ -1039,7 +1054,7 @@ class MainActor(LLMAgent):
 
             # Outputs — what it publishes
             pubs = step.get("publishes", []) or spawn_cfg.get("publish", []) or []
-            if pubs:
+            if pubs and agent_type != "scheduled":   # already shown above for scheduled
                 lines.append(f"     publishes: {', '.join(pubs)}")
 
             # External side effects — webhooks/notifications/HA actions
@@ -3372,6 +3387,8 @@ class MainActor(LLMAgent):
         # Route to the right agent class
         if agent_type == "ha_actuator":
             actor = await self._spawn_ha_actuator(config, name)
+        elif agent_type == "scheduled":
+            actor = await self._spawn_scheduled_agent(config, name)
         elif agent_type == "manual" or name == "manual-agent":
             actor = await self._spawn_manual_agent(config, name)
         elif agent_type == "llm" or (not code and system_prompt):
@@ -3417,6 +3434,51 @@ class MainActor(LLMAgent):
             persistence_dir = str(self._persistence_dir.parent),
         )
         return actor
+
+    async def _spawn_scheduled_agent(self, config: dict, name: str):
+        """
+        Spawn a ScheduledAgent. The schedule spec is validated at __init__
+        so a malformed config raises here, before save_to_spawn_registry runs.
+
+        We inject the user's preferred timezone (from facts) so a "5pm" schedule
+        means 5pm where the user lives, not 5pm UTC. The spec's own 'tz' field
+        wins if explicitly set.
+        """
+        from .scheduled_agent import ScheduledAgent
+
+        schedule_spec = config.get("schedule")
+        if not isinstance(schedule_spec, dict):
+            logger.warning(f"[{self.name}] Cannot spawn '{name}': missing or invalid 'schedule' dict")
+            return None
+
+        # Resolve user's timezone from facts (set by fact extraction)
+        user_tz = self.get_user_facts().get("pref_timezone")
+
+        publish_topic = config.get("publish_topic") or f"schedule/{name}/fired"
+        description   = config.get("description", "")
+
+        try:
+            actor = await self.spawn(
+                ScheduledAgent,
+                name            = name,
+                schedule        = schedule_spec,
+                timezone        = user_tz,
+                publish_topic   = publish_topic,
+                description     = description,
+                persistence_dir = str(self._persistence_dir.parent),
+            )
+            logger.info(
+                f"[{self.name}] Spawned ScheduledAgent '{name}' "
+                f"({schedule_spec.get('type')} → {publish_topic})"
+            )
+            return actor
+        except ValueError as e:
+            # Invalid schedule spec — surfaced from ScheduledAgent.__init__
+            logger.error(f"[{self.name}] Invalid schedule for '{name}': {e}")
+            return None
+        except Exception as e:
+            logger.error(f"[{self.name}] Failed to spawn ScheduledAgent '{name}': {e}")
+            return None
 
     async def _spawn_manual_agent(self, config: dict, name: str):
         """Spawn the pre-defined ManualAgent — robust PDF manual search and Q&A."""

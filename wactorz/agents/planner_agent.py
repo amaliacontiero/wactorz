@@ -217,6 +217,14 @@ class PlannerAgent(Actor):
             r"\bkeep\s+(running|publishing|logging|sending|checking)\b",
             r"\b(subscribe|listen)\s+(to|for|on)\b",
             r"\blog\s+(the|every|each|all)\b",
+            # ── Clock-time triggers (5pm, 7am, 17:00, every weekday, etc.) ──
+            # These should always be pipelines because they need a ScheduledAgent.
+            r"\bat\s+\d{1,2}(:\d{2})?\s*(am|pm)?\b",   # 'at 5pm', 'at 09:30', 'at 7 am'
+            r"\b(every|each)\s+(mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+            r"\b(every|each)\s+(weekday|weekend|day|morning|evening|night|afternoon|hour|minute)\b",
+            r"\bdaily\b.*\b(at|on|when)\b", r"\bweekly\b", r"\bnightly\b",
+            r"\btomorrow\b.*\b(at|morning|evening|night)\b",
+            r"\bremind\s+me\b", r"\bschedule\b.*\b(to|for|every|at)\b",
         ]
         return any(re.search(p, lowered) for p in patterns)
 
@@ -824,7 +832,15 @@ class PlannerAgent(Actor):
                     entities_list = result.get("entities", [])
                     if entities_list:
                         lines = []
-                        for e in entities_list[:200]:
+                        # NB: do NOT truncate. Truncating silently dropped entities
+                        # past index 200 (e.g. WiZ lights coming after dozens of
+                        # sensor.* entries), causing feasibility checks to falsely
+                        # claim "no light entity available" when the user's lamp
+                        # was sitting in slots 200-305. If the entity list ever
+                        # grows large enough to be a context-budget problem
+                        # (4000+ entities), filter intelligently here — never
+                        # blind-truncate.
+                        for e in entities_list:
                             eid = e.get("entity_id", "")
                             ename = e.get("name", "")
                             plat = e.get("platform", "")
@@ -837,7 +853,10 @@ class PlannerAgent(Actor):
                                 lines.append("  " + "  ".join(parts))
                         ha_entities_text = "\n".join(lines)
                         ha_available = True
-                        logger.info(f"[{self.name}] Got {len(entities_list)} HA entities via home-assistant-agent")
+                        logger.info(
+                            f"[{self.name}] Got {len(entities_list)} HA entities via home-assistant-agent "
+                            f"(formatted {len(lines)} lines for prompt)"
+                        )
         except Exception as e:
             logger.warning(f"[{self.name}] Could not query home-assistant-agent: {e}")
 
@@ -851,7 +870,8 @@ class PlannerAgent(Actor):
                 if ha_url and ha_token:
                     devices = await fetch_devices_entities_with_location(ha_url, ha_token, include_states=True)
                     lines = []
-                    for device in devices[:150]:
+                    # Same rationale as above — don't truncate. Iterate ALL devices.
+                    for device in devices:
                         area = device.get("area", "")
                         for entity in device.get("entities", []):
                             eid = entity.get("entity_id", "")
@@ -952,21 +972,60 @@ class PlannerAgent(Actor):
                 "use a placeholder 'WEBHOOK_URL_REQUIRED' and set description to explain the user must run:\n"
                 "  /webhook discord <url>"
             )
-        _local_kw = ("camera", "webcam", "laptop", "detect", "yolo", "person",
-                     "object detection", "cv2", "opencv",
-                     "discord", "telegram", "slack", "notify", "notification", "message")
-        _skip_feasibility = any(kw in task.lower() for kw in _local_kw)
+        # Skip feasibility ONLY when the requested action is clearly NOT an HA
+        # service call. Original list included "message" and "notify" which
+        # caused requests like "when X happens log a warning message" to bypass
+        # the feasibility check entirely — sometimes useful, but it also masked
+        # real HA-target bugs (the entity-truncation bug above wasn't visible
+        # because most "log/notify" requests appeared to work despite a broken
+        # entity list).
+        #
+        # Keep it tight: skip only for camera/vision pipelines (need cv2,
+        # don't touch HA), explicit external-webhook integrations
+        # (Discord/Slack/Telegram URLs — also don't touch HA), and pure-
+        # observability tasks where no HA service call is implied.
+        _non_ha_kw = (
+            "camera", "webcam", "laptop camera", "yolo", "cv2", "opencv",
+            "discord", "telegram", "slack", "webhook",
+        )
+        # HA service-call verbs — if the task contains one of these, feasibility
+        # MUST run, because the LLM will try to emit an ha_actuator and we need
+        # to confirm a real entity exists.
+        _ha_action_verbs = (
+            "turn on", "turn off", "open", "close", "lock", "unlock",
+            "set temperature", "set brightness", "set color", "play", "pause",
+            "start", "stop", "activate", "trigger ",
+            "switch on", "switch off",
+        )
+        task_lower = task.lower()
+        has_ha_verb = any(v in task_lower for v in _ha_action_verbs)
+        has_skip_kw = any(kw in task_lower for kw in _non_ha_kw)
+        # Skip feasibility if non-HA keyword present AND no HA verb is present.
+        # If both present (e.g. "send Discord AND turn off the lamp"), feasibility
+        # still runs to validate the lamp.
+        _skip_feasibility = has_skip_kw and not has_ha_verb
 
         if ha_available and ha_entities_text and not _skip_feasibility:
             feas_prompt = (
-                "Check if this reactive automation can be fulfilled with available HA entities.\n\n"
+                "You are checking whether a reactive HA automation can be built with the available entities.\n\n"
                 f"USER REQUEST: {task}\n\n"
                 f"AVAILABLE HA ENTITIES:\n{ha_section}\n\n"
                 'Return JSON only:\n'
                 '{"feasible": true/false, "reason": "<one sentence if not feasible>", "relevant_entities": ["entity_id", ...]}\n\n'
-                "Rules:\n"
-                "- feasible=true only if ALL required entity types exist\n"
-                "- Camera/webcam/Discord/notification requests: always feasible=true"
+                "Rules — be PERMISSIVE, default to feasible=true:\n"
+                "- Match by FUZZY SUBSTRING. 'lamp' matches 'light.wiz_rgbw_*' or "
+                "any entity_id/name containing 'lamp', 'light', or 'lamp'-like words.\n"
+                "- 'door' matches binary_sensor.*_door, sensor.*_door, etc.\n"
+                "- 'occupancy'/'motion'/'presence' match any binary_sensor with those words.\n"
+                "- 'temperature' matches sensor.*_temperature.\n"
+                "- 'my <X>' / 'the <X>' just means the user's <X> — if ANY entity plausibly matches, feasible=true.\n"
+                "- feasible=false ONLY when there is genuinely NO entity whose entity_id, name, or "
+                "platform plausibly matches the requested target. If unsure, return feasible=true.\n"
+                "- relevant_entities should list the matching entity_ids you'd use.\n"
+                "- Camera/webcam/Discord/notification requests: always feasible=true.\n"
+                "- Pure logging / observability tasks (no HA target): always feasible=true. "
+                "Examples: 'log a heartbeat every hour', 'write a warning when X', 'print uptime'.\n"
+                "- Time-based triggers without HA action (just logging or publishing): always feasible=true."
             )
             try:
                 feas_resp, _ = await self.llm.complete(
@@ -1040,7 +1099,31 @@ class PlannerAgent(Actor):
             '    "detection_filter": {"<top-level-key>": <value>} or null',
             '    "cooldown_seconds": <number>',
             "",
-            'TYPE 2 — "dynamic"',
+            'TYPE 2 — "scheduled"',
+            "  Purpose: fire an event at a SPECIFIC time or interval. THE ONLY correct way",
+            "  to express any time-based trigger (5pm, every weekday, every 30 minutes).",
+            "  No code. No polling loop. The framework wakes precisely at fire time.",
+            "  CRITICAL — when to use scheduled vs dynamic:",
+            "    'at 5pm', 'every day at 7am', 'every Monday', 'every 30 minutes',",
+            "    'tomorrow at 9am', 'every hour' → ALWAYS use type=scheduled.",
+            "    NEVER write a dynamic agent that polls datetime.now() in a loop.",
+            "    NEVER write a dynamic agent with `while True: asyncio.sleep(60)` to check time.",
+            "  Schedule spec — dict with one of these shapes:",
+            "    Daily:    {\"type\": \"daily\",    \"at\": \"17:00\"}",
+            "    Weekly:   {\"type\": \"weekly\",   \"at\": \"07:30\", \"days\": [\"mon\",\"tue\",\"wed\",\"thu\",\"fri\"]}",
+            "    Interval: {\"type\": \"interval\", \"seconds\": 1800}",
+            "    Once:     {\"type\": \"once\",     \"at\": \"2026-12-25T09:00:00\"}",
+            "  spawn_config schema:",
+            '    "type": "scheduled"',
+            '    "description": "<what this fires>"',
+            '    "schedule": <one of the dicts above>',
+            '    "publish_topic": "schedule/<name>/fired"   (optional — defaults to this anyway)',
+            "  When the schedule fires, payload published is:",
+            '    {"fired_at": "<ISO-8601 UTC>", "schedule_type": "<type>", "agent": "<name>", "manual": false}',
+            "  Pair with a downstream consumer (ha_actuator or dynamic agent) that subscribes",
+            "  to the publish_topic and performs the actual action. See PATTERN 5 below.",
+            "",
+            'TYPE 3 — "dynamic"',
             "  Purpose: any logic that needs code — state filtering, webcam, timers, HTTP webhooks, Discord, etc.",
             "  Define these async functions (all optional except at least one must exist):",
             "    async def setup(agent)   — runs once on start, good for subscriptions and init",
@@ -1136,12 +1219,27 @@ class PlannerAgent(Actor):
             "    setup(agent): use agent.subscribe() on custom/detections/<slug>",
             "      When detected=True: POST notification via httpx",
             "",
-            "PATTERN 5 — Timer/schedule triggers HA action:",
-            "  Agent 1 (dynamic, name: '<slug>-timer'):",
-            "    process(agent): check current time (import datetime), if matches schedule:",
-            "      await agent.publish('custom/triggers/<slug>', {'triggered': True})",
-            "    poll_interval: 60",
-            "  Agent 2 (ha_actuator): subscribes to custom/triggers/<slug>",
+            "PATTERN 5 — Time-based trigger (clock time, recurring, or once):",
+            "  ALWAYS use type=scheduled for ANY clock-time trigger. Two-agent pattern:",
+            "  Agent 1 (scheduled, name: '<slug>-trigger'):",
+            "    schedule: {\"type\": \"daily\", \"at\": \"17:00\"} (or weekly/interval/once)",
+            "    publish_topic: 'schedule/<slug>-trigger/fired'  (or omit for default)",
+            "  Agent 2 (ha_actuator OR dynamic, name: '<slug>-action'):",
+            "    Subscribes to 'schedule/<slug>-trigger/fired'",
+            "    For HA actions: type=ha_actuator, mqtt_topics=['schedule/<slug>-trigger/fired'],",
+            "      detection_filter null (no filtering needed — every fire is a trigger),",
+            "      actions=[the HA service call].",
+            "    For notifications/custom code: type=dynamic, setup() subscribes via agent.subscribe(),",
+            "      callback does the work (POST to webhook, log, etc.)",
+            "  EXAMPLES of correct user-request → schedule mapping:",
+            '    "turn on lights at 5pm"          → {"type": "daily", "at": "17:00"}',
+            '    "every weekday at 7am"           → {"type": "weekly", "at": "07:00", "days": ["mon","tue","wed","thu","fri"]}',
+            '    "every Saturday morning"         → {"type": "weekly", "at": "08:00", "days": ["sat"]}',
+            '    "every 30 minutes"               → {"type": "interval", "seconds": 1800}',
+            '    "every hour"                     → {"type": "interval", "seconds": 3600}',
+            '    "tomorrow at 9am, remind me"     → {"type": "once", "at": "<tomorrow>T09:00:00"}',
+            "  CRITICAL: NEVER express a clock time as a dynamic agent that polls datetime.now().",
+            "  NEVER use 'while True: sleep(60)' to wait for a time. Always use type=scheduled.",
             "",
             "PATTERN 6 — MQTT sensor data + condition → HA action (e.g. 'if temp > 20 turn off lamp'):",
             "  This combines multiple data sources and triggers an HA action. NEVER use httpx for HA!",
@@ -1786,6 +1884,37 @@ Example:
                 name=name,
                 persistence_dir=str(self._persistence_dir.parent),
             )
+            await self._register_with_main(config)
+            return actor
+
+        if agent_type == "scheduled":
+            from .scheduled_agent import ScheduledAgent
+            schedule_spec = config.get("schedule")
+            if not isinstance(schedule_spec, dict):
+                logger.warning(f"[{self.name}] Cannot spawn '{name}': missing 'schedule' dict")
+                return None
+            # Read user's timezone from main's facts (single source of truth)
+            user_tz = None
+            if self._registry:
+                main = self._registry.find_by_name("main")
+                if main and hasattr(main, "get_user_facts"):
+                    try:
+                        user_tz = main.get_user_facts().get("pref_timezone")
+                    except Exception:
+                        pass
+            try:
+                actor = await self.spawn(
+                    ScheduledAgent,
+                    name=name,
+                    schedule=schedule_spec,
+                    timezone=user_tz,
+                    publish_topic=config.get("publish_topic") or f"schedule/{name}/fired",
+                    description=config.get("description", ""),
+                    persistence_dir=str(self._persistence_dir.parent),
+                )
+            except ValueError as e:
+                logger.error(f"[{self.name}] Invalid schedule for '{name}': {e}")
+                return None
             await self._register_with_main(config)
             return actor
 
