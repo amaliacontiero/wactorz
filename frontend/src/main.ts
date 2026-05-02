@@ -303,22 +303,24 @@ mqtt.on("alert", (payload) => {
   scene.onAlert(payload);
   hud.flashAlert(payload.severity);
   refreshStats();
+  const alertMsg = payload.message ?? "";
+  const alertAgent = payload.agentName ?? "system";
   pushFeed({
     type: payload.severity === "error" ? "alert-error" : "alert-warning",
-    label: payload.message,
-    agentName: payload.agentName,
+    label: alertMsg,
+    agentName: alertAgent,
     timestamp: payload.timestampMs,
   });
   const isError = payload.severity === "error" || payload.severity === "critical";
   toast.show({
     type: isError ? "alert-error" : "alert-warning",
-    title: payload.agentName,
-    message: payload.message.slice(0, 120),
+    title: alertAgent,
+    message: alertMsg.slice(0, 120),
   });
   if (isError) {
-    desktopNotify(`⚠ ${payload.agentName}`, payload.message.slice(0, 100));
+    desktopNotify(`⚠ ${alertAgent}`, alertMsg.slice(0, 100));
   } else {
-    desktopNotifyBackground(payload.agentName, payload.message.slice(0, 100));
+    desktopNotifyBackground(alertAgent, alertMsg.slice(0, 100));
   }
 });
 
