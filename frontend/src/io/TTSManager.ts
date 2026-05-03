@@ -42,9 +42,15 @@ export class TTSManager {
 
   /**
    * Probe the server for edge-tts availability and load the voice list.
+   * Falls back to browser voices if the server has none.
    * Call once after the page loads — non-blocking.
    */
   async init(): Promise<void> {
+    const serverOk = await this._checkServer();
+    if (!serverOk) await this._loadBrowserVoices();
+  }
+
+  private async _checkServer(): Promise<boolean> {
     try {
       const res = await fetch("/api/tts/voices");
       if (res.ok) {
@@ -52,19 +58,40 @@ export class TTSManager {
         if (Array.isArray(data) && data.length > 0) {
           this._voices = data as TTSVoice[];
           this._serverAvailable = true;
-          document.dispatchEvent(
-            new CustomEvent("tts-voices-loaded", { detail: { voices: this._voices } }),
-          );
-        } else {
-          // Empty list = edge-tts not installed
-          this._serverAvailable = false;
+          this._emitVoices();
+          return true;
         }
-      } else {
-        this._serverAvailable = false;
       }
-    } catch {
-      this._serverAvailable = false;
-    }
+    } catch { /* network error */ }
+    this._serverAvailable = false;
+    return false;
+  }
+
+  private _loadBrowserVoices(): Promise<void> {
+    return new Promise(resolve => {
+      const synth = window.speechSynthesis;
+      if (!synth) { resolve(); return; }
+
+      const populate = (): boolean => {
+        const voices = synth.getVoices();
+        if (!voices.length) return false;
+        this._voices = voices.map(v => ({ name: v.name, locale: v.lang, gender: "" }));
+        this._emitVoices();
+        resolve();
+        return true;
+      };
+
+      if (!populate()) {
+        synth.addEventListener("voiceschanged", () => populate(), { once: true });
+        setTimeout(resolve, 2000); // give up gracefully if event never fires
+      }
+    });
+  }
+
+  private _emitVoices(): void {
+    document.dispatchEvent(
+      new CustomEvent("tts-voices-loaded", { detail: { voices: this._voices } }),
+    );
   }
 
   get beepEnabled():    boolean    { return this._beepEnabled; }
@@ -188,6 +215,11 @@ export class TTSManager {
     utt.rate   = 1.1;
     utt.pitch  = 1.0;
     utt.volume = 0.9;
+    const selected = this.selectedVoice;
+    if (selected) {
+      const match = synth.getVoices().find(v => v.name === selected);
+      if (match) utt.voice = match;
+    }
     synth.speak(utt);
   }
 }
