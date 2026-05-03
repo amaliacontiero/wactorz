@@ -897,7 +897,9 @@ export class CardDashboard {
     const text = document.createElement("span");
     text.className = "af-feed-text";
     const label = item.label ?? "";
-    text.textContent = label.length > 120 ? label.slice(0, 120) + "…" : label;
+    const trimmed = label.length > 120 ? label.slice(0, 120) + "…" : label;
+    text.textContent = trimmed;
+    if (label.length > 120) text.title = label;
 
     row.append(icon, time, agent, text);
     container.appendChild(row);
