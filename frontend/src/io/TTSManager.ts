@@ -1,32 +1,83 @@
 /**
- * TTSManager — notification sound + browser TTS for incoming agent messages.
+ * TTSManager — notification sound + TTS for incoming agent messages.
  *
  * Two modes, independently toggled:
  *   beep  — short AudioContext tone on each incoming message
- *   tts   — Web Speech API reads the message content aloud
+ *   tts   — speech synthesis (server edge-tts when available, Web Speech API fallback)
  *
- * Both require a prior user gesture (browser autoplay policy) and HTTPS (or
- * localhost).  The manager degrades silently when neither is available.
+ * Server TTS: GET /api/tts?text=...&voice=...  returns audio/mpeg.
+ * If the endpoint returns 503 (edge-tts not installed) the manager falls back
+ * to window.speechSynthesis for the rest of the session.
  *
- * Persistence: mute state is stored in localStorage so it survives page reloads.
+ * Persistence: toggle state and selected voice are stored in localStorage.
  */
 
-const LS_BEEP = "wactorz.beep";
-const LS_TTS = "wactorz.tts";
+const LS_BEEP  = "wactorz.beep";
+const LS_TTS   = "wactorz.tts";
+const LS_VOICE = "wactorz.ttsVoice";
 
 /** Patterns that indicate the user wants the reply spoken aloud. */
 const SPEAK_REQUEST =
   /\b(speak|narrate|recite|read|say|tell me|voice|out ?loud|aloud|read ?(it|that|this) ?(?:out|back)|say ?(it|that|this)? ?(?:out ?loud|aloud))\b/i;
 
+export interface TTSVoice {
+  name: string;
+  locale: string;
+  gender: string;
+}
+
 export class TTSManager {
   private _beepEnabled: boolean;
   private _ttsEnabled: boolean;
-  private _forceNext = false; // speak the very next reply regardless of toggle
+  private _forceNext = false;
   private _audioCtx: AudioContext | null = null;
+  /** null = unknown, true = server responded ok, false = unavailable (503/network) */
+  private _serverAvailable: boolean | null = null;
+  private _voices: TTSVoice[] = [];
 
   constructor() {
     this._beepEnabled = localStorage.getItem(LS_BEEP) !== "0";
-    this._ttsEnabled = localStorage.getItem(LS_TTS) === "1";
+    this._ttsEnabled  = localStorage.getItem(LS_TTS)  === "1";
+  }
+
+  /**
+   * Probe the server for edge-tts availability and load the voice list.
+   * Call once after the page loads — non-blocking.
+   */
+  async init(): Promise<void> {
+    try {
+      const res = await fetch("/api/tts/voices");
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data) && data.length > 0) {
+          this._voices = data as TTSVoice[];
+          this._serverAvailable = true;
+          document.dispatchEvent(
+            new CustomEvent("tts-voices-loaded", { detail: { voices: this._voices } }),
+          );
+        } else {
+          // Empty list = edge-tts not installed
+          this._serverAvailable = false;
+        }
+      } else {
+        this._serverAvailable = false;
+      }
+    } catch {
+      this._serverAvailable = false;
+    }
+  }
+
+  get beepEnabled():    boolean    { return this._beepEnabled; }
+  get ttsEnabled():     boolean    { return this._ttsEnabled; }
+  get serverAvailable(): boolean   { return this._serverAvailable === true; }
+  get voices():          TTSVoice[] { return this._voices; }
+
+  get selectedVoice(): string {
+    return localStorage.getItem(LS_VOICE) ?? "";
+  }
+
+  setVoice(name: string): void {
+    localStorage.setItem(LS_VOICE, name);
   }
 
   /**
@@ -36,13 +87,6 @@ export class TTSManager {
    */
   checkUserIntent(text: string): void {
     if (SPEAK_REQUEST.test(text)) this._forceNext = true;
-  }
-
-  get beepEnabled(): boolean {
-    return this._beepEnabled;
-  }
-  get ttsEnabled(): boolean {
-    return this._ttsEnabled;
   }
 
   toggleBeep(): boolean {
@@ -71,13 +115,8 @@ export class TTSManager {
 
   private _ctx(): AudioContext | null {
     if (!this._audioCtx) {
-      try {
-        this._audioCtx = new AudioContext();
-      } catch {
-        return null;
-      }
+      try { this._audioCtx = new AudioContext(); } catch { return null; }
     }
-    // Resume if suspended (autoplay policy)
     if (this._audioCtx.state === "suspended") {
       this._audioCtx.resume().catch(() => {});
     }
@@ -97,7 +136,6 @@ export class TTSManager {
       vol.connect(ctx.destination);
       const t = ctx.currentTime;
       osc.start(t);
-      // Fade out to avoid a click
       vol.gain.setTargetAtTime(0, t + durationMs * 0.001 * 0.6, 0.01);
       osc.stop(t + durationMs * 0.001 + 0.05);
     } catch {
@@ -106,13 +144,49 @@ export class TTSManager {
   }
 
   private _speak(text: string): void {
+    const excerpt = text.replace(/```[\s\S]*?```/g, "code block").slice(0, 300);
+    if (this._serverAvailable !== false) {
+      this._speakServer(excerpt);
+    } else {
+      this._speakBrowser(excerpt);
+    }
+  }
+
+  private _speakServer(text: string): void {
+    const params = new URLSearchParams({ text });
+    const voice = this.selectedVoice;
+    if (voice) params.set("voice", voice);
+
+    fetch(`/api/tts?${params}`)
+      .then(res => {
+        if (res.status === 503 || res.status === 404) {
+          this._serverAvailable = false;
+          this._speakBrowser(text);
+          return null;
+        }
+        if (!res.ok) return null;
+        this._serverAvailable = true;
+        return res.blob();
+      })
+      .then(blob => {
+        if (!blob) return;
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.onended = () => URL.revokeObjectURL(url);
+        audio.play().catch(() => {});
+      })
+      .catch(() => {
+        this._serverAvailable = false;
+        this._speakBrowser(text);
+      });
+  }
+
+  private _speakBrowser(text: string): void {
     const synth = window.speechSynthesis;
     if (!synth) return;
-    // Truncate very long messages to avoid reading walls of text
-    const excerpt = text.replace(/```[\s\S]*?```/g, "code block").slice(0, 300);
-    const utt = new SpeechSynthesisUtterance(excerpt);
-    utt.rate = 1.1;
-    utt.pitch = 1.0;
+    const utt = new SpeechSynthesisUtterance(text);
+    utt.rate   = 1.1;
+    utt.pitch  = 1.0;
     utt.volume = 0.9;
     synth.speak(utt);
   }

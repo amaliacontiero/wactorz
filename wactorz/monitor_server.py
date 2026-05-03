@@ -1055,6 +1055,63 @@ async def chat_log_handler(request):
         return web.json_response({"error": str(exc)}, status=500)
 
 
+async def tts_voices_handler(request):
+    """GET /api/tts/voices — list available edge-tts voices."""
+    from aiohttp import web
+    try:
+        import edge_tts
+    except ImportError:
+        return web.json_response([])
+    try:
+        voices = await edge_tts.list_voices()
+        return web.json_response([
+            {"name": v["ShortName"], "locale": v["Locale"], "gender": v["Gender"]}
+            for v in sorted(voices, key=lambda v: v["ShortName"])
+        ])
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+
+
+async def tts_handler(request):
+    """GET /api/tts?text=...&voice=... — synthesize speech via edge-tts.
+
+    Returns audio/mpeg. Falls back 503 if edge-tts is not installed so the
+    frontend can transparently fall back to the Web Speech API.
+    """
+    from aiohttp import web
+    import os
+    try:
+        import edge_tts
+    except ImportError:
+        return web.Response(status=503, text="edge-tts not installed — pip install 'wactorz[tts]'")
+
+    text = request.rel_url.query.get("text", "").strip()
+    if not text:
+        return web.Response(status=400, text="text param required")
+
+    # Mirror TTSManager: strip code blocks, cap at 300 chars
+    import re
+    text = re.sub(r"```[\s\S]*?```", "code block", text)[:300]
+
+    default_voice = os.environ.get("TTS_VOICE", "en-US-JennyNeural")
+    voice = request.rel_url.query.get("voice", default_voice) or default_voice
+
+    try:
+        communicate = edge_tts.Communicate(text, voice)
+        chunks: list[bytes] = []
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                chunks.append(chunk["data"])
+        audio = b"".join(chunks)
+        return web.Response(
+            body=audio,
+            content_type="audio/mpeg",
+            headers={"Cache-Control": "no-store"},
+        )
+    except Exception as exc:
+        return web.Response(status=500, text=str(exc))
+
+
 async def config_handler(request):
     """Expose non-secret runtime config so the frontend can seed its defaults."""
     from aiohttp import web
@@ -1165,7 +1222,9 @@ async def main(exit_on_failure: bool = False):
     app.router.add_get("/actors/{actor_id}/history",     actor_history_handler)
     app.router.add_get("/api/chats",                     chat_log_handler)
     app.router.add_get("/chats",                         chat_log_handler)
-    
+    app.router.add_get("/api/tts/voices",                tts_voices_handler)
+    app.router.add_get("/api/tts",                       tts_handler)
+
     app.router.add_get("/api/config",            config_handler)
     app.router.add_get("/config",                config_handler)
     app.router.add_get("/api/feed",              feed_handler)

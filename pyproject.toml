@@ -54,6 +54,9 @@ otel      = [
 influx    = [
     "influxdb-client>=1.44.0",
 ]
+tts       = [
+    "edge-tts>=6.1.9",
+]
 docs      = [
     "markdown>=3.10.2",
     "pygments>=2.19.2",
@@ -80,6 +83,7 @@ all = [
     "wactorz[mcp]",
     "wactorz[otel]",
     "wactorz[influx]",
+    "wactorz[tts]",
 ]
 
 [project.scripts]

@@ -590,8 +590,9 @@ if (_isTauri && btnSettings) {
 
 // ── Sound / TTS toggles ───────────────────────────────────────────────────────
 
-const btnBeep = document.getElementById("btn-beep");
-const btnTTS = document.getElementById("btn-tts");
+const btnBeep       = document.getElementById("btn-beep");
+const btnTTS        = document.getElementById("btn-tts");
+const voiceSelect   = document.getElementById("tts-voice-select") as HTMLSelectElement | null;
 
 function syncSoundButtons(): void {
   btnBeep?.classList.toggle("active", tts.beepEnabled);
@@ -607,6 +608,33 @@ btnTTS?.addEventListener("click", () => {
   tts.toggleTTS();
   syncSoundButtons();
 });
+
+// Populate voice selector when server voices arrive
+document.addEventListener("tts-voices-loaded", (e) => {
+  const { voices } = (e as CustomEvent).detail;
+  if (!voiceSelect || !voices?.length) return;
+  voiceSelect.innerHTML = "";
+  // Blank option = server default
+  const blank = document.createElement("option");
+  blank.value = "";
+  blank.textContent = "— default voice —";
+  voiceSelect.appendChild(blank);
+  for (const v of voices) {
+    const opt = document.createElement("option");
+    opt.value = v.name;
+    opt.textContent = `${v.name} (${v.locale})`;
+    voiceSelect.appendChild(opt);
+  }
+  voiceSelect.value = tts.selectedVoice;
+  voiceSelect.style.display = "block";
+});
+
+voiceSelect?.addEventListener("change", () => {
+  tts.setVoice(voiceSelect.value);
+});
+
+// Probe server TTS availability + load voice list
+tts.init();
 
 // ── Connect ───────────────────────────────────────────────────────────────────
 
