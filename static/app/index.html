@@ -629,6 +629,54 @@
       .af-view-btn:hover { background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.85); }
       .af-view-btn.active { background: rgba(37,99,235,0.2); border-color: rgba(37,99,235,0.5); color: #93c5fd; }
 
+      /* ── Audio popover ──────────────────────────────────────────────────── */
+      .af-audio-popover {
+        position: fixed; z-index: 300;
+        display: none; flex-direction: column; gap: 10px;
+        padding: 14px 16px; min-width: 230px;
+        border-radius: 14px;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.55);
+      }
+      .af-audio-popover.open { display: flex; }
+      .af-audio-row { display: flex; align-items: center; gap: 8px; }
+      .af-audio-vol-row { gap: 10px; }
+      .af-audio-toggle {
+        flex: 1; padding: 6px 8px; border-radius: 8px; font-size: 12px; font-weight: 500;
+        border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.04);
+        color: rgba(255,255,255,0.5); cursor: pointer; transition: all 0.15s;
+      }
+      .af-audio-toggle.on {
+        background: rgba(37,99,235,0.22); border-color: rgba(37,99,235,0.5); color: #93c5fd;
+      }
+      .af-audio-toggle:hover:not(.on) { background: rgba(255,255,255,0.07); color: rgba(255,255,255,0.8); }
+      .af-audio-select {
+        width: 100%; padding: 5px 8px; border-radius: 8px; font-size: 12px;
+        border: 1px solid rgba(255,255,255,0.12); background: rgba(10,14,30,0.9);
+        color: #e0e8ff; cursor: pointer; appearance: auto;
+      }
+      .af-audio-select:focus { outline: none; border-color: rgba(37,99,235,0.5); }
+      .af-audio-divider {
+        height: 1px; background: rgba(255,255,255,0.08); margin: 2px 0;
+      }
+      .af-audio-label {
+        font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+        color: rgba(255,255,255,0.35); margin-bottom: -4px;
+      }
+      .af-audio-tracks { display: flex; flex-wrap: wrap; gap: 5px; }
+      .af-audio-track-btn {
+        padding: 5px 9px; border-radius: 8px; font-size: 12px;
+        border: 1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.04);
+        color: rgba(255,255,255,0.5); cursor: pointer; transition: all 0.15s; white-space: nowrap;
+      }
+      .af-audio-track-btn.on {
+        background: rgba(52,211,153,0.18); border-color: rgba(52,211,153,0.45); color: #34d399;
+      }
+      .af-audio-track-btn:hover:not(.on) { background: rgba(255,255,255,0.07); color: rgba(255,255,255,0.8); }
+      .af-audio-slider {
+        flex: 1; accent-color: #6366f1; cursor: pointer;
+        height: 4px; border-radius: 4px;
+      }
+
       .af-body { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
 
       /* ── Overview ── */
@@ -1788,7 +1836,7 @@
         .fin-metric-val { font-size: 15px; }
       }
     </style>
-    <script type="module" crossorigin src="./assets/index-DwdfkTg7.js"></script>
+    <script type="module" crossorigin src="./assets/index-CtYErhgy.js"></script>
     <link rel="modulepreload" crossorigin href="./assets/rolldown-runtime-lhHHWwHU.js">
     <link rel="modulepreload" crossorigin href="./assets/babylon-core-wJ5bR-LE.js">
     <link rel="modulepreload" crossorigin href="./assets/vendor-tpHWSsTM.js">

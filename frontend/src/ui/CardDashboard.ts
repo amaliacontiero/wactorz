@@ -17,6 +17,7 @@ import type { AgentInfo, AgentState, ChatMessage } from "../types/agent";
 import type { FeedItem } from "./ActivityFeed";
 import { HAClient, type HAEntity } from "../io/HAClient";
 import { ambient, AMBIENT_TRACKS } from "../io/AmbientManager";
+import { tts } from "../io/TTSManager";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -1869,63 +1870,28 @@ export class CardDashboard {
       right.appendChild(btn);
     });
 
-    // Sound / TTS controls — appended here so they're always visible in the header
-    const sep = document.createElement("span");
-    sep.style.cssText = "width:1px;height:16px;background:rgba(255,255,255,0.1);margin:0 4px;flex-shrink:0";
-    right.appendChild(sep);
+    // 🔊 Audio button → glass popover with all sound controls
+    const audioBtn = document.createElement("button");
+    audioBtn.className = "af-view-btn";
+    audioBtn.title = "Audio settings";
+    audioBtn.textContent = "🔊";
+    right.appendChild(audioBtn);
 
-    const btnBeep = document.createElement("button");
-    btnBeep.id = "btn-beep";
-    btnBeep.className = "af-view-btn hud-sound-btn active";
-    btnBeep.title = "Toggle notification sound";
-    btnBeep.textContent = "🔔";
-    right.appendChild(btnBeep);
+    const popover = this._buildAudioPopover();
+    document.body.appendChild(popover);
 
-    const btnTTS = document.createElement("button");
-    btnTTS.id = "btn-tts";
-    btnTTS.className = "af-view-btn hud-sound-btn";
-    btnTTS.title = "Toggle text-to-speech";
-    btnTTS.textContent = "🗣";
-    right.appendChild(btnTTS);
-
-    const voiceSel = document.createElement("select");
-    voiceSel.id = "tts-voice-select";
-    voiceSel.title = "TTS voice";
-    voiceSel.style.cssText = "max-width:120px;font-size:11px;background:rgba(74,111,168,0.08);color:#a5b4fc;border:1px solid rgba(74,111,168,0.25);border-radius:6px;padding:2px 4px;cursor:pointer;";
-    const defOpt = document.createElement("option");
-    defOpt.value = "";
-    defOpt.textContent = "— voice —";
-    voiceSel.appendChild(defOpt);
-    right.appendChild(voiceSel);
-
-    // Ambient controls
-    const sep2 = document.createElement("span");
-    sep2.style.cssText = "width:1px;height:16px;background:rgba(255,255,255,0.1);margin:0 4px;flex-shrink:0";
-    right.appendChild(sep2);
-
-    AMBIENT_TRACKS.forEach(({ id, label }) => {
-      const btn = document.createElement("button");
-      btn.className = `af-view-btn${ambient.track === id ? " active" : ""}`;
-      btn.dataset["ambient"] = id;
-      btn.title = label;
-      btn.textContent = label;
-      btn.addEventListener("click", () => {
-        ambient.setTrack(id);
-        right.querySelectorAll<HTMLElement>("[data-ambient]").forEach(b =>
-          b.classList.toggle("active", b.dataset["ambient"] === id)
-        );
-      });
-      right.appendChild(btn);
+    audioBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const open = popover.classList.toggle("open");
+      if (open) {
+        const r = audioBtn.getBoundingClientRect();
+        popover.style.top  = `${r.bottom + 6}px`;
+        popover.style.right = `${window.innerWidth - r.right}px`;
+      }
     });
-
-    const volSlider = document.createElement("input");
-    volSlider.type = "range";
-    volSlider.min = "0"; volSlider.max = "1"; volSlider.step = "0.05";
-    volSlider.value = String(ambient.volume);
-    volSlider.title = "Ambient volume";
-    volSlider.style.cssText = "width:60px;accent-color:#6366f1;cursor:pointer;flex-shrink:0";
-    volSlider.addEventListener("input", () => ambient.setVolume(parseFloat(volSlider.value)));
-    right.appendChild(volSlider);
+    document.addEventListener("click", (e) => {
+      if (!popover.contains(e.target as Node)) popover.classList.remove("open");
+    });
 
     // const btn3d = document.createElement("button");
     // btn3d.className = "af-view-btn";
@@ -2627,5 +2593,123 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
     section.appendChild(actions);
 
     return section;
+  }
+
+  // ── Private: Audio popover ────────────────────────────────────────────────
+
+  private _buildAudioPopover(): HTMLElement {
+    const pop = document.createElement("div");
+    pop.className = "af-audio-popover glass";
+
+    // ── Row: Beep + TTS toggles ───────────────────────────────────────────
+    const toggleRow = document.createElement("div");
+    toggleRow.className = "af-audio-row";
+
+    const beepBtn = document.createElement("button");
+    beepBtn.className = `af-audio-toggle${tts.beepEnabled ? " on" : ""}`;
+    beepBtn.textContent = `🔔 Beep`;
+    beepBtn.title = "Notification beep";
+    beepBtn.addEventListener("click", () => {
+      const on = tts.toggleBeep();
+      beepBtn.classList.toggle("on", on);
+    });
+
+    const ttsBtn = document.createElement("button");
+    ttsBtn.className = `af-audio-toggle${tts.ttsEnabled ? " on" : ""}`;
+    ttsBtn.textContent = `🗣 TTS`;
+    ttsBtn.title = "Read replies aloud";
+    ttsBtn.addEventListener("click", () => {
+      const on = tts.toggleTTS();
+      ttsBtn.classList.toggle("on", on);
+      voiceRow.style.display = on ? "" : "none";
+    });
+
+    toggleRow.append(beepBtn, ttsBtn);
+    pop.appendChild(toggleRow);
+
+    // ── Row: Voice select ─────────────────────────────────────────────────
+    const voiceRow = document.createElement("div");
+    voiceRow.className = "af-audio-row";
+    voiceRow.style.display = tts.ttsEnabled ? "" : "none";
+
+    const voiceSel = document.createElement("select");
+    voiceSel.className = "af-audio-select";
+    voiceSel.title = "TTS voice";
+
+    const placeholderOpt = document.createElement("option");
+    placeholderOpt.value = "";
+    placeholderOpt.textContent = "— loading voices… —";
+    voiceSel.appendChild(placeholderOpt);
+
+    const populateVoices = (): void => {
+      const voices = tts.voices;
+      if (!voices.length) return;
+      while (voiceSel.options.length > 1) voiceSel.remove(1);
+      voices.forEach(v => {
+        const o = document.createElement("option");
+        o.value = v.name;
+        o.textContent = v.name.replace(/^Microsoft\s+/, "").replace(/\s+Online.*$/i, "");
+        voiceSel.appendChild(o);
+      });
+      const saved = tts.selectedVoice;
+      if (saved) voiceSel.value = saved;
+    };
+
+    populateVoices();
+    document.addEventListener("tts-voices-loaded", () => populateVoices());
+    voiceSel.addEventListener("change", () => tts.setVoice(voiceSel.value));
+
+    voiceRow.appendChild(voiceSel);
+    pop.appendChild(voiceRow);
+
+    // ── Divider ───────────────────────────────────────────────────────────
+    const divider = document.createElement("div");
+    divider.className = "af-audio-divider";
+    pop.appendChild(divider);
+
+    // ── Row: Ambient track ────────────────────────────────────────────────
+    const trackLabel = document.createElement("div");
+    trackLabel.className = "af-audio-label";
+    trackLabel.textContent = "Ambient";
+    pop.appendChild(trackLabel);
+
+    const trackRow = document.createElement("div");
+    trackRow.className = "af-audio-tracks";
+
+    AMBIENT_TRACKS.forEach(({ id, label }) => {
+      const btn = document.createElement("button");
+      btn.className = `af-audio-track-btn${ambient.track === id ? " on" : ""}`;
+      btn.textContent = label;
+      btn.addEventListener("click", () => {
+        trackRow.querySelectorAll(".af-audio-track-btn").forEach(b => b.classList.remove("on"));
+        btn.classList.add("on");
+        ambient.setTrack(id);
+        volRow.style.display = id === "none" ? "none" : "";
+      });
+      trackRow.appendChild(btn);
+    });
+
+    pop.appendChild(trackRow);
+
+    // ── Row: Volume slider ────────────────────────────────────────────────
+    const volRow = document.createElement("div");
+    volRow.className = "af-audio-row af-audio-vol-row";
+    volRow.style.display = ambient.track === "none" ? "none" : "";
+
+    const volIcon = document.createElement("span");
+    volIcon.textContent = "🔉";
+    volIcon.style.fontSize = "14px";
+
+    const volSlider = document.createElement("input");
+    volSlider.type = "range";
+    volSlider.className = "af-audio-slider";
+    volSlider.min = "0"; volSlider.max = "1"; volSlider.step = "0.05";
+    volSlider.value = String(ambient.volume);
+    volSlider.addEventListener("input", () => ambient.setVolume(parseFloat(volSlider.value)));
+
+    volRow.append(volIcon, volSlider);
+    pop.appendChild(volRow);
+
+    return pop;
   }
 }
