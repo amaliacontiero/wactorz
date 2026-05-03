@@ -42,6 +42,9 @@ export class ChatPanel {
   /** Per-agent conversation history.  Key = agent name. */
   private threads: Map<string, ChatMessage[]> = new Map();
 
+  private _apiBase = "";
+  private _historyFetched = new Set<string>();
+
   /** Active typing bubbles keyed by agent name. */
   private typingBubbles: Map<string, HTMLElement> = new Map();
   private typingTimeouts: Map<string, ReturnType<typeof setTimeout>> =
@@ -129,6 +132,12 @@ export class ChatPanel {
       .forEach((row) => {
         row.classList.toggle("active", row.dataset["name"] === agent.name);
       });
+
+    // Fetch backend history the first time this agent's thread is opened
+    if (!this._historyFetched.has(agent.name)) {
+      this._historyFetched.add(agent.name);
+      this._loadHistory(agent.name);
+    }
 
     const alreadyOpen = this.panel.classList.contains("open");
     if (!alreadyOpen) {
@@ -473,7 +482,43 @@ export class ChatPanel {
     }
   }
 
+  /** Set the API base URL so history can be fetched from the backend. */
+  setApiBase(base: string): void {
+    this._apiBase = base;
+  }
+
   // ── Private ─────────────────────────────────────────────────────────────────
+
+  private _loadHistory(agentName: string): void {
+    fetch(`${this._apiBase}/api/actors/${encodeURIComponent(agentName)}/history`)
+      .then((r) => (r.ok ? r.json() : Promise.resolve([])))
+      .then((msgs: Array<{ role: string; content: string; ts?: number }>) => {
+        if (!Array.isArray(msgs) || msgs.length === 0) return;
+        const firstTs = msgs[0]?.ts ? Math.round(msgs[0].ts * 1000) : Date.now();
+        const histThread: ChatMessage[] = [
+          {
+            id: `history-sep-${agentName}`,
+            from: "system",
+            to: agentName,
+            content: "─── restored history ───",
+            timestampMs: firstTs,
+          },
+          ...msgs.map((m, i) => ({
+            id: `hist-${m.ts ?? i}`,
+            from: m.role === "user" ? "user" : agentName,
+            to: m.role === "user" ? agentName : "user",
+            content: m.content,
+            timestampMs: m.ts ? Math.round(m.ts * 1000) : firstTs + i,
+          })),
+        ];
+        const live = this.threads.get(agentName) ?? [];
+        this.threads.set(agentName, [...histThread, ...live]);
+        if (this.activeAgentName === agentName) {
+          this.renderThread(agentName, false);
+        }
+      })
+      .catch(() => {});
+  }
 
   private renderThread(agentName: string, animate: boolean): void {
     const paint = () => {

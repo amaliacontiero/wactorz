@@ -109,6 +109,7 @@ const mqtt = new MQTTClient(MQTT_BROKER);
 const hud = new AgentHUD();
 const themeSwitcher = new ThemeSwitcher();
 const chatPanel = new ChatPanel();
+chatPanel.setApiBase(_apiBase);
 const voice = new VoiceInput();
 const ioManager = new IOManager(mqtt, chatPanel);
 const ioBar = new IOBar(voice, ioManager);
