@@ -138,10 +138,12 @@ function refreshLiveActors(): void {
     )
     .then((actors: AgentInfo[]) => {
       scene.reconcileAgents(
-        actors.map((a) => ({
-          ...a,
-          name: resolveAgentName(a.name, a.id),
-        })),
+        actors
+          .filter((a) => !deletedAgentIds.has(a.id))
+          .map((a) => ({
+            ...a,
+            name: resolveAgentName(a.name, a.id),
+          })),
       );
       syncAgentViews();
       console.info(
@@ -280,6 +282,7 @@ function pushFeed(item: Parameters<typeof feed.push>[0]): void {
 // ── MQTT → Scene/HUD/Feed wiring ──────────────────────────────────────────────
 
 mqtt.on("heartbeat", (payload) => {
+  if (deletedAgentIds.has(payload.agentId)) return;
   scene.onHeartbeat(payload);
   pushFeed({
     type: "heartbeat",
