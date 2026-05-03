@@ -180,6 +180,8 @@ export class TTSManager {
   }
 
   private _speakServer(text: string): void {
+    // duck ambient while server audio plays
+    import("./AmbientManager").then(({ ambient }) => ambient.duck(true)).catch(() => {});
     const params = new URLSearchParams({ text });
     const voice = this.selectedVoice;
     if (voice) params.set("voice", voice);
@@ -204,8 +206,14 @@ export class TTSManager {
           const src = ctx.createBufferSource();
           src.buffer = decoded;
           src.connect(ctx.destination);
+          src.onended = () => {
+            import("./AmbientManager").then(({ ambient }) => ambient.duck(false)).catch(() => {});
+          };
           src.start();
-        }).catch(() => this._speakBrowser(text));
+        }).catch(() => {
+          import("./AmbientManager").then(({ ambient }) => ambient.duck(false)).catch(() => {});
+          this._speakBrowser(text);
+        });
       })
       .catch(() => {
         this._serverAvailable = false;

@@ -16,6 +16,7 @@
 import type { AgentInfo, AgentState, ChatMessage } from "../types/agent";
 import type { FeedItem } from "./ActivityFeed";
 import { HAClient, type HAEntity } from "../io/HAClient";
+import { ambient, AMBIENT_TRACKS } from "../io/AmbientManager";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -1896,6 +1897,35 @@ export class CardDashboard {
     defOpt.textContent = "— voice —";
     voiceSel.appendChild(defOpt);
     right.appendChild(voiceSel);
+
+    // Ambient controls
+    const sep2 = document.createElement("span");
+    sep2.style.cssText = "width:1px;height:16px;background:rgba(255,255,255,0.1);margin:0 4px;flex-shrink:0";
+    right.appendChild(sep2);
+
+    AMBIENT_TRACKS.forEach(({ id, label }) => {
+      const btn = document.createElement("button");
+      btn.className = `af-view-btn${ambient.track === id ? " active" : ""}`;
+      btn.dataset["ambient"] = id;
+      btn.title = label;
+      btn.textContent = label;
+      btn.addEventListener("click", () => {
+        ambient.setTrack(id);
+        right.querySelectorAll<HTMLElement>("[data-ambient]").forEach(b =>
+          b.classList.toggle("active", b.dataset["ambient"] === id)
+        );
+      });
+      right.appendChild(btn);
+    });
+
+    const volSlider = document.createElement("input");
+    volSlider.type = "range";
+    volSlider.min = "0"; volSlider.max = "1"; volSlider.step = "0.05";
+    volSlider.value = String(ambient.volume);
+    volSlider.title = "Ambient volume";
+    volSlider.style.cssText = "width:60px;accent-color:#6366f1;cursor:pointer;flex-shrink:0";
+    volSlider.addEventListener("input", () => ambient.setVolume(parseFloat(volSlider.value)));
+    right.appendChild(volSlider);
 
     // const btn3d = document.createElement("button");
     // btn3d.className = "af-view-btn";
