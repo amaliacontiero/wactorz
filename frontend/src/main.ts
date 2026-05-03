@@ -232,20 +232,19 @@ wsChat.connect(`${_wsBase}/ws`);
 refreshLiveActors();
 window.setInterval(refreshLiveActors, 15000);
 
-// Seed the activity feed from SQLite conversation histories so the feed panel
-// isn't empty after a server restart.  Synthetic timestamps are spaced 2s apart,
-// ending 5s before now, so they sort before any live events.
+// Seed the activity feed from SQLite chat_log so the feed panel isn't empty
+// after a server restart. The server returns real Unix timestamps (seconds);
+// convert to ms for the feed.
 fetch(`${_apiBase}/api/feed`)
   .then((r) => (r.ok ? r.json() : []))
-  .then((items: { type: string; label: string; agentName: string }[]) => {
+  .then((items: { type: string; label: string; agentName: string; timestamp?: number }[]) => {
     if (!items.length) return;
-    const base = Date.now() - items.length * 2000 - 5000;
-    items.forEach((item, i) => {
+    items.forEach((item) => {
       pushFeed({
         type: "chat",
         label: item.label,
         agentName: item.agentName,
-        timestamp: base + i * 2000,
+        timestamp: item.timestamp ? item.timestamp * 1000 : Date.now(),
       });
     });
   })
