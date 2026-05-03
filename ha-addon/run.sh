@@ -87,6 +87,14 @@ if [ -n "$OTEL_ENDPOINT" ]; then
     export OTEL_SERVICE_NAME=$(get_config_safe 'otel_service_name' 'wactorz')
 fi
 
+INFLUX_URL=$(get_config_safe 'influx_url' '')
+if [ -n "$INFLUX_URL" ]; then
+    export INFLUX_URL="$INFLUX_URL"
+    export INFLUX_TOKEN=$(get_config_safe 'influx_token' '')
+    export INFLUX_ORG=$(get_config_safe 'influx_org' 'wactorz')
+    export INFLUX_BUCKET=$(get_config_safe 'influx_bucket' 'wactorz')
+fi
+
 # Embedded services
 MOSQUITTO_EMBEDDED=$(get_config_safe 'mosquitto_embedded' 'false')
 FUSEKI_EMBEDDED=$(get_config_safe 'fuseki_embedded' 'false')
