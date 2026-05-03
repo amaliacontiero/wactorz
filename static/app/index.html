@@ -203,6 +203,16 @@
         transition: color 0.2s; flex-shrink: 0;
       }
       .close-btn:hover { color: #a8b8d8; }
+      /* Back button — only shown on mobile via @media override */
+      .af-chat-back-btn {
+        display: none;
+        background: none; border: none; cursor: pointer;
+        color: #5a70a0; font-size: 13px; font-weight: 600;
+        padding: 4px 8px; border-radius: 6px;
+        align-items: center; gap: 4px;
+        transition: color 0.2s; flex-shrink: 0;
+      }
+      .af-chat-back-btn:hover { color: #93c5fd; }
 
       /* ── Chat sidebar (agent list) ────────────────────────────────────────── */
       #chat-panel { flex-direction: row; }
@@ -1211,8 +1221,41 @@
         /* Activity feed: full width */
         #activity-feed { width: 100%; border-left: none; border-bottom-left-radius: 0; }
 
-        /* Chat panel: full screen on mobile */
-        #chat-panel { width: 100%; left: 0; border-left: none; border-radius: 0; }
+        /* ── CardDashboard header nav: scrollable strip ── */
+        .af-header { padding: 6px 10px; gap: 6px; }
+        .af-header-center { display: none; }
+        .af-header-right {
+          overflow-x: auto; -webkit-overflow-scrolling: touch;
+          scrollbar-width: none; flex-shrink: 1; min-width: 0;
+        }
+        .af-header-right::-webkit-scrollbar { display: none; }
+        .af-view-btn { padding: 5px 10px; font-size: 11px; white-space: nowrap; flex-shrink: 0; min-height: 34px; }
+
+        /* ── Chat view (CardDashboard) — sidebar/pane toggle ── */
+        .af-chat { flex-direction: column; }
+        .af-chat-sidebar {
+          width: 100%; border-right: none;
+          border-bottom: 1px solid rgba(255,255,255,0.07);
+          /* show sidebar by default; pane hidden */
+        }
+        .af-chat-pane { display: none; flex: 1; min-height: 0; }
+        /* when agent is selected on mobile, flip visibility */
+        .af-chat.agent-selected .af-chat-sidebar { display: none; }
+        .af-chat.agent-selected .af-chat-pane    { display: flex; flex-direction: column; }
+        /* back button: visible only on mobile */
+        .af-chat-back-btn { display: inline-flex !important; }
+
+        /* ── Chat panel (sliding panel) — same sidebar/pane toggle ── */
+        #chat-panel { width: 100%; left: 0; border-left: none; border-radius: 0; flex-direction: column !important; }
+        #chat-panel .af-chat-sidebar {
+          width: 100%; border-right: none;
+          border-bottom: 1px solid rgba(255,255,255,0.07);
+          flex-shrink: 0; max-height: 45vh;
+        }
+        #chat-panel .af-chat-pane { display: none; flex: 1; min-height: 0; }
+        #chat-panel.agent-selected .af-chat-sidebar { display: none; }
+        #chat-panel.agent-selected .af-chat-pane    { display: flex; }
+        #chat-panel .af-chat-back-btn { display: inline-flex !important; }
 
         /* Social dashboard: clear of IO bar + safe area */
         .sd-root { bottom: max(64px, calc(58px + env(safe-area-inset-bottom, 6px))); }
@@ -1732,7 +1775,7 @@
         .fin-metric-val { font-size: 15px; }
       }
     </style>
-    <script type="module" crossorigin src="./assets/index-BhhOovvU.js"></script>
+    <script type="module" crossorigin src="./assets/index-BQT3Y4XR.js"></script>
     <link rel="modulepreload" crossorigin href="./assets/rolldown-runtime-lhHHWwHU.js">
     <link rel="modulepreload" crossorigin href="./assets/babylon-core-DMXg9r-F.js">
     <link rel="modulepreload" crossorigin href="./assets/vendor-nWkvi20q.js">
@@ -1787,6 +1830,7 @@
       </div>
       <div class="af-chat-pane">
         <div class="af-chat-pane-header">
+          <button class="af-chat-back-btn" id="panel-back" title="Back to agents">‹ Back</button>
           <div class="af-chat-pane-title" id="panel-agent-name">— select an agent —</div>
           <span class="af-chat-pane-state" id="panel-agent-status"></span>
           <button class="close-btn" id="panel-close" title="Close">✕</button>

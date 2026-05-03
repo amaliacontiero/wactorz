@@ -1012,6 +1012,8 @@ export class CardDashboard {
           this._renderChatThread();
           this._loadHistory(agent.name);
           this._updateTargetSelect();
+          // Mobile: switch to pane view
+          this.root.querySelector(".af-chat")?.classList.add("agent-selected");
         });
       }
 
@@ -1038,6 +1040,16 @@ export class CardDashboard {
     const hdr = this.root.querySelector<HTMLElement>("#af-chat-pane-header");
     if (!hdr) return;
     hdr.innerHTML = "";
+
+    // Back button (mobile-only via CSS)
+    const backBtn = document.createElement("button");
+    backBtn.className = "af-chat-back-btn";
+    backBtn.textContent = "‹ Back";
+    backBtn.addEventListener("click", () => {
+      this.root.querySelector(".af-chat")?.classList.remove("agent-selected");
+    });
+    hdr.appendChild(backBtn);
+
     const agent = [...this.agents.values()].find(
       (a) => a.name === this.chatTarget,
     );

@@ -77,6 +77,17 @@ export class ChatPanel {
     });
 
     this.closeBtn.addEventListener("click", () => this.close());
+
+    // Back button (mobile): show agent list without closing the panel
+    const backBtn = document.getElementById("panel-back");
+    if (backBtn) {
+      backBtn.addEventListener("click", () => {
+        this.panel.classList.remove("agent-selected");
+        this.activeAgentName = null;
+        this.selectedAgent = null;
+      });
+    }
+
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape") this.close();
     });
@@ -146,6 +157,7 @@ export class ChatPanel {
     } else if (prev !== agent.name) {
       this.renderThread(agent.name, true); // animated cross-fade
     }
+    this.panel.classList.add("agent-selected");
 
     document.dispatchEvent(
       new CustomEvent<{ agent: AgentInfo }>("panel-opened", {
@@ -173,7 +185,7 @@ export class ChatPanel {
   }
 
   close(): void {
-    this.panel.classList.remove("open");
+    this.panel.classList.remove("open", "agent-selected");
     this.selectedAgent = null;
     document.dispatchEvent(new CustomEvent("panel-closed"));
   }
