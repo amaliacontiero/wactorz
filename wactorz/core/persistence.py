@@ -164,7 +164,10 @@ CREATE TABLE IF NOT EXISTS actuations (
 CREATE INDEX IF NOT EXISTS idx_actuation_ts     ON actuations (ts);
 CREATE INDEX IF NOT EXISTS idx_actuation_entity ON actuations (entity_id, ts);
 
--- Chat log — append-only transcript of every LLM conversation turn
+-- Chat log — every user/assistant turn the monitor server sees.
+-- This is what backs the UI feed across restarts. Without it, the feed
+-- has to be reconstructed from kv_store conversation_history, which has
+-- no real timestamps (turns are positional within the JSON blob).
 CREATE TABLE IF NOT EXISTS chat_log (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     ts         REAL    NOT NULL,             -- Unix timestamp of the turn
@@ -174,8 +177,8 @@ CREATE TABLE IF NOT EXISTS chat_log (
     session_id TEXT    DEFAULT ''            -- optional grouping (actor_id or custom)
 );
 
-CREATE INDEX IF NOT EXISTS idx_chat_log_ts    ON chat_log (ts);
-CREATE INDEX IF NOT EXISTS idx_chat_log_agent ON chat_log (agent_name, ts);
+CREATE INDEX IF NOT EXISTS idx_chatlog_ts          ON chat_log (ts);
+CREATE INDEX IF NOT EXISTS idx_chatlog_agent_ts    ON chat_log (agent_name, ts);
 """
 
 
@@ -268,40 +271,6 @@ class WactorzDB:
                 result[row[0]] = row[1]
         return result
 
-    # ── Chat log ───────────────────────────────────────────────────────────
-
-    def log_chat(self, agent_name: str, role: str, content: str,
-                 ts: Optional[float] = None, session_id: str = "") -> None:
-        """Append one conversation turn to the persistent chat log."""
-        self._conn.execute(
-            "INSERT INTO chat_log (ts, agent_name, role, content, session_id) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (ts or time.time(), agent_name, role, content, session_id),
-        )
-        self._conn.commit()
-
-    def query_chat_log(self, agent_name: Optional[str] = None, role: Optional[str] = None,
-                       since: Optional[float] = None, limit: int = 200) -> list:
-        """Return chat log rows as dicts, newest-last."""
-        clauses, params = [], []
-        if agent_name:
-            clauses.append("agent_name = ?"); params.append(agent_name)
-        if role:
-            clauses.append("role = ?"); params.append(role)
-        if since:
-            clauses.append("ts >= ?"); params.append(since)
-        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-        rows = self._conn.execute(
-            f"SELECT id, ts, agent_name, role, content, session_id "
-            f"FROM chat_log {where} ORDER BY ts DESC LIMIT ?",
-            (*params, limit),
-        ).fetchall()
-        return [
-            {"id": r[0], "ts": r[1], "agent": r[2], "role": r[3],
-             "content": r[4], "session_id": r[5]}
-            for r in reversed(rows)     # reverse so oldest-first in response
-        ]
-
     # ── Time-series writes ─────────────────────────────────────────────────
 
     def write_sensor(self, ts: float, topic: str, entity_id: str,
@@ -356,6 +325,47 @@ class WactorzDB:
             (ts, agent, domain, service, entity_id, payload, trigger, rule_id),
         )
         self._conn.commit()
+
+    # ── Chat log (persistent feed for the UI) ──────────────────────────────
+
+    def write_chat_log(self, ts: float, agent_name: str, role: str,
+                       content: str, session_id: str = ""):
+        """
+        Persist a single chat turn so the UI feed can be rebuilt with real
+        timestamps after a restart. The schema is created in init_state.sql.
+        """
+        self._conn.execute(
+            "INSERT INTO chat_log (ts, agent_name, role, content, session_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (ts, agent_name, role, content, session_id),
+        )
+        self._conn.commit()
+
+    def query_chat_log(self, agent_name: Optional[str] = None,
+                       role: Optional[str] = None,
+                       since: Optional[float] = None,
+                       limit: int = 200) -> list[dict]:
+        """
+        Return chat_log rows newest-first as plain dicts. Used by the
+        /api/chats endpoint and by feed_handler to seed the UI feed.
+        """
+        sql    = "SELECT id, ts, agent_name, role, content, session_id FROM chat_log"
+        clauses: list[str] = []
+        params:  list      = []
+        if agent_name:
+            clauses.append("agent_name = ?"); params.append(agent_name)
+        if role:
+            clauses.append("role = ?");       params.append(role)
+        if since is not None:
+            clauses.append("ts > ?");         params.append(float(since))
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY ts DESC LIMIT ?"
+        params.append(int(limit))
+        rows = self._conn.execute(sql, params).fetchall()
+        # rows are sqlite3.Row because connect() set row_factory; coerce to dict
+        return [dict(r) for r in rows]
+
 
     # ── Time-series queries (for ML agents) ────────────────────────────────
 
@@ -725,8 +735,9 @@ def migrate_from_pickle(state_dir: str, db: WactorzDB, redis: RedisStore):
     """
     One-time migration: read existing .pkl files and write to SQLite/Redis.
 
-    Safe to run multiple times — only migrates keys that do NOT already exist
-    in SQLite/Redis, so newer data is never overwritten by stale pickle data.
+    Only migrates keys that do NOT already exist in SQLite/Redis — this makes the
+    function safe to call on every startup without overwriting newer SQLite data
+    with stale pickle data from a previous session.
     """
     base = Path(state_dir)
     if not base.exists():

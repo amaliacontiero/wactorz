@@ -379,6 +379,25 @@ async def ws_handler(request):
     # Advertise chat mode so the frontend knows where to send messages
     await ws.send_str(json.dumps({"type": "config", "chat_mode": _chat_mode()}))
 
+    # Per-connection accumulator for streamed assistant replies.
+    # We only persist once at stream_end so chat_log gets one row per turn
+    # with the full content, not a row per chunk.
+    _stream_buffer: list[str] = []
+
+    def _persist_chat(role: str, content: str, agent_name: str = "main") -> None:
+        """Best-effort write to chat_log. Never raises into the WS path."""
+        if db is None or not content:
+            return
+        try:
+            db.write_chat_log(
+                ts=time.time(),
+                agent_name=agent_name,
+                role=role,
+                content=content,
+            )
+        except Exception as exc:
+            logger.warning(f"[ws] chat_log write failed: {exc}")
+
     async def ws_reply(text: str):
         try:
             await ws.send_str(json.dumps({
@@ -387,6 +406,9 @@ async def ws_handler(request):
                 "content":   text,
                 "timestamp": time.time(),
             }))
+            # Non-streamed replies (slash command output, errors, system
+            # messages) — persist immediately.
+            _persist_chat("assistant", text)
         except Exception:
             pass
 
@@ -398,6 +420,9 @@ async def ws_handler(request):
                 "content":   chunk,
                 "timestamp": time.time(),
             }))
+            # Buffer for end-of-stream persistence; do NOT write per chunk.
+            if chunk:
+                _stream_buffer.append(chunk)
         except Exception:
             pass
 
@@ -408,8 +433,18 @@ async def ws_handler(request):
                 "from":      IO_GATEWAY_ID,
                 "timestamp": time.time(),
             }))
+            # Now persist the full assembled assistant turn — once.
+            if _stream_buffer:
+                full = "".join(_stream_buffer)
+                _stream_buffer.clear()
+                _persist_chat("assistant", full)
         except Exception:
-            pass
+            # Even if the send_str failed, flush anything we accumulated
+            # so the user's session isn't lost on a transient ws hiccup.
+            if _stream_buffer:
+                full = "".join(_stream_buffer)
+                _stream_buffer.clear()
+                _persist_chat("assistant", full)
 
     try:
         async for msg in ws:
@@ -424,6 +459,9 @@ async def ws_handler(request):
                     elif msg_type == "chat":
                         content = (data.get("content") or "").strip()
                         if content and registry is not None:
+                            # Persist the user's turn first so chat_log has the
+                            # request even if the assistant reply errors out.
+                            _persist_chat("user", content)
                             async def _safe_route(c=content):
                                 try:
                                     await _route_chat(c, ws_reply,
@@ -1167,38 +1205,81 @@ async def config_handler(request):
 
 
 async def feed_handler(request):
-    """Return recent feed events seeded from SQLite conversation histories."""
+    """
+    Return recent chat events for the UI feed, with REAL persisted timestamps.
+
+    Previously this read from kv_store.conversation_history, which is just a
+    JSON list with no timestamps — so each entry got `i` (the loop index) as
+    its timestamp and the frontend re-dated them to "now - i*delta", causing
+    timestamps to reset on every page reload / restart.
+
+    Now we read from the chat_log table, which has a real `ts REAL` column
+    written at the moment each turn happens. Falls back to the legacy
+    kv_store path only if chat_log is empty (e.g. a freshly upgraded DB
+    where nothing has been written yet) so existing users still see their
+    pre-upgrade history on first launch.
+    """
     from aiohttp import web
     if db is None:
         return web.json_response([])
     try:
+        # Primary path — persistent chat_log with real timestamps.
+        try:
+            rows = db.query_chat_log(limit=50)
+        except Exception as exc:
+            logger.warning(f"[feed] chat_log query failed: {exc}")
+            rows = []
+
+        if rows:
+            # query_chat_log returns newest-first; the frontend expects
+            # chronological (oldest-first) so the latest message ends up
+            # at the bottom of the feed.
+            rows = list(reversed(rows))
+            items = [{
+                "type":      "chat",
+                "label":     str(r.get("content", "")),
+                "agentName": r.get("agent_name", ""),
+                "role":      r.get("role", ""),
+                "timestamp": float(r.get("ts", 0.0)),  # REAL Unix time, not an index
+                "_seq":      i,
+                "_agent":    r.get("agent_name", ""),
+            } for i, r in enumerate(rows)]
+            return web.json_response(items)
+
+        # Fallback — legacy kv_store path. Keeps old DBs displaying *something*
+        # until new chat turns start populating chat_log. Synthesises a
+        # timestamp by anchoring the last entry to "now" and walking backwards
+        # in 1-second steps, so at least entries are ordered consistently.
         import json as _json
-        rows = db.conn.execute(
+        kv_rows = db.conn.execute(
             "SELECT agent, value FROM kv_store WHERE key='conversation_history'"
         ).fetchall()
         items = []
-        for agent_name, value in rows:
+        now = time.time()
+        for agent_name, value in kv_rows:
             try:
                 history = _json.loads(value)
-                for i, msg in enumerate(history):
-                    if not isinstance(msg, dict):
-                        continue
-                    role = msg.get("role")
-                    if role not in ("user", "assistant"):
-                        continue
+                visible = [m for m in history
+                           if isinstance(m, dict)
+                           and m.get("role") in ("user", "assistant")]
+                n = len(visible)
+                for i, msg in enumerate(visible):
                     items.append({
-                        "type": "chat",
-                        "label": str(msg.get("content", "")),
+                        "type":      "chat",
+                        "label":     str(msg.get("content", "")),
                         "agentName": agent_name,
-                        "timestamp": i,  # order within the history; will be re-dated in frontend
-                        "_seq": i,
-                        "_agent": agent_name,
+                        "role":      msg.get("role", ""),
+                        # Synthesised but at least monotonic and anchored
+                        # to a real wall-clock value, not a bare index.
+                        "timestamp": now - (n - 1 - i),
+                        "_seq":      i,
+                        "_agent":    agent_name,
                     })
             except Exception:
                 pass
-        # Return chronological order (most recent last)
         return web.json_response(items[-50:])
-    except Exception:
+    except Exception as exc:
+        logger.warning(f"[feed] handler failed: {exc}")
         return web.json_response([])
 
 
