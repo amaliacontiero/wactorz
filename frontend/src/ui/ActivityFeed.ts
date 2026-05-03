@@ -59,6 +59,77 @@ const TYPE_ICON: Record<FeedEventType, string> = {
   "qa-flag": "⚑",
 };
 
+/** Singleton popover shown on hover for truncated feed messages. */
+class FeedTooltip {
+  private el: HTMLDivElement;
+  private hideTimer = 0;
+
+  constructor() {
+    this.el = document.createElement("div");
+    this.el.id = "af-feed-tooltip";
+    this.el.style.cssText = [
+      "position:fixed",
+      "z-index:9999",
+      "max-width:360px",
+      "padding:8px 12px",
+      "border-radius:8px",
+      "background:rgba(8,14,28,0.96)",
+      "border:1px solid rgba(99,139,255,0.25)",
+      "backdrop-filter:blur(12px)",
+      "box-shadow:0 8px 32px rgba(0,0,0,0.6)",
+      "font-size:12px",
+      "line-height:1.55",
+      "color:rgba(255,255,255,0.82)",
+      "white-space:pre-wrap",
+      "word-break:break-word",
+      "pointer-events:none",
+      "opacity:0",
+      "transition:opacity 0.12s ease",
+    ].join(";");
+    document.body.appendChild(this.el);
+  }
+
+  show(anchor: HTMLElement, fullText: string): void {
+    clearTimeout(this.hideTimer);
+    this.el.textContent = fullText;
+
+    // Position: prefer above the row; flip below if too close to top
+    const rect = anchor.getBoundingClientRect();
+    const gap = 6;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+
+    // Measure after setting text (width may change)
+    this.el.style.visibility = "hidden";
+    this.el.style.opacity = "0";
+    this.el.style.display = "block";
+    const tw = Math.min(this.el.offsetWidth, 360);
+    const th = this.el.offsetHeight;
+
+    let top = rect.top - th - gap;
+    if (top < 8) top = rect.bottom + gap;
+    if (top + th > vh - 8) top = vh - th - 8;
+
+    let left = rect.left;
+    if (left + tw > vw - 8) left = vw - tw - 8;
+    if (left < 8) left = 8;
+
+    this.el.style.top = `${top}px`;
+    this.el.style.left = `${left}px`;
+    this.el.style.visibility = "";
+    this.el.style.opacity = "1";
+    this.el.style.display = "";
+  }
+
+  hide(delay = 80): void {
+    this.hideTimer = window.setTimeout(() => {
+      this.el.style.opacity = "0";
+    }, delay);
+  }
+}
+
+const _tooltip = new FeedTooltip();
+
 export class ActivityFeed {
   private panel: HTMLElement;
   private list: HTMLElement;
@@ -154,9 +225,16 @@ export class ActivityFeed {
     const text = document.createElement("span");
     text.className = "af-feed-text";
     const label = item.label ?? "";
+    // Display up to 120 chars; full text shown in hover popover
     const trimmed = label.length > 120 ? label.slice(0, 120) + "…" : label;
     text.textContent = trimmed;
-    if (label.length > 120) text.title = label;
+
+    if (label.length > 0) {
+      row.addEventListener("mouseenter", () =>
+        _tooltip.show(row, `${item.agentName}  ·  ${label}`),
+      );
+      row.addEventListener("mouseleave", () => _tooltip.hide());
+    }
 
     row.appendChild(icon);
     row.appendChild(time);
