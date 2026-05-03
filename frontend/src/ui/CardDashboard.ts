@@ -1868,6 +1868,35 @@ export class CardDashboard {
       right.appendChild(btn);
     });
 
+    // Sound / TTS controls — appended here so they're always visible in the header
+    const sep = document.createElement("span");
+    sep.style.cssText = "width:1px;height:16px;background:rgba(255,255,255,0.1);margin:0 4px;flex-shrink:0";
+    right.appendChild(sep);
+
+    const btnBeep = document.createElement("button");
+    btnBeep.id = "btn-beep";
+    btnBeep.className = "af-view-btn hud-sound-btn active";
+    btnBeep.title = "Toggle notification sound";
+    btnBeep.textContent = "🔔";
+    right.appendChild(btnBeep);
+
+    const btnTTS = document.createElement("button");
+    btnTTS.id = "btn-tts";
+    btnTTS.className = "af-view-btn hud-sound-btn";
+    btnTTS.title = "Toggle text-to-speech";
+    btnTTS.textContent = "🗣";
+    right.appendChild(btnTTS);
+
+    const voiceSel = document.createElement("select");
+    voiceSel.id = "tts-voice-select";
+    voiceSel.title = "TTS voice";
+    voiceSel.style.cssText = "max-width:120px;font-size:11px;background:rgba(74,111,168,0.08);color:#a5b4fc;border:1px solid rgba(74,111,168,0.25);border-radius:6px;padding:2px 4px;cursor:pointer;";
+    const defOpt = document.createElement("option");
+    defOpt.value = "";
+    defOpt.textContent = "— voice —";
+    voiceSel.appendChild(defOpt);
+    right.appendChild(voiceSel);
+
     // const btn3d = document.createElement("button");
     // btn3d.className = "af-view-btn";
     // btn3d.style.marginLeft = "8px";
