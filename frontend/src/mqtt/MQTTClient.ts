@@ -187,7 +187,7 @@ export class MQTTClient {
     }
     // agents/{id}/alert
     if (/^agents\/.+\/alert$/.test(topic)) {
-      this.emit("alert", payload as AlertPayload);
+      this.emit("alert", normaliseAlert(payload));
       return;
     }
     // agents/{id}/chat
@@ -197,7 +197,7 @@ export class MQTTClient {
     }
     // agents/{id}/spawn  (real backend + mock both use this topic)
     if (/^agents\/.+\/spawn$/.test(topic)) {
-      this.emit("spawn", payload as SpawnPayload);
+      this.emit("spawn", normaliseSpawn(payload));
       return;
     }
 
@@ -209,7 +209,7 @@ export class MQTTClient {
 
     // system/spawn  (legacy / alternate)
     if (topic === "system/spawn") {
-      this.emit("spawn", payload as SpawnPayload);
+      this.emit("spawn", normaliseSpawn(payload));
       return;
     }
 
@@ -378,5 +378,29 @@ export function normaliseStatus(p: unknown): StatusPayload {
     ...(o as unknown as StatusPayload),
     agentId,
     agentName,
+  };
+}
+
+export function normaliseSpawn(p: unknown): SpawnPayload {
+  const o = (p ?? {}) as RawObj;
+  const agentId = str(o["agentId"] ?? o["actor_id"] ?? o["agent_id"]);
+  const agentName = resolveAgentName(str(o["agentName"] ?? o["name"]), agentId);
+  return {
+    ...(o as unknown as SpawnPayload),
+    agentId,
+    agentName,
+    timestampMs: toMs(o["timestampMs"] ?? o["timestamp_ms"] ?? o["timestamp"]),
+  };
+}
+
+export function normaliseAlert(p: unknown): AlertPayload {
+  const o = (p ?? {}) as RawObj;
+  const agentId = str(o["agentId"] ?? o["actor_id"] ?? o["agent_id"]);
+  const agentName = resolveAgentName(str(o["agentName"] ?? o["name"]), agentId);
+  return {
+    ...(o as unknown as AlertPayload),
+    agentId,
+    agentName,
+    timestampMs: toMs(o["timestampMs"] ?? o["timestamp_ms"] ?? o["timestamp"]),
   };
 }
