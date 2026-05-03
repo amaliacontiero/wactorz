@@ -1088,25 +1088,50 @@ export class CardDashboard {
     if (this._historyLoaded.has(agentId)) return;
     this._historyLoaded.add(agentId);
     const ingress: string = (window as any).__WACTORZ_INGRESS_PATH ?? "";
+    const liveIds = () => new Set(this.chatMessages.map((m) => m.id));
+    const prepend = (msgs: ChatMessage[]) => {
+      const ids = liveIds();
+      this.chatMessages.unshift(...msgs.filter((m) => !ids.has(m.id)));
+      this._renderChatThread();
+    };
     try {
-      const res = await fetch(`${ingress}/api/actors/${encodeURIComponent(agentId)}/history`);
+      // Primary: chat_log table — real persisted timestamps
+      const chatRes = await fetch(
+        `${ingress}/api/chats?agent=${encodeURIComponent(agentId)}&limit=200`,
+      );
+      if (chatRes.ok) {
+        const rows: { id: number; ts: number; role: string; content: string }[] =
+          await chatRes.json();
+        if (rows.length) {
+          prepend(
+            rows.reverse().map((r) => ({
+              id: `hist-${agentId}-${r.id}`,
+              from: r.role === "user" ? "user" : agentId,
+              to:   r.role === "user" ? agentId : "user",
+              content: r.content,
+              timestampMs: r.ts < 1e10 ? r.ts * 1000 : r.ts,
+            })),
+          );
+          return;
+        }
+      }
+      // Fallback: actor kv_store history — no timestamps, synthesise
+      const res = await fetch(
+        `${ingress}/api/actors/${encodeURIComponent(agentId)}/history`,
+      );
       if (!res.ok) return;
       const raw: { role: string; content: string }[] = await res.json();
       if (!raw.length) return;
-      // Assign synthetic timestamps spaced 2s apart, ending before session start
       const base = Date.now() - raw.length * 2000 - 5000;
-      const historical: ChatMessage[] = raw.map((m, i) => ({
-        id: `hist-${agentId}-${i}`,
-        from: m.role === "user" ? "user" : agentId,
-        to: m.role === "user" ? agentId : "user",
-        content: m.content,
-        timestampMs: base + i * 2000,
-      }));
-      // Prepend only: don't duplicate messages already added live this session
-      const liveIds = new Set(this.chatMessages.map((m) => m.id));
-      const toAdd = historical.filter((m) => !liveIds.has(m.id));
-      this.chatMessages.unshift(...toAdd);
-      this._renderChatThread();
+      prepend(
+        raw.map((m, i) => ({
+          id: `hist-${agentId}-${i}`,
+          from: m.role === "user" ? "user" : agentId,
+          to:   m.role === "user" ? agentId : "user",
+          content: m.content,
+          timestampMs: base + i * 2000,
+        })),
+      );
     } catch {
       // history unavailable — silent
     }
