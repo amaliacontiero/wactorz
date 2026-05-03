@@ -79,6 +79,7 @@ all = [
     "wactorz[whatsapp]",
     "wactorz[mcp]",
     "wactorz[otel]",
+    "wactorz[influx]",
 ]
 
 [project.scripts]
