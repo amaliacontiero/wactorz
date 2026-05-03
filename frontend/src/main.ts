@@ -626,7 +626,6 @@ document.addEventListener("tts-voices-loaded", (e) => {
     voiceSelect.appendChild(opt);
   }
   voiceSelect.value = tts.selectedVoice;
-  voiceSelect.style.display = "block";
 });
 
 voiceSelect?.addEventListener("change", () => {

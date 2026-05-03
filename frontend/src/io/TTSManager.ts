@@ -193,14 +193,19 @@ export class TTSManager {
         }
         if (!res.ok) return null;
         this._serverAvailable = true;
-        return res.blob();
+        return res.arrayBuffer();
       })
-      .then(blob => {
-        if (!blob) return;
-        const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        audio.onended = () => URL.revokeObjectURL(url);
-        audio.play().catch(() => {});
+      .then(buf => {
+        if (!buf) return;
+        // Decode + play through AudioContext (already unlocked by beep gesture)
+        const ctx = this._ctx();
+        if (!ctx) { this._speakBrowser(text); return; }
+        ctx.decodeAudioData(buf).then(decoded => {
+          const src = ctx.createBufferSource();
+          src.buffer = decoded;
+          src.connect(ctx.destination);
+          src.start();
+        }).catch(() => this._speakBrowser(text));
       })
       .catch(() => {
         this._serverAvailable = false;
