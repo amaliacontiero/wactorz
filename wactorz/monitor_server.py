@@ -1055,21 +1055,33 @@ async def chat_log_handler(request):
         return web.json_response({"error": str(exc)}, status=500)
 
 
+_tts_voices_cache: list | None = None
+
+
+async def _warm_tts_voices(_app=None) -> None:
+    """Load edge-tts voice list once at startup and cache it."""
+    global _tts_voices_cache
+    try:
+        import edge_tts
+        voices = await edge_tts.list_voices()
+        _tts_voices_cache = [
+            {"name": v["ShortName"], "locale": v["Locale"], "gender": v["Gender"]}
+            for v in sorted(voices, key=lambda v: v["ShortName"])
+        ]
+    except Exception:
+        _tts_voices_cache = []
+
+
 async def tts_voices_handler(request):
     """GET /api/tts/voices — list available edge-tts voices."""
     from aiohttp import web
     try:
-        import edge_tts
+        import edge_tts as _  # noqa: F401 — check installed
     except ImportError:
         return web.json_response([])
-    try:
-        voices = await edge_tts.list_voices()
-        return web.json_response([
-            {"name": v["ShortName"], "locale": v["Locale"], "gender": v["Gender"]}
-            for v in sorted(voices, key=lambda v: v["ShortName"])
-        ])
-    except Exception as exc:
-        return web.json_response({"error": str(exc)}, status=500)
+    if _tts_voices_cache is None:
+        await _warm_tts_voices()
+    return web.json_response(_tts_voices_cache or [])
 
 
 async def tts_handler(request):
@@ -1224,6 +1236,7 @@ async def main(exit_on_failure: bool = False):
     app.router.add_get("/chats",                         chat_log_handler)
     app.router.add_get("/api/tts/voices",                tts_voices_handler)
     app.router.add_get("/api/tts",                       tts_handler)
+    app.on_startup.append(_warm_tts_voices)
 
     app.router.add_get("/api/config",            config_handler)
     app.router.add_get("/config",                config_handler)
