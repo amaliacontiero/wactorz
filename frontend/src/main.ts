@@ -119,6 +119,8 @@ const feed = new ActivityFeed();
 
 const wsChat = new WSChatClient();
 let liveSyncInFlight = false;
+// Track agent IDs that were explicitly deleted so MQTT "stopped" events don't re-add them.
+const deletedAgentIds = new Set<string>();
 
 function syncAgentViews(): void {
   chatPanel.updateAgentList(scene.getAgents());
@@ -188,6 +190,7 @@ ioManager.setWSClient(wsChat);
 // This is how pause/stop/resume state changes reach the UI without polling.
 wsChat.onStatePatch((agents, deletedId, stats) => {
   if (deletedId) {
+    deletedAgentIds.add(deletedId);
     scene.removeAgent(deletedId);
   }
   if (stats?.totalCostUsd !== undefined) scene.setTotalCostUsd(stats.totalCostUsd);
@@ -343,17 +346,19 @@ mqtt.on("chat", (msg) => {
 });
 
 mqtt.on("status", (payload) => {
-  scene.addOrUpdateAgent({
-    id: payload.agentId,
-    name: payload.agentName,
-    state: payload.state,
-    protected: payload.protected ?? false,
-    messagesProcessed: payload.messagesProcessed,
-  });
-  syncAgentViews();
-  chatPanel.updateAgentStatus(payload.agentId, String(payload.state));
+  if (!deletedAgentIds.has(payload.agentId)) {
+    scene.addOrUpdateAgent({
+      id: payload.agentId,
+      name: payload.agentName,
+      state: payload.state,
+      protected: payload.protected ?? false,
+      messagesProcessed: payload.messagesProcessed,
+    });
+    syncAgentViews();
+    chatPanel.updateAgentStatus(payload.agentId, String(payload.state));
+  }
   if (payload.state === "stopped") {
-    window.setTimeout(() => refreshLiveActors(), 1000);
+    window.setTimeout(() => refreshLiveActors(), 200);
     pushFeed({
       type: "stopped",
       label: "stopped",

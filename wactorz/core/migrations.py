@@ -217,7 +217,10 @@ def _upgrade_conversation_history(db, pickle_store):
                     if not isinstance(content, str):
                         content = str(content)
                     if content.strip():
-                        clean.append({"role": role, "content": content})
+                        entry = {"role": role, "content": content}
+                        if "ts" in m and isinstance(m["ts"], (int, float)):
+                            entry["ts"] = m["ts"]
+                        clean.append(entry)
                 if len(clean) != len(history):
                     db.conn.execute(
                         "UPDATE kv_store SET value=?, updated=? WHERE agent=? AND key='conversation_history'",

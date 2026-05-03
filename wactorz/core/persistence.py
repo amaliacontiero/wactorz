@@ -678,9 +678,8 @@ def migrate_from_pickle(state_dir: str, db: WactorzDB, redis: RedisStore):
     """
     One-time migration: read existing .pkl files and write to SQLite/Redis.
 
-    Only migrates keys that do NOT already exist in SQLite/Redis — this makes the
-    function safe to call on every startup without overwriting newer SQLite data
-    with stale pickle data from a previous session.
+    Safe to run multiple times — only migrates keys that do NOT already exist
+    in SQLite/Redis, so newer data is never overwritten by stale pickle data.
     """
     base = Path(state_dir)
     if not base.exists():
