@@ -72,6 +72,23 @@ class ActorRegistry:
 
     async def register(self, actor: Actor):
         async with self._lock:
+            existing = self._actors.get(actor.actor_id)
+            if existing is not None and existing is not actor:
+                # Same deterministic actor_id (uuid5 of name) is being re-registered.
+                # The old instance's tasks (message loop, heartbeat loop, aiomqtt
+                # subscribe listeners spawned from setup()) are STILL RUNNING.
+                # If we just overwrite the dict entry, the old listener stays alive
+                # and we get duplicate MQTT message delivery — every published event
+                # invokes both callbacks. Stop the old instance asynchronously so
+                # its background tasks (and any aiomqtt subscriptions) shut down.
+                logger.warning(
+                    f"[Registry] Overwriting existing actor '{existing.name}' "
+                    f"({actor.actor_id[:8]}) — stopping old instance to prevent "
+                    f"duplicate listeners / double MQTT delivery."
+                )
+                # Schedule stop outside this lock to avoid re-entrancy / deadlock.
+                # stop() acquires no shared locks but may await on tasks that do.
+                asyncio.create_task(existing.stop())
             actor._registry = self
             self._actors[actor.actor_id] = actor
             logger.info(f"[Registry] Registered {actor.name} ({actor.actor_id[:8]})")

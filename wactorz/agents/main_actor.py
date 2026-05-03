@@ -739,6 +739,31 @@ CAMERA OPENING ON RASPBERRY PI — always use this pattern for RPI nodes:
   Never use cv2.VideoCapture(0) alone on RPI — it fails with OpenCV/FFMPEG warning
   Always run blocking cv2 calls in run_in_executor to avoid blocking the event loop
 
+CAMERA OPENING ON WINDOWS — the framework auto-injects a resilient cv2 shim:
+  cv2.VideoCapture(0) is automatically wrapped with retry+backoff and forced
+  onto the CAP_DSHOW backend (more reliable than the default MSMF). Just call
+  cv2.VideoCapture(0) — DO NOT pass cv2.CAP_MSMF explicitly.
+
+CRITICAL — DO NOT RELEASE+REOPEN THE CAMERA INSIDE process():
+  On a failed cap.read(), simply `return` from process(). The framework will
+  call process() again after poll_interval, and the camera handle is still
+  valid — a transient frame failure does NOT mean the device is dead. Calling
+  cap.release() + cv2.VideoCapture(...) on every failed read produces a flap
+  loop on Windows because MSMF/DSHOW need wall-clock time to release the
+  device handle, and a tight reopen loop never gives them that time.
+
+  WRONG (causes flap loop):
+      ok, frame = cap.read()
+      if not ok:
+          cap.release()
+          agent.state['cap'] = cv2.VideoCapture(0)
+          return
+
+  RIGHT:
+      ok, frame = cap.read()
+      if not ok:
+          return   # next process() tick will retry on the same handle
+
 <spawn>
 {
   "name": "yolo-agent",
@@ -1425,8 +1450,36 @@ class MainActor(LLMAgent):
         reg = self._get_spawn_registry()
         if not reg:
             return
-        logger.info(f"[{self.name}] Restoring {len(reg)} agent(s): {list(reg.keys())}")
-        for name, config in reg.items():
+
+        # ── Skip names already brought up by the Supervisor's factories ─────
+        # Both the Supervisor (registry.py) and this method spawn user agents
+        # at startup. Without this guard they race: supervisor.start() spawns
+        # instance #1 via its stored factory, then on_start() runs us here and
+        # we spawn instance #2. Both register under the same deterministic
+        # actor_id (uuid5 of name) — the dict entry gets overwritten but the
+        # first instance's aiomqtt subscribe listeners keep running, causing
+        # every MQTT message to be delivered twice.
+        sup = getattr(self._registry, "_supervisor_ref", None) if self._registry else None
+        already_supervised: set[str] = set()
+        if sup is not None:
+            for sup_name, spec in sup._specs.items():
+                if spec.actor is not None and not spec.retired:
+                    already_supervised.add(sup_name)
+
+        if already_supervised:
+            skip = sorted(n for n in reg.keys() if n in already_supervised)
+            if skip:
+                logger.info(
+                    f"[{self.name}] Supervisor already restarted "
+                    f"{len(skip)} agent(s); skipping restore for: {skip}"
+                )
+
+        pending = {n: c for n, c in reg.items() if n not in already_supervised}
+        if not pending:
+            return
+
+        logger.info(f"[{self.name}] Restoring {len(pending)} agent(s): {list(pending.keys())}")
+        for name, config in pending.items():
             node = config.get("node", "").strip()
             if node:
                 # Remote agent — re-publish spawn to its node; no local object expected
@@ -3360,6 +3413,16 @@ class MainActor(LLMAgent):
 
         existing = self._registry.find_by_name(name) if self._registry else None
         replace  = config.get("replace", False)
+
+        # Also consult the Supervisor — its factory may have already brought up
+        # an instance whose registration hasn't completed yet (race window during
+        # parallel startup). find_by_name() would miss it.
+        if existing is None and self._registry is not None:
+            sup = getattr(self._registry, "_supervisor_ref", None)
+            if sup is not None:
+                spec = sup._specs.get(name)
+                if spec is not None and spec.actor is not None and not spec.retired:
+                    existing = spec.actor
 
         if existing:
             if not replace:

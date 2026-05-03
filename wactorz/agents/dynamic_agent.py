@@ -22,6 +22,7 @@ import asyncio
 import logging
 import time
 import traceback
+import types
 from typing import Any, Optional
 
 from ..core.actor import Actor, Message, MessageType, ActorState
@@ -212,15 +213,20 @@ class DynamicAgent(Actor):
 
         # ── Force-release common resources that LLM code may have opened ───
         # Even if cleanup() didn't run or missed something, we try to release
-        # known resource types stored in agent.state.
+        # known resource types stored in agent.state OR in module-level globals
+        # inside the compiled namespace (_ns). LLM-generated code frequently uses
+        # globals like `_cap = None` instead of agent.state, so we must check both.
         state = getattr(self._api, 'state', {}) if self._api else {}
 
-        # Release cv2 VideoCapture handles
-        for key in list(state.keys()):
-            obj = state.get(key)
-            if obj is None:
-                continue
-            # cv2.VideoCapture
+        # Skip builtins/modules/functions — only look at plain objects
+        _SKIP_TYPES = (type(None), bool, int, float, str, bytes, type, types.ModuleType,
+                       types.FunctionType, types.CoroutineType)
+
+        def _release_obj(key, obj):
+            """Release a single resource object, logging the result."""
+            if obj is None or isinstance(obj, _SKIP_TYPES):
+                return
+            # cv2.VideoCapture (and anything with release/isOpened)
             if hasattr(obj, 'release') and hasattr(obj, 'isOpened'):
                 try:
                     if obj.isOpened():
@@ -228,7 +234,7 @@ class DynamicAgent(Actor):
                         logger.info(f"[{self.name}] Released camera handle '{key}'")
                 except Exception:
                     pass
-            # Close any open file handles
+            # Open file handles
             elif hasattr(obj, 'close') and hasattr(obj, 'closed'):
                 try:
                     if not obj.closed:
@@ -236,6 +242,17 @@ class DynamicAgent(Actor):
                         logger.debug(f"[{self.name}] Closed file handle '{key}'")
                 except Exception:
                     pass
+
+        # Scan agent.state (preferred pattern)
+        for key in list(state.keys()):
+            _release_obj(key, state.get(key))
+
+        # Scan module-level globals in the compiled namespace (common LLM pattern)
+        # e.g. `_cap = None` / `_model = None` at module level
+        for key, obj in list(self._ns.items()):
+            if key.startswith('__') or key in ('setup', 'process', 'cleanup', 'handle_task'):
+                continue
+            _release_obj(key, obj)
 
         # ── Cancel any tasks spawned inside setup/process code ─────────────
         # Generated code may have called asyncio.create_task() directly without
@@ -431,6 +448,13 @@ class DynamicAgent(Actor):
         (r'while\s+True\s*:',
          "while True loop inside process() — process() must return after each iteration. "
          "The framework already loops it. Remove the while loop."),
+        (r'\.release\s*\(\s*\)[\s\S]{0,200}?cv2\.VideoCapture\s*\(',
+         "cap.release() followed by cv2.VideoCapture() inside process() — "
+         "do NOT reopen the camera on a single failed read. The framework's "
+         "cv2 shim already retries opens with backoff and a settle delay. "
+         "On a failed cap.read(), just `return` from process() — the next "
+         "poll_interval tick will retry. Releasing+reopening from process() "
+         "produces a flap loop on Windows MSMF/DSHOW."),
     ]
 
     def _validate_code_safety(self, code: str) -> Optional[str]:
@@ -521,6 +545,136 @@ class DynamicAgent(Actor):
         self._ns["get_llm"]    = _get_llm_shim
         self._ns["setup_llm"]  = _get_llm_shim
         self._ns["create_llm"] = _get_llm_shim
+
+        # ── cv2 shim: wrap VideoCapture with retry + release-before-reopen ──
+        # Only injected when the agent code actually references cv2 — no-op for
+        # chat agents, schedulers, or anything else that doesn't use the camera.
+        # LLM code uses `_cap = cv2.VideoCapture(0)` as a global. On Windows
+        # (MSMF backend) the previous session's handle may not be fully released
+        # by the OS yet, so the first open succeeds but grabFrame() immediately
+        # fails with -1072873821. The shim retries with increasing delays so the
+        # agent recovers without manual intervention.
+        import re as _re
+        if _re.search(r'\bcv2\b', clean):
+            try:
+                import cv2 as _real_cv2
+                import types as _types
+
+                _agent_name_for_shim = self.name  # capture for closure
+
+                class _ResilientVideoCapture(_real_cv2.VideoCapture):
+                    """
+                    Drop-in replacement for cv2.VideoCapture that retries the open
+                    with backoff when the MSMF backend grabs the device index but
+                    then immediately fails to deliver frames.
+
+                    Transparent to LLM code — same API, same isinstance() checks.
+                    """
+                    _RETRY_DELAYS = [1.0, 2.0, 4.0, 8.0]   # seconds between retries
+                    # Time to wait after a successful open() before probing read().
+                    # MSMF/DSHOW source readers need ~200-300ms to start streaming
+                    # even after isOpened() returns True. Probing too soon yields
+                    # the cyclic "opened but read failed" log we used to see.
+                    _POST_OPEN_SETTLE = 0.3                 # seconds
+
+                    def __init__(self, index_or_path, *args, **kwargs):
+                        import sys as _sys
+                        super().__init__()
+                        # ── Windows: force DSHOW for integer indices ──────────
+                        # MSMF (the OpenCV default on Windows) is flaky on
+                        # consumer laptop / cheap USB cameras and produces
+                        # error -1072873821 (MF_E_HW_MFT_FAILED_START_STREAMING)
+                        # in a flap loop. DSHOW (DirectShow) is older but far
+                        # more reliable for this hardware class. Only override
+                        # when the LLM didn't pass an explicit backend.
+                        if (_sys.platform == "win32"
+                                and isinstance(index_or_path, int)
+                                and not args
+                                and "apiPreference" not in kwargs):
+                            try:
+                                args = (_real_cv2.CAP_DSHOW,)
+                                logger.info(
+                                    f"[{_agent_name_for_shim}] Windows detected — "
+                                    f"forcing CAP_DSHOW backend for camera index "
+                                    f"{index_or_path} (more reliable than MSMF)"
+                                )
+                            except Exception:
+                                pass
+                        self._index  = index_or_path
+                        self._args   = args
+                        self._kwargs = kwargs
+                        self._do_open()
+
+                    def read(self):
+                        # Return the probe frame captured during open verification
+                        # so the first cap.read() in process() is not lost.
+                        if hasattr(self, '_probe_frame') and self._probe_frame is not None:
+                            frame, self._probe_frame = self._probe_frame, None
+                            return True, frame
+                        return super().read()
+
+                    def _do_open(self):
+                        for attempt, delay in enumerate(
+                            [0.0] + self._RETRY_DELAYS, start=1
+                        ):
+                            if delay:
+                                import time as _t
+                                # Release before retrying so MSMF frees the device
+                                try:
+                                    super().release()
+                                except Exception:
+                                    pass
+                                logger.info(
+                                    f"[{_agent_name_for_shim}] Camera open retry "
+                                    f"{attempt}/{len(self._RETRY_DELAYS)+1} "
+                                    f"— waiting {delay:.0f}s for OS to release device"
+                                )
+                                _t.sleep(delay)
+
+                            super().open(self._index, *self._args, **self._kwargs)
+                            if not super().isOpened():
+                                continue
+
+                            # Give the source reader time to start streaming
+                            # before the probe. MSMF/DSHOW both need a beat
+                            # after isOpened() returns True; probing immediately
+                            # produces -1072873821 even when the device is fine.
+                            import time as _t
+                            _t.sleep(self._POST_OPEN_SETTLE)
+
+                            # Verify we can actually grab a frame — MSMF sometimes
+                            # reports isOpened()=True but then immediately errors.
+                            # Use read() and stash the probe frame on the instance so
+                            # the first cap.read() in process() doesn't get an empty
+                            # result (grab() is destructive and has no unread()).
+                            ok, probe = super().read()
+                            if ok and probe is not None:
+                                self._probe_frame = probe
+                                logger.info(
+                                    f"[{_agent_name_for_shim}] Camera opened successfully "
+                                    f"on attempt {attempt}"
+                                )
+                                return   # success
+
+                            logger.warning(
+                                f"[{_agent_name_for_shim}] Camera opened but read() failed "
+                                f"on attempt {attempt} — device may not be fully released yet"
+                            )
+
+                        logger.error(
+                            f"[{_agent_name_for_shim}] Camera could not be opened after "
+                            f"{len(self._RETRY_DELAYS)+1} attempts"
+                        )
+
+                # Wrap in a module proxy so `import cv2` inside agent code still works,
+                # and `cv2.VideoCapture` transparently becomes the resilient version.
+                _cv2_shim = _types.ModuleType("cv2")
+                _cv2_shim.__dict__.update(_real_cv2.__dict__)
+                _cv2_shim.VideoCapture = _ResilientVideoCapture
+                self._ns["cv2"] = _cv2_shim
+
+            except ImportError:
+                pass  # cv2 not installed — no shim needed
 
         try:
             exec(compile(clean, f"<{self.name}>", "exec"), self._ns)
@@ -1373,6 +1527,16 @@ class _AgentAPI:
                 except Exception as e:
                     logger.warning(f"[{actor.name}] MQTT subscribe error: {e} — retrying in 5s")
                     await asyncio.sleep(5)
+
+        # Deduplication guard — prevent double-subscription if setup() is called
+        # more than once (e.g. on reconnect). Same topic+callback combo gets one listener.
+        if not hasattr(actor, '_subscribed_topics'):
+            actor._subscribed_topics: set = set()
+        sub_key = (topic, id(callback))
+        if sub_key in actor._subscribed_topics:
+            logger.debug(f"[{actor.name}] Already subscribed to {topic} — skipping duplicate")
+            return _AWAITABLE_NONE
+        actor._subscribed_topics.add(sub_key)
 
         task = asyncio.create_task(_listener())
         actor._tasks.append(task)
