@@ -4286,15 +4286,21 @@ class MainActor(LLMAgent):
         target = self._registry.find_by_name(target_name)
         if not target:
             return None
+        task_id = uuid.uuid4().hex
         future = asyncio.get_event_loop().create_future()
-        self._result_futures[task] = future
-        await self.send(target.actor_id, MessageType.TASK, {"text": task, "reply_to": self.actor_id})
+        self._result_futures[task_id] = future
+        await self.send(target.actor_id, MessageType.TASK, {
+            "text": task,
+            "_task_id": task_id,
+            "task": task_id,
+            "reply_to": self.actor_id,
+        })
         try:
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             return None
         finally:
-            self._result_futures.pop(task, None)
+            self._result_futures.pop(task_id, None)
 
     async def list_agents(self) -> list[dict]:
         if not self._registry:
