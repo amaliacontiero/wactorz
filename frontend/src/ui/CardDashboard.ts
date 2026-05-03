@@ -41,7 +41,8 @@ function canDirectMessage(agent: {
   return !agent.protected;
 }
 
-function nameFromWid(raw: string): string {
+function nameFromWid(raw: string | undefined): string {
+  if (!raw) return "";
   const m = raw.match(/Z-(.+?)(?:-[0-9a-f]{6})?$/i);
   return m?.[1] ?? raw;
 }

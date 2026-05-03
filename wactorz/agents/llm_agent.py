@@ -505,7 +505,10 @@ class LLMAgent(Actor):
             if not isinstance(content, str):
                 content = str(content)
             if content.strip():
-                clean.append({"role": role, "content": content})
+                entry: dict = {"role": role, "content": content}
+                if "ts" in m and isinstance(m["ts"], (int, float)):
+                    entry["ts"] = m["ts"]
+                clean.append(entry)
         self._conversation_history = clean[-self.max_history:]
         self._history_summary = self.recall("history_summary", "")
 
@@ -621,14 +624,19 @@ class LLMAgent(Actor):
 
         start = time.time()
         try:
-            self._conversation_history.append({"role": "user", "content": task_text})
+            self._conversation_history.append({"role": "user", "content": task_text, "ts": start})
 
+            safe_history = [
+                {"role": m["role"], "content": str(m["content"])}
+                for m in self._conversation_history[-self.max_history:]
+                if isinstance(m, dict) and m.get("role") in ("user", "assistant")
+            ]
             response, _usage = await self.llm.complete(
-                messages=self._conversation_history[-self.max_history:],
+                messages=safe_history,
                 system=self.system_prompt,
             )
 
-            self._conversation_history.append({"role": "assistant", "content": response})
+            self._conversation_history.append({"role": "assistant", "content": response, "ts": time.time()})
             self.metrics.tasks_completed += 1
             duration = time.time() - start
 
@@ -669,7 +677,7 @@ class LLMAgent(Actor):
             return "[No LLM configured]"
 
         self.metrics.messages_processed += 1
-        self._conversation_history.append({"role": "user", "content": user_message})
+        self._conversation_history.append({"role": "user", "content": user_message, "ts": time.time()})
 
         safe_history = [
             {"role": m["role"], "content": str(m["content"])}
@@ -682,7 +690,7 @@ class LLMAgent(Actor):
             messages=safe_history,
             system=self.system_prompt,
         )
-        self._conversation_history.append({"role": "assistant", "content": response})
+        self._conversation_history.append({"role": "assistant", "content": response, "ts": time.time()})
         await self._maybe_summarize()
         self.persist("conversation_history", self._conversation_history)
 
@@ -716,7 +724,7 @@ class LLMAgent(Actor):
             return
 
         self.metrics.messages_processed += 1
-        self._conversation_history.append({"role": "user", "content": user_message})
+        self._conversation_history.append({"role": "user", "content": user_message, "ts": time.time()})
 
         full_text = []
         usage     = {}
@@ -739,7 +747,7 @@ class LLMAgent(Actor):
                 yield chunk
 
         response = "".join(full_text)
-        self._conversation_history.append({"role": "assistant", "content": response})
+        self._conversation_history.append({"role": "assistant", "content": response, "ts": time.time()})
         await self._maybe_summarize()
         self.persist("conversation_history", self._conversation_history)
 

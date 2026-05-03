@@ -675,9 +675,9 @@ class PersistenceAPI:
 def migrate_from_pickle(state_dir: str, db: WactorzDB, redis: RedisStore):
     """
     One-time migration: read existing .pkl files and write to SQLite/Redis.
-    Run once on first startup after upgrading.
 
-    Safe to run multiple times — uses INSERT OR REPLACE.
+    Safe to run multiple times — only migrates keys that do NOT already exist
+    in SQLite/Redis, so newer data is never overwritten by stale pickle data.
     """
     base = Path(state_dir)
     if not base.exists():
@@ -704,6 +704,9 @@ def migrate_from_pickle(state_dir: str, db: WactorzDB, redis: RedisStore):
 
         for key, value in state.items():
             if key in _SQLITE_KEYS:
+                # Skip if SQLite already has this key — SQLite wins over stale pickle
+                if db.kv_get(agent_name, key) is not None:
+                    continue
                 db.kv_set(agent_name, key, value)
                 migrated += 1
             elif key in _REDIS_KEYS:

@@ -119,6 +119,8 @@ const feed = new ActivityFeed();
 
 const wsChat = new WSChatClient();
 let liveSyncInFlight = false;
+// Track agent IDs that were explicitly deleted so MQTT "stopped" events don't re-add them.
+const deletedAgentIds = new Set<string>();
 
 function syncAgentViews(): void {
   chatPanel.updateAgentList(scene.getAgents());
@@ -188,6 +190,7 @@ ioManager.setWSClient(wsChat);
 // This is how pause/stop/resume state changes reach the UI without polling.
 wsChat.onStatePatch((agents, deletedId) => {
   if (deletedId) {
+    deletedAgentIds.add(deletedId);
     scene.removeAgent(deletedId);
   }
   agents.forEach((a) => {
@@ -282,22 +285,24 @@ mqtt.on("alert", (payload) => {
   scene.onAlert(payload);
   hud.flashAlert(payload.severity);
   refreshStats();
+  const alertMsg = payload.message ?? "";
+  const alertAgent = payload.agentName ?? "system";
   pushFeed({
     type: payload.severity === "error" ? "alert-error" : "alert-warning",
-    label: payload.message,
-    agentName: payload.agentName,
+    label: alertMsg,
+    agentName: alertAgent,
     timestamp: payload.timestampMs,
   });
   const isError = payload.severity === "error" || payload.severity === "critical";
   toast.show({
     type: isError ? "alert-error" : "alert-warning",
-    title: payload.agentName,
-    message: payload.message.slice(0, 120),
+    title: alertAgent,
+    message: alertMsg.slice(0, 120),
   });
   if (isError) {
-    desktopNotify(`⚠ ${payload.agentName}`, payload.message.slice(0, 100));
+    desktopNotify(`⚠ ${alertAgent}`, alertMsg.slice(0, 100));
   } else {
-    desktopNotifyBackground(payload.agentName, payload.message.slice(0, 100));
+    desktopNotifyBackground(alertAgent, alertMsg.slice(0, 100));
   }
 });
 
@@ -320,17 +325,19 @@ mqtt.on("chat", (msg) => {
 });
 
 mqtt.on("status", (payload) => {
-  scene.addOrUpdateAgent({
-    id: payload.agentId,
-    name: payload.agentName,
-    state: payload.state,
-    protected: payload.protected ?? false,
-    messagesProcessed: payload.messagesProcessed,
-  });
-  syncAgentViews();
-  chatPanel.updateAgentStatus(payload.agentId, String(payload.state));
+  if (!deletedAgentIds.has(payload.agentId)) {
+    scene.addOrUpdateAgent({
+      id: payload.agentId,
+      name: payload.agentName,
+      state: payload.state,
+      protected: payload.protected ?? false,
+      messagesProcessed: payload.messagesProcessed,
+    });
+    syncAgentViews();
+    chatPanel.updateAgentStatus(payload.agentId, String(payload.state));
+  }
   if (payload.state === "stopped") {
-    window.setTimeout(() => refreshLiveActors(), 1000);
+    window.setTimeout(() => refreshLiveActors(), 200);
     pushFeed({
       type: "stopped",
       label: "stopped",
