@@ -161,6 +161,33 @@ services:
     networks:
       - wactorz-net
 
+  # ── InfluxDB 2.x (optional — chat log + time-series) ────────────────────────
+  # docker compose --profile influx up -d              (standalone)
+  # docker compose --profile python-full --profile influx up -d  (with Python)
+  influxdb:
+    profiles: [influx]
+    image: influxdb:2.7
+    container_name: wactorz-influxdb
+    restart: unless-stopped
+    ports:
+      - "${INFLUX_EXTERNAL_PORT:-8086}:8086"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: adminadmin
+      DOCKER_INFLUXDB_INIT_ORG: "${INFLUX_ORG:-wactorz}"
+      DOCKER_INFLUXDB_INIT_BUCKET: "${INFLUX_BUCKET:-wactorz}"
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: "${INFLUX_TOKEN:-wactorz-dev-token}"
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+    networks:
+      - wactorz-net
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   # ── Apache Jena Fuseki ───────────────────────────────────────────────────────
   # docker compose --profile python-full up -d
   # docker compose --profile full up -d
@@ -295,4 +322,5 @@ volumes:
   mosquitto-data:
   mosquitto-logs:
   fuseki-data:
+  influxdb-data:
   prometheus-data:

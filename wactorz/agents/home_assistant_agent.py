@@ -376,12 +376,15 @@ class HomeAssistantAgent(LLMAgent):
     async def chat(self, user_message: str) -> str:
         """Direct entry point used by CLI when addressing this agent."""
         import time as _t
-        self._conversation_history.append({"role": "user", "content": user_message, "ts": _t.time()})
+        ts_user = _t.time()
+        self._conversation_history.append({"role": "user", "content": user_message, "ts": ts_user})
         result = await self._process(user_message)
         response = str(result.get("result", ""))
-        self._conversation_history.append({"role": "assistant", "content": response, "ts": _t.time()})
+        ts_reply = _t.time()
+        self._conversation_history.append({"role": "assistant", "content": response, "ts": ts_reply})
         await self._maybe_summarize()
         self.persist("conversation_history", self._conversation_history)
+        self._log_chat_turn(user_message, response, ts_user=ts_user, ts_reply=ts_reply)
         return response
     
     async def chat_stream(self, user_message: str):

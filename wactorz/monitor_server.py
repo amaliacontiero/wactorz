@@ -1032,6 +1032,29 @@ async def actor_history_handler(request):
     return web.json_response(visible)
 
 
+async def chat_log_handler(request):
+    """GET /api/chats — query the persistent chat_log table.
+
+    Query params:
+      agent   — filter by agent name
+      role    — filter by role (user | assistant)
+      since   — Unix timestamp float, only return rows newer than this
+      limit   — max rows to return (default 200, max 1000)
+    """
+    from aiohttp import web
+    if db is None:
+        return web.json_response([], status=200)
+    try:
+        agent  = request.rel_url.query.get("agent")
+        role   = request.rel_url.query.get("role")
+        since  = float(request.rel_url.query["since"]) if "since" in request.rel_url.query else None
+        limit  = min(int(request.rel_url.query.get("limit", 200)), 1000)
+        rows   = db.query_chat_log(agent_name=agent, role=role, since=since, limit=limit)
+        return web.json_response(rows)
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+
+
 async def config_handler(request):
     """Expose non-secret runtime config so the frontend can seed its defaults."""
     from aiohttp import web
@@ -1096,7 +1119,7 @@ async def feed_handler(request):
                         continue
                     items.append({
                         "type": "chat",
-                        "label": str(msg.get("content", ""))[:60],
+                        "label": str(msg.get("content", "")),
                         "agentName": agent_name,
                         "timestamp": i,  # order within the history; will be re-dated in frontend
                         "_seq": i,
@@ -1140,6 +1163,8 @@ async def main(exit_on_failure: bool = False):
     app.router.add_get("/actors/{actor_id}",             actor_handler)
     app.router.add_get("/api/actors/{actor_id}/history", actor_history_handler)
     app.router.add_get("/actors/{actor_id}/history",     actor_history_handler)
+    app.router.add_get("/api/chats",                     chat_log_handler)
+    app.router.add_get("/chats",                         chat_log_handler)
     
     app.router.add_get("/api/config",            config_handler)
     app.router.add_get("/config",                config_handler)

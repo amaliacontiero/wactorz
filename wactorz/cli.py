@@ -347,8 +347,10 @@ async def app():
 
     system, main_actor, _db = await build_system(args)
 
-    from wactorz.monitoring.otel import setup_otel, shutdown_otel
+    from wactorz.monitoring.otel   import setup_otel, shutdown_otel
+    from wactorz.monitoring.influx import setup_influx, shutdown_influx
     setup_otel(lambda: system.registry)
+    setup_influx()
 
     if not args.no_monitor:
         await _start_web_ui(
@@ -402,6 +404,7 @@ async def app():
         logger.error(f"System error: {exc}", exc_info=True)
     finally:
         shutdown_otel()
+        shutdown_influx()
         await system.stop_all()
 
 def main():

@@ -163,6 +163,19 @@ CREATE TABLE IF NOT EXISTS actuations (
 
 CREATE INDEX IF NOT EXISTS idx_actuation_ts     ON actuations (ts);
 CREATE INDEX IF NOT EXISTS idx_actuation_entity ON actuations (entity_id, ts);
+
+-- Chat log — append-only transcript of every LLM conversation turn
+CREATE TABLE IF NOT EXISTS chat_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts         REAL    NOT NULL,             -- Unix timestamp of the turn
+    agent_name TEXT    NOT NULL,             -- agent that produced/received the message
+    role       TEXT    NOT NULL,             -- 'user' | 'assistant'
+    content    TEXT    NOT NULL,
+    session_id TEXT    DEFAULT ''            -- optional grouping (actor_id or custom)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_log_ts    ON chat_log (ts);
+CREATE INDEX IF NOT EXISTS idx_chat_log_agent ON chat_log (agent_name, ts);
 """
 
 
@@ -254,6 +267,40 @@ class WactorzDB:
             except (json.JSONDecodeError, TypeError):
                 result[row[0]] = row[1]
         return result
+
+    # ── Chat log ───────────────────────────────────────────────────────────
+
+    def log_chat(self, agent_name: str, role: str, content: str,
+                 ts: Optional[float] = None, session_id: str = "") -> None:
+        """Append one conversation turn to the persistent chat log."""
+        self._conn.execute(
+            "INSERT INTO chat_log (ts, agent_name, role, content, session_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (ts or time.time(), agent_name, role, content, session_id),
+        )
+        self._conn.commit()
+
+    def query_chat_log(self, agent_name: Optional[str] = None, role: Optional[str] = None,
+                       since: Optional[float] = None, limit: int = 200) -> list:
+        """Return chat log rows as dicts, newest-last."""
+        clauses, params = [], []
+        if agent_name:
+            clauses.append("agent_name = ?"); params.append(agent_name)
+        if role:
+            clauses.append("role = ?"); params.append(role)
+        if since:
+            clauses.append("ts >= ?"); params.append(since)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = self._conn.execute(
+            f"SELECT id, ts, agent_name, role, content, session_id "
+            f"FROM chat_log {where} ORDER BY ts DESC LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+        return [
+            {"id": r[0], "ts": r[1], "agent": r[2], "role": r[3],
+             "content": r[4], "session_id": r[5]}
+            for r in reversed(rows)     # reverse so oldest-first in response
+        ]
 
     # ── Time-series writes ─────────────────────────────────────────────────
 

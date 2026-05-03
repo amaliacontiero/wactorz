@@ -9,6 +9,7 @@ import time
 from typing import Any, Optional
 
 from ..core.actor import Actor, Message, MessageType
+from ..core.persistence import get_db
 
 logger = logging.getLogger(__name__)
 
@@ -692,7 +693,8 @@ class LLMAgent(Actor):
             return "[No LLM configured]"
 
         self.metrics.messages_processed += 1
-        self._conversation_history.append({"role": "user", "content": user_message, "ts": time.time()})
+        ts_user = time.time()
+        self._conversation_history.append({"role": "user", "content": user_message, "ts": ts_user})
 
         safe_history = [
             {"role": m["role"], "content": str(m["content"])}
@@ -705,9 +707,11 @@ class LLMAgent(Actor):
             messages=safe_history,
             system=self.system_prompt,
         )
-        self._conversation_history.append({"role": "assistant", "content": response, "ts": time.time()})
+        ts_reply = time.time()
+        self._conversation_history.append({"role": "assistant", "content": response, "ts": ts_reply})
         await self._maybe_summarize()
         self.persist("conversation_history", self._conversation_history)
+        self._log_chat_turn(user_message, response, ts_user=ts_user, ts_reply=ts_reply)
 
         # Accumulate token usage and cost
         self.total_input_tokens  += usage.get("input_tokens", 0)
@@ -789,6 +793,23 @@ class LLMAgent(Actor):
 
         # Yield final usage dict so caller can log it
         yield usage
+
+    def _log_chat_turn(self, user_msg: str, reply: str,
+                       ts_user: float, ts_reply: float) -> None:
+        """Write both halves of a turn to SQLite chat_log and InfluxDB (if enabled)."""
+        db = get_db()
+        if db is not None:
+            try:
+                db.log_chat(self.name, "user",      user_msg, ts=ts_user,  session_id=self.actor_id)
+                db.log_chat(self.name, "assistant",  reply,   ts=ts_reply, session_id=self.actor_id)
+            except Exception as exc:
+                logger.debug("[%s] chat_log SQLite write failed: %s", self.name, exc)
+        try:
+            from ..monitoring.influx import write_chat as _influx_chat
+            _influx_chat(self.name, "user",      user_msg, ts=ts_user)
+            _influx_chat(self.name, "assistant",  reply,   ts=ts_reply)
+        except Exception as exc:
+            logger.debug("[%s] chat_log InfluxDB write failed: %s", self.name, exc)
 
     def _persist_cost(self):
         """Write lifetime cost to durable SQLite storage after each exchange."""

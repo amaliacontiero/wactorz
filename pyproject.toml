@@ -51,6 +51,9 @@ otel      = [
     "opentelemetry-sdk>=1.20.0",
     "opentelemetry-exporter-otlp-proto-http>=1.20.0",
 ]
+influx    = [
+    "influxdb-client>=1.44.0",
+]
 docs      = [
     "markdown>=3.10.2",
     "pygments>=2.19.2",
