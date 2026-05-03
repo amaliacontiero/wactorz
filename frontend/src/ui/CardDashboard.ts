@@ -1908,8 +1908,9 @@ export class CardDashboard {
     body.className = "af-body";
 
     const iobar = this._buildIobar();
+    const bottomNav = this._buildBottomNav();
 
-    root.append(header, body, iobar);
+    root.append(header, body, bottomNav, iobar);
     return root;
   }
 
@@ -2593,6 +2594,72 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
     section.appendChild(actions);
 
     return section;
+  }
+
+  // ── Private: Bottom nav (mobile) ─────────────────────────────────────────
+
+  private _buildBottomNav(): HTMLElement {
+    const nav = document.createElement("nav");
+    nav.className = "af-bottom-nav";
+
+    const primary: { key: View; icon: string; label: string }[] = [
+      { key: "overview", icon: "◫", label: "Overview" },
+      { key: "feed",     icon: "≡", label: "Feed"     },
+      { key: "chat",     icon: "💬", label: "Chat"     },
+      { key: "ha",       icon: "🏠", label: "Devices"  },
+    ];
+
+    primary.forEach(({ key, icon, label }) => {
+      const btn = document.createElement("button");
+      btn.className = `af-view-btn af-bottom-tab${key === this.view ? " active" : ""}`;
+      btn.dataset["view"] = key;
+      btn.innerHTML = `<span class="af-bottom-tab-icon">${icon}</span><span class="af-bottom-tab-label">${label}</span>`;
+      btn.addEventListener("click", () => {
+        sheet.classList.remove("open");
+        this._setView(key);
+      });
+      nav.appendChild(btn);
+    });
+
+    // ⋯ More → slide-up sheet for Graph + Settings
+    const moreBtn = document.createElement("button");
+    moreBtn.className = "af-bottom-tab af-bottom-more-btn";
+    moreBtn.innerHTML = `<span class="af-bottom-tab-icon">⋯</span><span class="af-bottom-tab-label">More</span>`;
+
+    const sheet = document.createElement("div");
+    sheet.className = "af-bottom-sheet";
+
+    const secondary: { key: View; icon: string; label: string }[] = [
+      { key: "fuseki",   icon: "⬡", label: "Graph"    },
+      { key: "settings", icon: "⚙", label: "Settings" },
+    ];
+    secondary.forEach(({ key, icon, label }) => {
+      const btn = document.createElement("button");
+      btn.className = `af-view-btn af-bottom-tab af-bottom-sheet-btn${key === this.view ? " active" : ""}`;
+      btn.dataset["view"] = key;
+      btn.innerHTML = `<span class="af-bottom-tab-icon">${icon}</span><span class="af-bottom-tab-label">${label}</span>`;
+      btn.addEventListener("click", () => {
+        sheet.classList.remove("open");
+        moreBtn.classList.remove("active");
+        this._setView(key);
+      });
+      sheet.appendChild(btn);
+    });
+
+    moreBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      sheet.classList.toggle("open");
+      moreBtn.classList.toggle("active", sheet.classList.contains("open"));
+    });
+    document.addEventListener("click", () => {
+      sheet.classList.remove("open");
+      moreBtn.classList.remove("active");
+    });
+
+    nav.appendChild(moreBtn);
+    nav.appendChild(sheet);
+
+    return nav;
   }
 
   // ── Private: Audio popover ────────────────────────────────────────────────

@@ -677,6 +677,42 @@
         height: 4px; border-radius: 4px;
       }
 
+      /* ── Bottom nav (mobile only — hidden on desktop) ───────────────────── */
+      .af-bottom-nav {
+        display: none; /* shown via @media below */
+        flex-shrink: 0; position: relative;
+        background: rgba(4,8,20,0.97);
+        border-top: 1px solid rgba(37,99,235,0.2);
+        padding-bottom: env(safe-area-inset-bottom, 0px);
+      }
+      .af-bottom-tab {
+        flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 3px; padding: 8px 4px; min-height: 52px;
+        background: none; border: none; cursor: pointer;
+        color: rgba(255,255,255,0.45); transition: color 0.15s;
+        font-family: inherit;
+      }
+      .af-bottom-tab.active { color: #93c5fd; }
+      .af-bottom-tab:active { opacity: 0.7; }
+      .af-bottom-tab-icon  { font-size: 18px; line-height: 1; }
+      .af-bottom-tab-label { font-size: 10px; letter-spacing: 0.02em; }
+      .af-bottom-sheet {
+        display: none; flex-direction: column; gap: 2px;
+        position: absolute; bottom: 100%; right: 0;
+        min-width: 140px; padding: 8px;
+        background: rgba(8,14,30,0.97);
+        border: 1px solid rgba(37,99,235,0.2);
+        border-radius: 12px 12px 0 0;
+        backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      }
+      .af-bottom-sheet-btn {
+        flex: unset; flex-direction: row; justify-content: flex-start;
+        gap: 10px; padding: 10px 14px; border-radius: 8px; width: 100%;
+        font-size: 13px;
+      }
+      .af-bottom-sheet-btn .af-bottom-tab-label { font-size: 13px; }
+      .af-bottom-sheet-btn:hover { background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.9); }
+
       .af-body { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
 
       /* ── Overview ── */
@@ -1282,15 +1318,18 @@
         /* Activity feed: full width */
         #activity-feed { width: 100%; border-left: none; border-bottom-left-radius: 0; }
 
-        /* ── CardDashboard header nav: scrollable strip ── */
+        /* ── CardDashboard header: logo + conn + 🔊 only ── */
         .af-header { padding: 6px 10px; gap: 6px; }
         .af-header-center { display: none; }
-        .af-header-right {
-          overflow-x: auto; -webkit-overflow-scrolling: touch;
-          scrollbar-width: none; flex-shrink: 1; min-width: 0;
-        }
-        .af-header-right::-webkit-scrollbar { display: none; }
-        .af-view-btn { padding: 5px 10px; font-size: 11px; white-space: nowrap; flex-shrink: 0; min-height: 34px; }
+        /* Hide all nav view buttons from header on mobile — bottom nav takes over */
+        .af-header-right .af-view-btn[data-view] { display: none; }
+        /* Keep 🔊 audio button visible */
+        .af-header-right .af-view-btn:not([data-view]) { display: inline-flex; }
+
+        /* ── Bottom nav ─────────────────────────────────────────────────────── */
+        .af-bottom-nav { display: flex; }
+        .af-bottom-sheet { display: none; }
+        .af-bottom-sheet.open { display: flex; }
 
         /* ── Chat view (CardDashboard) — sidebar/pane toggle ── */
         .af-chat { flex-direction: column; }
@@ -1912,7 +1951,10 @@
     <script>
       if ("serviceWorker" in navigator) {
         window.addEventListener("load", () => {
-          navigator.serviceWorker.register("./sw.js").catch(() => {});
+          navigator.serviceWorker.register("./sw.js").then(
+            r  => console.debug("[sw] registered, scope:", r.scope),
+            e  => console.warn("[sw] not registered (needs HTTPS or localhost):", e.message),
+          );
         });
       }
     </script>
