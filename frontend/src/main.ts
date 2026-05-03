@@ -171,7 +171,7 @@ wsChat.onChat((content, from, timestampMs) => {
   scene.onChat(from, "user");
   const feedItem = {
     type: "chat" as const,
-    label: content.slice(0, 60),
+    label: content,
     agentName: from,
     timestamp: timestampMs,
   };
@@ -340,7 +340,7 @@ mqtt.on("chat", (msg) => {
   );
   pushFeed({
     type: "chat",
-    label: `→ ${msg.to}: ${msg.content.slice(0, 40)}${msg.content.length > 40 ? "…" : ""}`,
+    label: `→ ${msg.to}: ${msg.content}`,
     agentName: msg.from,
     timestamp: msg.timestampMs,
   });
@@ -427,7 +427,7 @@ mqtt.on("logs", (payload) => {
   if (!msg) return;
   pushFeed({
     type: "chat",
-    label: msg.slice(0, 80),
+    label: msg,
     agentName: payload.agentName,
     timestamp: Date.now(),
   });
