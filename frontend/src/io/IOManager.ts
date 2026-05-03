@@ -60,7 +60,7 @@ export class IOManager {
       if (text) tts.notify(text);
       _feedPush({
         type: "chat",
-        label: text?.slice(0, 60) ?? "(stream)",
+        label: text ?? "(stream)",
         agentName: from,
         timestamp: Date.now(),
       });
@@ -95,7 +95,7 @@ export class IOManager {
     tts.checkUserIntent(text);
     _feedPush({
       type: "chat",
-      label: text.slice(0, 60),
+      label: text,
       agentName: "user",
       timestamp: msg.timestampMs,
     });
