@@ -132,6 +132,10 @@ pub struct Args {
     #[arg(long, default_value = "static/app", env = "STATIC_DIR")]
     pub static_dir: String,
 
+    /// Root data directory for actor SQLite DBs and the global chat log
+    #[arg(long, default_value = "state", env = "DATA_DIR")]
+    pub data_dir: String,
+
     /// MQTT output topic for the HA state-bridge agent
     #[arg(long, default_value = "ha/state", env = "HA_STATE_BRIDGE_OUTPUT_TOPIC")]
     pub ha_state_bridge_topic: String,
@@ -651,6 +655,7 @@ async fn main() -> Result<()> {
         mqtt_ws_port: args.mqtt_ws_port,
         llm_provider: args.llm_provider.clone(),
         llm_model: args.llm_model.clone(),
+        data_dir: args.data_dir.clone(),
     };
     // Merge WsBridge (/ws + /mqtt) onto the same port as REST so the frontend
     // can reach all endpoints via window.location.host — same as Python's
