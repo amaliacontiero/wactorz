@@ -4,6 +4,7 @@ import '../client.dart' as client_lib;
 import '../theme.dart';
 import 'agents.dart';
 import 'feed.dart';
+import 'global_chat.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -16,7 +17,8 @@ class _HomeScreenState extends State<HomeScreen> {
   int _tab = 0;
 
   static const _tabs = [
-    _Tab(icon: Icons.hub_outlined,    label: 'Agents', body: AgentsTab()),
+    _Tab(icon: Icons.hub_outlined,      label: 'Agents', body: AgentsTab()),
+    _Tab(icon: Icons.chat_bubble_outline, label: 'Chat', body: GlobalChatTab()),
     _Tab(icon: Icons.list_alt_outlined, label: 'Feed',   body: FeedTab()),
   ];
 
