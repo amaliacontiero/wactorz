@@ -173,6 +173,18 @@ class WactorzClient extends ChangeNotifier {
     }
   }
 
+  void disconnect() {
+    _reconnectTimer?.cancel();
+    _ws?.sink.close();
+    _ws = null;
+    _baseUrl = '';
+    agents = [];
+    feed = [];
+    totalCostUsd = 0;
+    totalMessages = 0;
+    _setConn(WsState.disconnected);
+  }
+
   Future<bool> resumeAgent(String agentId) async {
     try {
       final uri = Uri.parse('$_baseUrl/api/actors/$agentId/resume');

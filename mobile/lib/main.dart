@@ -6,6 +6,11 @@ import 'theme.dart';
 import 'screens/setup.dart';
 import 'screens/home.dart';
 
+Future<void> clearSavedUrl() async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.remove('server_url');
+}
+
 void main() {
   runApp(
     ChangeNotifierProvider(
@@ -62,6 +67,13 @@ class _GateState extends State<_Gate> {
     setState(() => _hasUrl = true);
   }
 
+  Future<void> _onDisconnect() async {
+    await clearSavedUrl();
+    if (!mounted) return;
+    context.read<WactorzClient>().disconnect();
+    setState(() => _hasUrl = false);
+  }
+
   @override
   Widget build(BuildContext context) {
     if (!_ready) {
@@ -72,6 +84,6 @@ class _GateState extends State<_Gate> {
     if (!_hasUrl) {
       return SetupScreen(onConnect: _onConnect);
     }
-    return const HomeScreen();
+    return HomeScreen(onDisconnect: _onDisconnect);
   }
 }

@@ -7,7 +7,8 @@ import 'feed.dart';
 import 'global_chat.dart';
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+  final VoidCallback onDisconnect;
+  const HomeScreen({super.key, required this.onDisconnect});
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -55,7 +56,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           IconButton(
             icon: const Icon(Icons.logout_outlined, size: 20),
-            tooltip: 'Disconnect',
+            tooltip: 'Change server',
             onPressed: () => _confirmDisconnect(context),
           ),
         ],
@@ -95,8 +96,7 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     );
     if (ok == true && context.mounted) {
-      // Pop back to setup — main.dart will handle re-gating
-      Navigator.of(context).popUntil((r) => r.isFirst);
+      widget.onDisconnect();
     }
   }
 }
