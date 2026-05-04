@@ -24,7 +24,7 @@ class AgentsTab extends StatelessWidget {
         ),
         Expanded(
           child: agents.isEmpty
-              ? const _Empty()
+              ? _Empty(connected: client.connState == WsState.connected)
               : RefreshIndicator(
                   color: kPrimary,
                   backgroundColor: kCard,
@@ -136,19 +136,30 @@ class _Stat extends StatelessWidget {
 }
 
 class _Empty extends StatelessWidget {
-  const _Empty();
+  final bool connected;
+  const _Empty({required this.connected});
 
   @override
   Widget build(BuildContext context) => Center(
     child: Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        const Icon(Icons.hub_outlined, color: kMuted, size: 48),
+        Icon(
+          connected ? Icons.hub_outlined : Icons.wifi_off_outlined,
+          color: kMuted,
+          size: 48,
+        ),
         const SizedBox(height: 12),
-        Text('No agents', style: Theme.of(context).textTheme.bodyMedium!.copyWith(color: kMuted)),
+        Text(
+          connected ? 'No agents running' : 'Connecting...',
+          style: Theme.of(context).textTheme.bodyMedium!.copyWith(color: kMuted),
+        ),
         const SizedBox(height: 4),
         Text(
-          'Waiting for connection...',
+          connected
+              ? 'Start actors on the backend to see them here.\nCheck MQTT broker is reachable.'
+              : 'Waiting for WebSocket handshake...',
+          textAlign: TextAlign.center,
           style: Theme.of(context).textTheme.bodySmall!.copyWith(color: kMuted),
         ),
       ],

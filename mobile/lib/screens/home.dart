@@ -35,7 +35,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ],
         ),
         actions: [
-          if (conn == client_lib.ConnectionState.connected)
+          if (conn == client_lib.WsState.connected)
             Padding(
               padding: const EdgeInsets.only(right: 4),
               child: Row(
@@ -107,15 +107,15 @@ class _Tab {
 }
 
 class _ConnBadge extends StatelessWidget {
-  final client_lib.ConnectionState state;
+  final client_lib.WsState state;
   const _ConnBadge({required this.state});
 
   @override
   Widget build(BuildContext context) {
     final (color, label) = switch (state) {
-      client_lib.ConnectionState.connected    => (kGreen, 'live'),
-      client_lib.ConnectionState.connecting   => (kAmber, 'connecting'),
-      client_lib.ConnectionState.disconnected => (kRed,   'offline'),
+      client_lib.WsState.connected    => (kGreen, 'live'),
+      client_lib.WsState.connecting   => (kAmber, 'connecting'),
+      client_lib.WsState.disconnected => (kRed,   'offline'),
     };
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),

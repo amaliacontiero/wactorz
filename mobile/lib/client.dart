@@ -5,14 +5,14 @@ import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'models.dart';
 
-enum ConnectionState { disconnected, connecting, connected }
+enum WsState { disconnected, connecting, connected }
 
 class WactorzClient extends ChangeNotifier {
   String _baseUrl = '';
   String get baseUrl => _baseUrl;
 
-  ConnectionState _connState = ConnectionState.disconnected;
-  ConnectionState get connState => _connState;
+  WsState _connState = WsState.disconnected;
+  WsState get connState => _connState;
 
   List<Agent> agents = [];
   List<FeedEvent> feed = [];
@@ -36,7 +36,7 @@ class WactorzClient extends ChangeNotifier {
 
   void _connect() {
     if (_disposed || _baseUrl.isEmpty) return;
-    _setConn(ConnectionState.connecting);
+    _setConn(WsState.connecting);
 
     final wsUrl = _baseUrl
         .replaceFirst('https://', 'wss://')
@@ -44,12 +44,15 @@ class WactorzClient extends ChangeNotifier {
 
     try {
       _ws = WebSocketChannel.connect(Uri.parse('$wsUrl/ws'));
-      _setConn(ConnectionState.connected);
+      _setConn(WsState.connected);
 
       _ws!.stream.listen(
         (raw) {
-          final msg = jsonDecode(raw as String) as Map<String, dynamic>;
-          _handleMessage(msg);
+          try {
+            if (raw is! String) return;
+            final msg = jsonDecode(raw) as Map<String, dynamic>;
+            _handleMessage(msg);
+          } catch (_) {}
         },
         onDone: _scheduleReconnect,
         onError: (_) => _scheduleReconnect(),
@@ -103,12 +106,12 @@ class WactorzClient extends ChangeNotifier {
 
   void _scheduleReconnect() {
     if (_disposed) return;
-    _setConn(ConnectionState.disconnected);
+    _setConn(WsState.disconnected);
     _reconnectTimer?.cancel();
     _reconnectTimer = Timer(const Duration(seconds: 3), _connect);
   }
 
-  void _setConn(ConnectionState s) {
+  void _setConn(WsState s) {
     _connState = s;
     notifyListeners();
   }
