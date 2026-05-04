@@ -25,10 +25,13 @@ use axum::{
 };
 use serde::Deserialize;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
+use crate::ws::MonitorState;
 use wactorz_core::ActorSystem;
 use wactorz_core::message::{ActorCommand, Message};
 
@@ -55,6 +58,8 @@ pub struct AppState {
     pub system: ActorSystem,
     pub config: RuntimeConfig,
     pub http: reqwest::Client,
+    /// Live monitor state shared with WsBridge — used for GET /api/feed.
+    pub monitor: Option<Arc<Mutex<MonitorState>>>,
 }
 
 /// JSON body for POST /actors/{id}/message
@@ -94,6 +99,7 @@ impl RestServer {
                 system,
                 config,
                 http: reqwest::Client::new(),
+                monitor: None,
             },
             addr,
             static_dir,
@@ -104,6 +110,12 @@ impl RestServer {
     /// Merge a WsBridge router so /ws and /mqtt are served on the same port.
     pub fn with_ws(mut self, ws_router: axum::Router) -> Self {
         self.ws_router = Some(ws_router);
+        self
+    }
+
+    /// Share the WsBridge's live MonitorState so /api/feed can read it.
+    pub fn with_monitor(mut self, monitor: Arc<Mutex<MonitorState>>) -> Self {
+        self.state.monitor = Some(monitor);
         self
     }
 
@@ -134,6 +146,10 @@ impl RestServer {
             .route("/api/actors/{id}/metrics", get(get_metrics_handler))
             .route("/api/fuseki/{dataset}/sparql", post(fuseki_sparql_handler))
             .route("/api/fuseki/{dataset}/update", post(fuseki_update_handler))
+            // Python-compatible aliases
+            .route("/api/feed", get(feed_handler))
+            .route("/feed", get(feed_handler))
+            .route("/config", get(config_handler))
             .with_state(self.state.clone());
 
         // Merge /ws and /mqtt onto the same port so the frontend can reach
@@ -397,6 +413,31 @@ async fn fuseki_proxy_request(
                 })),
             )
                 .into_response()
+        }
+    }
+}
+
+async fn feed_handler(State(state): State<AppState>) -> impl IntoResponse {
+    match &state.monitor {
+        None => Json(serde_json::json!([])).into_response(),
+        Some(arc) => {
+            let monitor = arc.lock().await;
+            let mut feed: Vec<serde_json::Value> = monitor
+                .log_feed
+                .iter()
+                .take(50)
+                .enumerate()
+                .map(|(i, item)| {
+                    let mut obj = item.clone();
+                    if let Some(map) = obj.as_object_mut() {
+                        map.entry("_seq").or_insert_with(|| serde_json::json!(i));
+                    }
+                    obj
+                })
+                .collect();
+            // Chronological order (oldest first), matching Python's feed_handler
+            feed.reverse();
+            Json(feed).into_response()
         }
     }
 }

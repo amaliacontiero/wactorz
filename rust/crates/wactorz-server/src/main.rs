@@ -662,9 +662,13 @@ async fn main() -> Result<()> {
         args.mqtt_host,
         args.mqtt_ws_port,
     );
+    ws_bridge.spawn_monitor_task();
+    let monitor_arc = ws_bridge.monitor_arc();
+    let ws_router = ws_bridge.router();
     tokio::spawn(async move {
         let server = RestServer::new(system_for_rest, rest_addr, runtime_cfg, static_dir)
-            .with_ws(ws_bridge.router());
+            .with_ws(ws_router)
+            .with_monitor(monitor_arc);
         if let Err(e) = server.serve().await {
             tracing::error!("REST+WS error: {e}");
         }

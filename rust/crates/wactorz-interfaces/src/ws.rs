@@ -83,7 +83,7 @@ pub struct MonitorState {
     agents: HashMap<String, Value>,
     nodes: HashMap<String, Value>,
     alerts: Vec<Value>,
-    log_feed: Vec<Value>,
+    pub log_feed: Vec<Value>,
     system_health: Value,
 }
 
@@ -470,6 +470,11 @@ impl WsBridge {
                 }
             }
         });
+    }
+
+    /// Shared reference to the live monitor state (for REST /api/feed).
+    pub fn monitor_arc(&self) -> Arc<Mutex<MonitorState>> {
+        Arc::clone(&self.state.monitor)
     }
 
     /// Build the axum `Router` with `/ws` and `/mqtt` routes.
