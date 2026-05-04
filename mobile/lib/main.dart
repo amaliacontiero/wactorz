@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'client.dart';
+import 'services/tts_service.dart';
 import 'theme.dart';
 import 'screens/setup.dart';
 import 'screens/home.dart';
@@ -13,8 +14,11 @@ Future<void> clearSavedUrl() async {
 
 void main() {
   runApp(
-    ChangeNotifierProvider(
-      create: (_) => WactorzClient(),
+    MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (_) => WactorzClient()),
+        ChangeNotifierProvider(create: (_) => TtsService()),
+      ],
       child: const WactorzApp(),
     ),
   );
@@ -55,7 +59,10 @@ class _GateState extends State<_Gate> {
     final prefs = await SharedPreferences.getInstance();
     final url = prefs.getString('server_url') ?? '';
     if (url.isNotEmpty && url != 'http://') {
-      if (mounted) context.read<WactorzClient>().configure(url);
+      if (mounted) {
+        context.read<WactorzClient>().configure(url);
+        context.read<TtsService>().setBaseUrl(url);
+      }
       setState(() { _ready = true; _hasUrl = true; });
     } else {
       setState(() { _ready = true; _hasUrl = false; });
@@ -64,6 +71,7 @@ class _GateState extends State<_Gate> {
 
   void _onConnect(String url) {
     context.read<WactorzClient>().configure(url);
+    context.read<TtsService>().setBaseUrl(url);
     setState(() => _hasUrl = true);
   }
 
@@ -71,6 +79,7 @@ class _GateState extends State<_Gate> {
     await clearSavedUrl();
     if (!mounted) return;
     context.read<WactorzClient>().disconnect();
+    context.read<TtsService>().stop();
     setState(() => _hasUrl = false);
   }
 

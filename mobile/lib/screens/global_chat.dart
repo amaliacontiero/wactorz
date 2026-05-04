@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import 'package:timeago/timeago.dart' as timeago;
 import '../client.dart';
 import '../models.dart';
+import '../services/tts_service.dart';
 import '../theme.dart';
 import '../widgets/voice_button.dart';
 
@@ -58,11 +59,13 @@ class _GlobalChatTabState extends State<GlobalChatTab> {
         _scrollToBottom();
       case 'stream_end':
         if (_streaming && _messages.isNotEmpty) {
+          final finalMsg = _messages.last;
           setState(() {
-            final last = _messages.removeLast();
-            _messages.add(last.copyWith(isStreaming: false));
+            _messages.removeLast();
+            _messages.add(finalMsg.copyWith(isStreaming: false));
             _streaming = false;
           });
+          context.read<TtsService>().speak(finalMsg.content);
         }
       case 'chat':
         final from = msg['from'] as String? ?? '';
@@ -106,6 +109,7 @@ class _GlobalChatTabState extends State<GlobalChatTab> {
   @override
   Widget build(BuildContext context) {
     final client = context.watch<WactorzClient>();
+    final tts = context.watch<TtsService>();
     final connected = client.connState == WsState.connected;
 
     return Column(
@@ -121,6 +125,30 @@ class _GlobalChatTabState extends State<GlobalChatTab> {
               textAlign: TextAlign.center,
             ),
           ),
+        Container(
+          color: kSurface,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              if (tts.playing)
+                const Padding(
+                  padding: EdgeInsets.only(right: 8),
+                  child: SizedBox(
+                    width: 12, height: 12,
+                    child: CircularProgressIndicator(strokeWidth: 1.5, color: kCyan),
+                  ),
+                ),
+              IconButton(
+                onPressed: tts.toggle,
+                icon: Icon(tts.enabled ? Icons.volume_up : Icons.volume_off_outlined),
+                color: tts.enabled ? kCyan : kMuted,
+                iconSize: 20,
+                tooltip: tts.enabled ? 'TTS on — tap to mute' : 'TTS off — tap to enable',
+              ),
+            ],
+          ),
+        ),
         Expanded(
           child: _messages.isEmpty
               ? const _EmptyHint()

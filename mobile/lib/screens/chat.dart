@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import 'package:timeago/timeago.dart' as timeago;
 import '../client.dart';
 import '../models.dart';
+import '../services/tts_service.dart';
 import '../theme.dart';
 import '../widgets/voice_button.dart';
 
@@ -73,11 +74,13 @@ class _ChatScreenState extends State<ChatScreen> {
         _scrollToBottom();
       case 'stream_end':
         if (_streaming && _messages.isNotEmpty) {
+          final finalMsg = _messages.last;
           setState(() {
-            final last = _messages.removeLast();
-            _messages.add(last.copyWith(isStreaming: false));
+            _messages.removeLast();
+            _messages.add(finalMsg.copyWith(isStreaming: false));
             _streaming = false;
           });
+          if (mounted) context.read<TtsService>().speak(finalMsg.content);
         }
       case 'chat':
         final from = msg['from'] as String?;
@@ -120,6 +123,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final tts = context.watch<TtsService>();
     return Scaffold(
       appBar: AppBar(
         title: Row(
@@ -136,6 +140,24 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ],
         ),
+        actions: [
+          if (tts.playing)
+            const Padding(
+              padding: EdgeInsets.only(right: 4),
+              child: Center(
+                child: SizedBox(
+                  width: 14, height: 14,
+                  child: CircularProgressIndicator(strokeWidth: 1.5, color: kCyan),
+                ),
+              ),
+            ),
+          IconButton(
+            onPressed: tts.toggle,
+            icon: Icon(tts.enabled ? Icons.volume_up : Icons.volume_off_outlined),
+            color: tts.enabled ? kCyan : kMuted,
+            tooltip: tts.enabled ? 'TTS on' : 'TTS off',
+          ),
+        ],
       ),
       body: Column(
         children: [
