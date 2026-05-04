@@ -27,18 +27,33 @@ class AgentsTab extends StatelessWidget {
               ? _Empty(connected: client.connState == WsState.connected)
               : LayoutBuilder(
                   builder: (ctx, constraints) {
-                    final cols = constraints.maxWidth < 480 ? 1 : 2;
+                    final wide = constraints.maxWidth >= 480;
+                    if (!wide) {
+                      // Single column: ListView so cards size to content
+                      return RefreshIndicator(
+                        color: kPrimary,
+                        backgroundColor: kCard,
+                        onRefresh: () async {},
+                        child: ListView.separated(
+                          padding: const EdgeInsets.all(12),
+                          itemCount: agents.length,
+                          separatorBuilder: (_, idx) => const SizedBox(height: 10),
+                          itemBuilder: (ctx, i) => _AgentCardWrapper(agent: agents[i]),
+                        ),
+                      );
+                    }
+                    // Two columns: GridView with fixed aspect ratio
                     return RefreshIndicator(
                       color: kPrimary,
                       backgroundColor: kCard,
                       onRefresh: () async {},
                       child: GridView.builder(
                         padding: const EdgeInsets.all(12),
-                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: cols,
+                        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: 2,
                           crossAxisSpacing: 10,
                           mainAxisSpacing: 10,
-                          childAspectRatio: cols == 1 ? 2.8 : 1.15,
+                          childAspectRatio: 1.4,
                         ),
                         itemCount: agents.length,
                         itemBuilder: (ctx, i) => _AgentCardWrapper(agent: agents[i]),

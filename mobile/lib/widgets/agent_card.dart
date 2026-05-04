@@ -53,6 +53,7 @@ class AgentCard extends StatelessWidget {
         padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
             Row(
               children: [
@@ -92,9 +93,8 @@ class AgentCard extends StatelessWidget {
                 color: kAmber,
               ),
             ],
-            const Spacer(),
+            const SizedBox(height: 8),
             Container(
-              constraints: const BoxConstraints(maxWidth: double.infinity),
               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
               decoration: BoxDecoration(
                 color: color.withAlpha(color == kMuted ? 0 : 20),
