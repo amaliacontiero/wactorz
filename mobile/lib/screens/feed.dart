@@ -132,12 +132,18 @@ class FeedTile extends StatelessWidget {
               children: [
                 Row(
                   children: [
-                    Text(
-                      event.agentName.isEmpty ? event.agentId.substring(0, 8) : event.agentName,
-                      style: const TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        color: kText,
+                    Flexible(
+                      child: Text(
+                        event.agentName.isEmpty
+                            ? event.agentId.substring(0, 8)
+                            : event.agentName,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: kText,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                        maxLines: 1,
                       ),
                     ),
                     const SizedBox(width: 6),
