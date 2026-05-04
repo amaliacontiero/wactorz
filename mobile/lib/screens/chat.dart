@@ -6,6 +6,7 @@ import 'package:timeago/timeago.dart' as timeago;
 import '../client.dart';
 import '../models.dart';
 import '../theme.dart';
+import '../widgets/voice_button.dart';
 
 class ChatScreen extends StatefulWidget {
   final Agent agent;
@@ -247,52 +248,89 @@ class ChatBubble extends StatelessWidget {
   }
 }
 
-class _InputBar extends StatelessWidget {
+class _InputBar extends StatefulWidget {
   final TextEditingController controller;
   final VoidCallback onSend;
   const _InputBar({required this.controller, required this.onSend});
 
   @override
+  State<_InputBar> createState() => _InputBarState();
+}
+
+class _InputBarState extends State<_InputBar> {
+  bool _voiceMode = false;
+
+  void _onVoiceResult(String text) {
+    widget.controller.text = text;
+    setState(() => _voiceMode = false);
+    widget.onSend();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return Container(
+    final bottom = MediaQuery.of(context).viewInsets.bottom;
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 250),
       color: kSurface,
-      padding: EdgeInsets.fromLTRB(
-        12,
-        8,
-        12,
-        8 + MediaQuery.of(context).viewInsets.bottom,
-      ),
+      padding: EdgeInsets.fromLTRB(12, _voiceMode ? 24 : 8, 12, (_voiceMode ? 24 : 8) + bottom),
       child: SafeArea(
         top: false,
-        child: Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: controller,
-                minLines: 1,
-                maxLines: 5,
-                textCapitalization: TextCapitalization.sentences,
-                onSubmitted: (_) => onSend(),
-                decoration: const InputDecoration(
-                  hintText: 'Message...',
-                  contentPadding: EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                ),
+        child: _voiceMode
+            ? Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  VoiceButton(onResult: _onVoiceResult),
+                  const SizedBox(height: 12),
+                  TextButton.icon(
+                    onPressed: () => setState(() => _voiceMode = false),
+                    icon: const Icon(Icons.keyboard_outlined, size: 16),
+                    label: const Text('Switch to keyboard'),
+                    style: TextButton.styleFrom(foregroundColor: kMuted),
+                  ),
+                ],
+              )
+            : Row(
+                children: [
+                  IconButton(
+                    onPressed: () => setState(() => _voiceMode = true),
+                    icon: const Icon(Icons.mic_none_outlined),
+                    color: kMuted,
+                    tooltip: 'Voice input',
+                    style: IconButton.styleFrom(
+                      backgroundColor: kCard,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextField(
+                      controller: widget.controller,
+                      minLines: 1,
+                      maxLines: 5,
+                      textCapitalization: TextCapitalization.sentences,
+                      onSubmitted: (_) => widget.onSend(),
+                      decoration: const InputDecoration(
+                        hintText: 'Message...',
+                        contentPadding: EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton(
+                    onPressed: widget.onSend,
+                    icon: const Icon(Icons.send_rounded),
+                    color: kPrimary,
+                    style: IconButton.styleFrom(
+                      backgroundColor: kPrimary.withAlpha(20),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                  ),
+                ],
               ),
-            ),
-            const SizedBox(width: 8),
-            IconButton(
-              onPressed: onSend,
-              icon: const Icon(Icons.send_rounded),
-              color: kPrimary,
-              style: IconButton.styleFrom(
-                backgroundColor: kPrimary.withAlpha(20),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10),
-                ),
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }
