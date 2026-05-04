@@ -1005,6 +1005,130 @@ def _actor_cost(actor, ag: dict):
     return None
 
 
+async def health_handler(request):
+    from aiohttp import web
+    return web.json_response({"status": "ok"})
+
+
+async def send_message_handler(request):
+    from aiohttp import web
+    actor_id = request.match_info["actor_id"]
+    if registry is None:
+        return web.json_response({"error": "registry not available"}, status=503)
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    content = data.get("content", "").strip()
+    if not content:
+        return web.json_response({"error": "content required"}, status=400)
+    actor = registry.get(actor_id) or registry.find_by_name(actor_id)
+    if actor is None:
+        return web.json_response({"error": "actor not found"}, status=404)
+    asyncio.create_task(_route_chat(content, lambda t: None))
+    return web.json_response({"status": "sent"})
+
+
+async def delete_actor_handler(request):
+    from aiohttp import web
+    actor_id = request.match_info["actor_id"]
+    if registry is None:
+        return web.json_response({"error": "registry not available"}, status=503)
+    actor = registry.get(actor_id) or registry.find_by_name(actor_id)
+    if actor is None:
+        return web.json_response({"error": "actor not found"}, status=404)
+    if getattr(actor, "protected", False):
+        return web.json_response({"error": "actor is protected"}, status=403)
+    if mqtt_client_ref:
+        await mqtt_client_ref.publish(
+            f"agents/{actor_id}/commands",
+            json.dumps({"command": "stop", "sender": "api", "timestamp": time.time()}),
+        )
+    return web.Response(status=200, text="stopping")
+
+
+async def pause_actor_handler(request):
+    from aiohttp import web
+    actor_id = request.match_info["actor_id"]
+    if registry is None:
+        return web.json_response({"error": "registry not available"}, status=503)
+    actor = registry.get(actor_id) or registry.find_by_name(actor_id)
+    if actor is None:
+        return web.json_response({"error": "actor not found"}, status=404)
+    if getattr(actor, "protected", False):
+        return web.json_response({"error": "actor is protected"}, status=403)
+    if mqtt_client_ref:
+        await mqtt_client_ref.publish(
+            f"agents/{actor_id}/commands",
+            json.dumps({"command": "pause", "sender": "api", "timestamp": time.time()}),
+        )
+    return web.json_response({"status": "pausing"})
+
+
+async def resume_actor_handler(request):
+    from aiohttp import web
+    actor_id = request.match_info["actor_id"]
+    if registry is None:
+        return web.json_response({"error": "registry not available"}, status=503)
+    actor = registry.get(actor_id) or registry.find_by_name(actor_id)
+    if actor is None:
+        return web.json_response({"error": "actor not found"}, status=404)
+    if getattr(actor, "protected", False):
+        return web.json_response({"error": "actor is protected"}, status=403)
+    if mqtt_client_ref:
+        await mqtt_client_ref.publish(
+            f"agents/{actor_id}/commands",
+            json.dumps({"command": "resume", "sender": "api", "timestamp": time.time()}),
+        )
+    return web.json_response({"status": "resuming"})
+
+
+async def actor_metrics_handler(request):
+    from aiohttp import web
+    actor_id = request.match_info["actor_id"]
+    ag = state["agents"].get(actor_id)
+    actor = None
+    if registry is not None:
+        actor = registry.get(actor_id) or registry.find_by_name(actor_id)
+    if actor is None and ag is None:
+        return web.json_response({"error": "actor not found"}, status=404)
+    metrics_obj = getattr(actor, "metrics", None) if actor else None
+    return web.json_response({
+        "messages_processed": (
+            getattr(metrics_obj, "messages_processed", None)
+            or (ag.get("messages_processed") if ag else None)
+            or 0
+        ),
+        "cpu":      ag.get("cpu")       if ag else None,
+        "mem":      ag.get("mem")       if ag else None,
+        "task":     ag.get("task")      if ag else None,
+        "cost_usd": (
+            getattr(actor, "total_cost_usd", None)
+            or (ag.get("cost_usd") if ag else None)
+        ),
+    })
+
+
+async def rest_chat_handler(request):
+    """POST /chat — fire-and-forget a message to a named agent."""
+    from aiohttp import web
+    if registry is None:
+        return web.json_response({"error": "registry not available"}, status=503)
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    message    = data.get("message", "").strip()
+    agent_name = data.get("agent_name", "main-actor")
+    if not message:
+        return web.json_response({"error": "message required"}, status=400)
+    target = registry.find_by_name(agent_name)
+    if target is None:
+        return web.json_response({"error": f"agent '{agent_name}' not found"}, status=404)
+    asyncio.create_task(_route_chat(message, lambda t: None))
+    return web.json_response({"status": "sent", "agent": agent_name})
+
+
 async def actors_handler(request):
     from aiohttp import web
     # Prefer the live registry (injected by cli.py) — actor objects carry the
@@ -1303,20 +1427,40 @@ async def main(exit_on_failure: bool = False):
 
     app = web.Application()
     app.router.add_get("/",                      index_handler)
+    app.router.add_get("/health",                health_handler)
     app.router.add_get("/ws",                    ws_handler)
     app.router.add_get("/mqtt",                  mqtt_proxy_handler)
-    
-    # Add both /api and non-api versions to satisfy the frontend's different fetch patterns
+
+    # Actor collection
     app.router.add_get("/api/actors",            actors_handler)
     app.router.add_get("/actors",                actors_handler)
-    app.router.add_get("/api/actors/{actor_id}",         actor_handler)
-    app.router.add_get("/actors/{actor_id}",             actor_handler)
-    app.router.add_get("/api/actors/{actor_id}/history", actor_history_handler)
-    app.router.add_get("/actors/{actor_id}/history",     actor_history_handler)
-    app.router.add_get("/api/chats",                     chat_log_handler)
-    app.router.add_get("/chats",                         chat_log_handler)
-    app.router.add_get("/api/tts/voices",                tts_voices_handler)
-    app.router.add_get("/api/tts",                       tts_handler)
+
+    # Actor control — sub-routes must be registered before /{actor_id} catch-all
+    app.router.add_post("/api/actors/{actor_id}/message", send_message_handler)
+    app.router.add_post("/actors/{actor_id}/message",     send_message_handler)
+    app.router.add_post("/api/actors/{actor_id}/pause",   pause_actor_handler)
+    app.router.add_post("/actors/{actor_id}/pause",       pause_actor_handler)
+    app.router.add_post("/api/actors/{actor_id}/resume",  resume_actor_handler)
+    app.router.add_post("/actors/{actor_id}/resume",      resume_actor_handler)
+    app.router.add_get("/api/actors/{actor_id}/metrics",  actor_metrics_handler)
+    app.router.add_get("/actors/{actor_id}/metrics",      actor_metrics_handler)
+    app.router.add_get("/api/actors/{actor_id}/history",  actor_history_handler)
+    app.router.add_get("/actors/{actor_id}/history",      actor_history_handler)
+
+    # Actor CRUD
+    app.router.add_get("/api/actors/{actor_id}",          actor_handler)
+    app.router.add_get("/actors/{actor_id}",              actor_handler)
+    app.router.add_delete("/api/actors/{actor_id}",       delete_actor_handler)
+    app.router.add_delete("/actors/{actor_id}",           delete_actor_handler)
+
+    # Chat (REST fire-and-forget)
+    app.router.add_post("/api/chat",             rest_chat_handler)
+    app.router.add_post("/chat",                 rest_chat_handler)
+
+    app.router.add_get("/api/chats",             chat_log_handler)
+    app.router.add_get("/chats",                 chat_log_handler)
+    app.router.add_get("/api/tts/voices",        tts_voices_handler)
+    app.router.add_get("/api/tts",               tts_handler)
     app.on_startup.append(_warm_tts_voices)
 
     app.router.add_get("/api/config",            config_handler)
