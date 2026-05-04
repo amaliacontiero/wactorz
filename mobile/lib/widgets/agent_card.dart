@@ -19,14 +19,23 @@ class AgentCard extends StatelessWidget {
     required this.onTogglePause,
   });
 
-  Color get _glowColor {
+  Color get _stateColor {
     if (agent.isRunning) return kGreen;
-    if (agent.isFailed) return kRed;
-    return Colors.transparent;
+    if (agent.isFailed)  return kRed;
+    if (agent.isPaused)  return kAmber;
+    return kMuted;
+  }
+
+  // Show first 8 chars if name looks like a UUID
+  String get _displayName {
+    final n = agent.name.isEmpty ? agent.id : agent.name;
+    final looksLikeUuid = RegExp(r'^[0-9a-f]{8}-').hasMatch(n);
+    return looksLikeUuid ? n.substring(0, 8) : n;
   }
 
   @override
   Widget build(BuildContext context) {
+    final color = _stateColor;
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
@@ -35,31 +44,30 @@ class AgentCard extends StatelessWidget {
           color: kCard,
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
-            color: agent.isRunning
-                ? kGreen.withAlpha(80)
-                : kBorder,
+            color: agent.isRunning ? kGreen.withAlpha(80) : kBorder,
           ),
           boxShadow: agent.isRunning
               ? [BoxShadow(color: kGreen.withAlpha(30), blurRadius: 12, spreadRadius: 1)]
               : null,
         ),
-        padding: const EdgeInsets.all(14),
+        padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
                 StatusDot(agent: agent),
-                const SizedBox(width: 8),
+                const SizedBox(width: 6),
                 Expanded(
                   child: Text(
-                    agent.name,
+                    _displayName,
                     style: const TextStyle(
                       fontWeight: FontWeight.w600,
                       fontSize: 13,
                       color: kText,
                     ),
                     overflow: TextOverflow.ellipsis,
+                    maxLines: 1,
                   ),
                 ),
                 _MoreMenu(
@@ -70,31 +78,34 @@ class AgentCard extends StatelessWidget {
                 ),
               ],
             ),
-            const SizedBox(height: 10),
+            const SizedBox(height: 8),
             _StatRow(
               icon: Icons.chat_bubble_outline,
-              label: '${agent.messagesProcessed}',
+              label: '${agent.messagesProcessed} msgs',
               color: kPrimary,
             ),
             if (agent.costUsd > 0) ...[
-              const SizedBox(height: 4),
+              const SizedBox(height: 3),
               _StatRow(
                 icon: Icons.attach_money,
                 label: '\$${agent.costUsd.toStringAsFixed(4)}',
                 color: kAmber,
               ),
             ],
-            const SizedBox(height: 8),
+            const Spacer(),
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+              constraints: const BoxConstraints(maxWidth: double.infinity),
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
               decoration: BoxDecoration(
-                color: _glowColor.withAlpha(20),
+                color: color.withAlpha(color == kMuted ? 0 : 20),
                 borderRadius: BorderRadius.circular(4),
-                border: Border.all(color: _glowColor.withAlpha(60)),
+                border: Border.all(color: color.withAlpha(60)),
               ),
               child: Text(
-                agent.state,
-                style: TextStyle(fontSize: 10, color: _glowColor == Colors.transparent ? kMuted : _glowColor),
+                agent.state.replaceAll('_', ' '),
+                style: TextStyle(fontSize: 10, color: color),
+                overflow: TextOverflow.ellipsis,
+                maxLines: 1,
               ),
             ),
           ],
@@ -115,7 +126,14 @@ class _StatRow extends StatelessWidget {
     children: [
       Icon(icon, size: 12, color: color),
       const SizedBox(width: 4),
-      Text(label, style: TextStyle(fontSize: 11, color: color)),
+      Expanded(
+        child: Text(
+          label,
+          style: TextStyle(fontSize: 11, color: color),
+          overflow: TextOverflow.ellipsis,
+          maxLines: 1,
+        ),
+      ),
     ],
   );
 }
@@ -145,8 +163,8 @@ class _MoreMenu extends StatelessWidget {
       ),
       onSelected: (v) async {
         switch (v) {
-          case 'chat':   onChat();
-          case 'pause':  await onTogglePause();
+          case 'chat':  onChat();
+          case 'pause': await onTogglePause();
           case 'delete':
             final ok = await showDialog<bool>(
               context: context,

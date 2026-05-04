@@ -25,21 +25,26 @@ class AgentsTab extends StatelessWidget {
         Expanded(
           child: agents.isEmpty
               ? _Empty(connected: client.connState == WsState.connected)
-              : RefreshIndicator(
-                  color: kPrimary,
-                  backgroundColor: kCard,
-                  onRefresh: () async {},
-                  child: GridView.builder(
-                    padding: const EdgeInsets.all(12),
-                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: 2,
-                      crossAxisSpacing: 10,
-                      mainAxisSpacing: 10,
-                      childAspectRatio: 1.1,
-                    ),
-                    itemCount: agents.length,
-                    itemBuilder: (ctx, i) => _AgentCardWrapper(agent: agents[i]),
-                  ),
+              : LayoutBuilder(
+                  builder: (ctx, constraints) {
+                    final cols = constraints.maxWidth < 480 ? 1 : 2;
+                    return RefreshIndicator(
+                      color: kPrimary,
+                      backgroundColor: kCard,
+                      onRefresh: () async {},
+                      child: GridView.builder(
+                        padding: const EdgeInsets.all(12),
+                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: cols,
+                          crossAxisSpacing: 10,
+                          mainAxisSpacing: 10,
+                          childAspectRatio: cols == 1 ? 2.8 : 1.15,
+                        ),
+                        itemCount: agents.length,
+                        itemBuilder: (ctx, i) => _AgentCardWrapper(agent: agents[i]),
+                      ),
+                    );
+                  },
                 ),
         ),
       ],
