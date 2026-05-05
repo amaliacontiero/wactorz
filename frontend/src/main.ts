@@ -21,6 +21,7 @@ import { MentionPopup } from "./ui/MentionPopup";
 import { VoiceInput } from "./io/VoiceInput";
 import { IOManager } from "./io/IOManager";
 import { WSChatClient } from "./io/WSChatClient";
+import type { LogFeedItem } from "./io/WSChatClient";
 import { tts } from "./io/TTSManager";
 import { SettingsPanel } from "./ui/SettingsPanel";
 import { desktopNotifyBackground, desktopNotify, clearUnreadBadge, initNotifications } from "./io/DesktopNotify";
@@ -232,6 +233,66 @@ wsChat.connect(`${_wsBase}/ws`);
 refreshLiveActors();
 window.setInterval(refreshLiveActors, 15000);
 
+// ── WS log_feed → Activity Feed ───────────────────────────────────────────────
+// The server embeds its in-memory log_feed (spawned/status/logs/alerts) in
+// every state-patch.  We use this as a reliable secondary path so MQTT events
+// appear in the feed even when the direct Mosquitto WebSocket is unavailable.
+
+let _logFeedMaxTs = 0;
+let _mqttLive = false;
+
+function _mapLogFeedItem(item: LogFeedItem): Parameters<typeof pushFeed>[0] | null {
+  const agentId = item.agent_id ?? "";
+  const agentName = item.name ?? item.agentName ?? (nameFromWid(agentId) || agentId.slice(0, 8) || "system");
+  const ts = (item.timestamp ?? 0) * 1000;
+
+  switch (item.type) {
+    case "spawned":
+      return {
+        type: "spawn",
+        label: `spawned (${item.agentType ?? item.agent_type ?? "agent"})`,
+        agentName: item.agentName ?? item.name ?? agentName,
+        timestamp: ts,
+      };
+    case "completed":
+      return { type: "spawn", label: "task completed", agentName, timestamp: ts };
+    case "log": {
+      const msg = item.message ?? item.text ?? "";
+      if (!msg) return null;
+      return { type: "chat", label: msg, agentName, timestamp: ts };
+    }
+    case "status": {
+      const st = (item.status as Record<string, unknown> | undefined)?.["state"] as string | undefined;
+      if (st === "stopped") return { type: "stopped", label: "stopped", agentName, timestamp: ts };
+      return null;
+    }
+    case "alert": {
+      const isError = item.severity === "error" || item.severity === "critical";
+      return {
+        type: isError ? "alert-error" : "alert-warning",
+        label: item.message ?? "",
+        agentName: item.name ?? agentName,
+        timestamp: ts,
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+wsChat.onLogFeed((items) => {
+  // Direct MQTT is live — it delivers these events already; skip to avoid duplicates.
+  if (_mqttLive) return;
+  const newItems = items.filter((item) => (item.timestamp ?? 0) > _logFeedMaxTs);
+  if (!newItems.length) return;
+  _logFeedMaxTs = Math.max(...newItems.map((i) => i.timestamp ?? 0));
+  // items come newest-first; push oldest-first so the feed stays chronological
+  [...newItems].reverse().forEach((item) => {
+    const mapped = _mapLogFeedItem(item);
+    if (mapped) pushFeed(mapped);
+  });
+});
+
 // Seed the activity feed from SQLite chat_log so the feed panel isn't empty
 // after a server restart. The server returns real Unix timestamps (seconds);
 // convert to ms for the feed.
@@ -383,6 +444,7 @@ function refreshStats(): void {
 let seeded = false;
 
 mqtt.on("connected", () => {
+  _mqttLive = true;
   console.info("[Dashboard] MQTT connected");
   hud.setSystemHealth(true);
   document.dispatchEvent(
@@ -467,6 +529,7 @@ mqtt.on("coin", (payload) => {
 });
 
 mqtt.on("disconnected", () => {
+  _mqttLive = false;
   console.warn("[Dashboard] MQTT disconnected");
   hud.setSystemHealth(false);
   document.dispatchEvent(
