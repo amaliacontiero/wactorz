@@ -7,7 +7,7 @@
  *   - Everything else → network-first, fall back to cache
  */
 
-const CACHE = "wactorz-v1";
+const CACHE = "wactorz-v2";
 
 const NEVER_CACHE = ["/api/", "/ws", "/mqtt"];
 

@@ -542,24 +542,30 @@ mqtt.on("coin", (payload) => {
   });
 });
 
+// Only these domains produce meaningful on/off-style states worth showing in the feed.
+const _HA_FEED_DOMAINS = new Set([
+  "switch", "light", "fan", "input_boolean", "climate", "cover",
+  "media_player", "vacuum", "humidifier", "lock", "alarm_control_panel",
+]);
+
 // Dedup cache: prevents the same entity+state appearing twice within 5 s when
 // both the direct HAClient path and the MQTT agent path are active.
 const _recentHaEvents = new Map<string, number>();
 function _pushHaFeed(entityId: string, state: string, friendlyName: string): void {
+  const domain = entityId.split(".")[0] ?? "";
+  if (!_HA_FEED_DOMAINS.has(domain)) return;
+  // Skip raw numeric states (sensors leaking through) and "unknown"/"unavailable" spam
+  if (/^\d/.test(state) || state === "unknown") return;
+
   const key = `${entityId}:${state}`;
   const now = Date.now();
-  if (now - (_recentHaEvents.get(key) ?? 0) < 5000) {
-    console.log("[HA-feed] dedup skip:", key);
-    return;
-  }
+  if (now - (_recentHaEvents.get(key) ?? 0) < 5000) return;
   _recentHaEvents.set(key, now);
-  console.log("[HA-feed] pushing:", friendlyName, "→", state);
   pushFeed({ type: "health", label: `${friendlyName} → ${state}`, agentName: "ha", timestamp: now });
 }
 
 // Path 1: direct HA WebSocket via HAClient (always works when HA is configured in frontend)
 document.addEventListener("af-ha-state-change", (e) => {
-  console.log("[HA-feed] DOM event received:", (e as CustomEvent).detail);
   const { entityId, state, friendlyName } = (
     e as CustomEvent<{ entityId: string; state: string; friendlyName: string }>
   ).detail;
