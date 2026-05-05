@@ -312,6 +312,7 @@ wsChat.onLogFeed((items) => {
 fetch(`${_apiBase}/api/feed`)
   .then((r) => (r.ok ? r.json() : []))
   .then((items: { type: string; label: string; agentName: string; timestamp?: number }[]) => {
+    console.log("[feed] /api/feed seed:", items.length, "items");
     if (!items.length) return;
     items.forEach((item) => {
       pushFeed({
@@ -547,13 +548,18 @@ const _recentHaEvents = new Map<string, number>();
 function _pushHaFeed(entityId: string, state: string, friendlyName: string): void {
   const key = `${entityId}:${state}`;
   const now = Date.now();
-  if (now - (_recentHaEvents.get(key) ?? 0) < 5000) return;
+  if (now - (_recentHaEvents.get(key) ?? 0) < 5000) {
+    console.log("[HA-feed] dedup skip:", key);
+    return;
+  }
   _recentHaEvents.set(key, now);
+  console.log("[HA-feed] pushing:", friendlyName, "→", state);
   pushFeed({ type: "health", label: `${friendlyName} → ${state}`, agentName: "ha", timestamp: now });
 }
 
 // Path 1: direct HA WebSocket via HAClient (always works when HA is configured in frontend)
 document.addEventListener("af-ha-state-change", (e) => {
+  console.log("[HA-feed] DOM event received:", (e as CustomEvent).detail);
   const { entityId, state, friendlyName } = (
     e as CustomEvent<{ entityId: string; state: string; friendlyName: string }>
   ).detail;

@@ -88,6 +88,7 @@ export class HAClient {
         }
       } else if (data.type === "event" && data.event?.data?.new_state) {
         const newState = data.event.data.new_state as HAEntity;
+        console.log("[HA] state_changed:", newState.entity_id, "→", newState.state);
         const idx = this.entities.findIndex(
           (e) => e.entity_id === newState.entity_id,
         );
