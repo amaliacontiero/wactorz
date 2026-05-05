@@ -834,10 +834,8 @@ export class CardDashboard {
 
     const visible = this.feedItems.filter(
       (i) =>
-        !(
-          this.hideHeartbeats &&
-          (i.type === "heartbeat" || i.type === "health")
-        ) && !SYSTEM_AGENT_NAMES.has(nameFromWid(i.agentName)),
+        !(this.hideHeartbeats && i.type === "heartbeat") &&
+        !SYSTEM_AGENT_NAMES.has(nameFromWid(i.agentName)),
     );
     if (visible.length === 0) {
       const empty = document.createElement("div");
@@ -857,11 +855,7 @@ export class CardDashboard {
   private _appendFeedItemToView(item: FeedItem): void {
     const feed = this.root.querySelector<HTMLElement>("#af-feed-view");
     if (!feed) return;
-    if (
-      this.hideHeartbeats &&
-      (item.type === "heartbeat" || item.type === "health")
-    )
-      return;
+    if (this.hideHeartbeats && item.type === "heartbeat") return;
     if (SYSTEM_AGENT_NAMES.has(nameFromWid(item.agentName))) return;
     feed.querySelector(".af-feed-empty")?.remove();
     this._feedItemEl(feed, item);
