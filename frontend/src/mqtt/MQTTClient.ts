@@ -87,7 +87,7 @@ export class MQTTClient {
 
     this.client.on("connect", () => {
       console.info("[MQTT] Connected to", this.brokerUrl);
-      this.client?.subscribe(["agents/#", "nodes/#", "system/#"], { qos: 1 });
+      this.client?.subscribe("#", { qos: 1 });
       this.emit("connected", undefined);
     });
 

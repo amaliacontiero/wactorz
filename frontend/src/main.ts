@@ -541,6 +541,25 @@ mqtt.on("coin", (payload) => {
   });
 });
 
+mqtt.on("raw", ({ topic, payload }) => {
+  // HA state-change events: ha/state/{domain}/{entity_id}
+  if (!topic.startsWith("ha/")) return;
+  const p = payload as Record<string, unknown>;
+  const entityId = (p["entity_id"] as string | undefined) ?? topic.split("/").slice(-2).join(".");
+  const newState = p["new_state"] as Record<string, unknown> | undefined;
+  const state = (newState?.["state"] as string | undefined) ?? "";
+  const friendlyName = (
+    (newState?.["attributes"] as Record<string, unknown> | undefined)?.["friendly_name"] as string | undefined
+  ) ?? entityId;
+  if (!state) return;
+  pushFeed({
+    type: "health",
+    label: `${friendlyName} → ${state}`,
+    agentName: "ha",
+    timestamp: Date.now(),
+  });
+});
+
 mqtt.on("disconnected", () => {
   _mqttLive = false;
   console.warn("[Dashboard] MQTT disconnected");
