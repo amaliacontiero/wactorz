@@ -239,12 +239,13 @@ window.setInterval(refreshLiveActors, 15000);
 // appear in the feed even when the direct Mosquitto WebSocket is unavailable.
 
 let _logFeedMaxTs = 0;
+let _logFeedInitialized = false;
 let _mqttLive = false;
 
 function _mapLogFeedItem(item: LogFeedItem): Parameters<typeof pushFeed>[0] | null {
   const agentId = item.agent_id ?? "";
   const agentName = item.name ?? item.agentName ?? (nameFromWid(agentId) || agentId.slice(0, 8) || "system");
-  const ts = (item.timestamp ?? 0) * 1000;
+  const ts = item.timestamp ? item.timestamp * 1000 : Date.now();
 
   switch (item.type) {
     case "spawned":
@@ -281,12 +282,24 @@ function _mapLogFeedItem(item: LogFeedItem): Parameters<typeof pushFeed>[0] | nu
 }
 
 wsChat.onLogFeed((items) => {
+  if (!_logFeedInitialized) {
+    // First call is the full_snapshot baseline — set high-water mark without pushing.
+    _logFeedInitialized = true;
+    _logFeedMaxTs = items.length ? Math.max(...items.map((i) => i.timestamp ?? 0)) : 0;
+    return;
+  }
+
+  // Always advance the high-water mark so that when MQTT reconnects and later
+  // disconnects again, we don't replay the entire backlog.
+  const newItems = items.filter((item) => (item.timestamp ?? 0) > _logFeedMaxTs);
+  if (newItems.length) {
+    _logFeedMaxTs = Math.max(...newItems.map((i) => i.timestamp ?? 0));
+  }
+
   // Direct MQTT is live — it delivers these events already; skip to avoid duplicates.
   if (_mqttLive) return;
-  const newItems = items.filter((item) => (item.timestamp ?? 0) > _logFeedMaxTs);
-  if (!newItems.length) return;
-  _logFeedMaxTs = Math.max(...newItems.map((i) => i.timestamp ?? 0));
-  // items come newest-first; push oldest-first so the feed stays chronological
+
+  // Push new items oldest-first so the feed stays chronological.
   [...newItems].reverse().forEach((item) => {
     const mapped = _mapLogFeedItem(item);
     if (mapped) pushFeed(mapped);
