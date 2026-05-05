@@ -541,8 +541,27 @@ mqtt.on("coin", (payload) => {
   });
 });
 
+// Dedup cache: prevents the same entity+state appearing twice within 5 s when
+// both the direct HAClient path and the MQTT agent path are active.
+const _recentHaEvents = new Map<string, number>();
+function _pushHaFeed(entityId: string, state: string, friendlyName: string): void {
+  const key = `${entityId}:${state}`;
+  const now = Date.now();
+  if (now - (_recentHaEvents.get(key) ?? 0) < 5000) return;
+  _recentHaEvents.set(key, now);
+  pushFeed({ type: "health", label: `${friendlyName} → ${state}`, agentName: "ha", timestamp: now });
+}
+
+// Path 1: direct HA WebSocket via HAClient (always works when HA is configured in frontend)
+document.addEventListener("af-ha-state-change", (e) => {
+  const { entityId, state, friendlyName } = (
+    e as CustomEvent<{ entityId: string; state: string; friendlyName: string }>
+  ).detail;
+  _pushHaFeed(entityId, state, friendlyName);
+});
+
+// Path 2: ha-state-bridge-agent → MQTT ha/state/{domain}/{entity_id}
 mqtt.on("raw", ({ topic, payload }) => {
-  // HA state-change events: ha-state-bridge-agent publishes ha/state/{domain}/{entity_id}
   if (!topic.startsWith("ha/")) return;
   const p = payload as Record<string, unknown>;
   const entityId = (p["entity_id"] as string | undefined) ?? topic.split("/").slice(-2).join(".");
@@ -552,12 +571,7 @@ mqtt.on("raw", ({ topic, payload }) => {
     (newState?.["attributes"] as Record<string, unknown> | undefined)?.["friendly_name"] as string | undefined
   ) ?? entityId;
   if (!state) return;
-  pushFeed({
-    type: "health",
-    label: `${friendlyName} → ${state}`,
-    agentName: "ha",
-    timestamp: Date.now(),
-  });
+  _pushHaFeed(entityId, state, friendlyName);
 });
 
 mqtt.on("disconnected", () => {

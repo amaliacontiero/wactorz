@@ -97,6 +97,15 @@ export class HAClient {
           this.entities.push(newState);
         }
         this.onUpdate?.(this.entities);
+        document.dispatchEvent(
+          new CustomEvent("af-ha-state-change", {
+            detail: {
+              entityId: newState.entity_id,
+              state: newState.state,
+              friendlyName: newState.attributes?.friendly_name ?? newState.entity_id,
+            },
+          }),
+        );
       }
     };
 
