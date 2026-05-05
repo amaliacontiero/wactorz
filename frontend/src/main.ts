@@ -542,7 +542,7 @@ mqtt.on("coin", (payload) => {
 });
 
 mqtt.on("raw", ({ topic, payload }) => {
-  // HA state-change events: ha/state/{domain}/{entity_id}
+  // HA state-change events: ha-state-bridge-agent publishes ha/state/{domain}/{entity_id}
   if (!topic.startsWith("ha/")) return;
   const p = payload as Record<string, unknown>;
   const entityId = (p["entity_id"] as string | undefined) ?? topic.split("/").slice(-2).join(".");
