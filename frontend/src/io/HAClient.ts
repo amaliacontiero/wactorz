@@ -35,6 +35,10 @@ export class HAClient {
     private readonly token: string,
   ) {}
 
+  get connected(): boolean {
+    return this.ws !== null && this.ws.readyState !== WebSocket.CLOSED;
+  }
+
   connect(onUpdate: HAUpdateHandler): void {
     this.onUpdate = onUpdate;
     // Convert http[s]://... to ws[s]://...

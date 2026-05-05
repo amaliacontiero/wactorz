@@ -109,6 +109,7 @@ export class CardDashboard {
   private hideHeartbeats: boolean = true;
 
   private haClient: HAClient | null = null;
+  private _haEntities: import("../io/HAClient").HAEntity[] = [];
 
   // Streaming
   private _streamRow: HTMLElement | null = null;
@@ -179,12 +180,22 @@ export class CardDashboard {
     this._wireEvents();
     this._renderView();
     this.tickTimer = setInterval(() => this._refreshTimestamps(), 5000);
+    // Connect HA once for the session — stays connected across sub-view changes
+    // so state_changed events flow to the activity feed at all times.
+    if (this.haClient && !this.haClient.connected) {
+      this.haClient.connect((entities) => {
+        this._haEntities = entities;
+        if (this.view === "ha") this._renderHADevices(entities);
+      });
+    }
   }
 
   hide(): void {
     this.root.classList.remove("cd-visible");
     this._showFloatingUI();
     this._unwireEvents();
+    this.haClient?.disconnect();
+    this._haEntities = [];
     if (this.tickTimer) {
       clearInterval(this.tickTimer);
       this.tickTimer = null;
@@ -401,14 +412,7 @@ export class CardDashboard {
   // ── Private: floating UI ──────────────────────────────────────────────────
 
   private _hideFloatingUI(): void {
-    [
-      "hud",
-      "hud-stats",
-      "io-bar",
-      "chat-panel",
-      "activity-feed",
-      "feed-toggle",
-    ].forEach((id) => {
+    ["hud", "hud-stats", "io-bar", "chat-panel"].forEach((id) => {
       const el = document.getElementById(id);
       if (el) el.style.display = "none";
     });
@@ -419,6 +423,9 @@ export class CardDashboard {
       const el = document.getElementById(id);
       if (el) el.style.display = "";
     });
+    // Restore feed panel if it was open before the dashboard was shown
+    const feedPanel = document.getElementById("activity-feed");
+    if (feedPanel) feedPanel.style.display = "";
   }
 
   // ── Private: view rendering ───────────────────────────────────────────────
@@ -476,15 +483,20 @@ export class CardDashboard {
   }
 
   private _setView(v: View): void {
-    if (this.view === "ha" && v !== "ha") {
-      this.haClient?.disconnect();
-    }
     if (v === "chat") this._syncChatTarget();
     this.view = v;
     this._renderView();
 
     if (this.view === "ha") {
-      this.haClient?.connect((entities) => this._renderHADevices(entities));
+      if (this.haClient?.connected) {
+        // Already connected — just re-render with cached entities
+        if (this._haEntities.length) this._renderHADevices(this._haEntities);
+      } else {
+        this.haClient?.connect((entities) => {
+          this._haEntities = entities;
+          if (this.view === "ha") this._renderHADevices(entities);
+        });
+      }
     }
   }
 

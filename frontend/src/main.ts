@@ -283,9 +283,13 @@ function _mapLogFeedItem(item: LogFeedItem): Parameters<typeof pushFeed>[0] | nu
 
 wsChat.onLogFeed((items) => {
   if (!_logFeedInitialized) {
-    // First call is the full_snapshot baseline — set high-water mark without pushing.
     _logFeedInitialized = true;
     _logFeedMaxTs = items.length ? Math.max(...items.map((i) => i.timestamp ?? 0)) : 0;
+    // Push historical items (happened before browser connected — MQTT won't re-deliver them).
+    [...items].reverse().forEach((item) => {
+      const mapped = _mapLogFeedItem(item);
+      if (mapped) pushFeed(mapped);
+    });
     return;
   }
 
