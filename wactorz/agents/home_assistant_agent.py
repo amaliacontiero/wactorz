@@ -59,6 +59,7 @@ list_automations
 list_areas
 list_devices
 list_entities
+other
 unknown
 
 Guidelines:
@@ -66,16 +67,40 @@ Guidelines:
 - create_automation   → user wants to create/add/build/make a new automation, even if they also mention choosing between existing sensors, lights, or devices
 - delete_automation   → user wants to delete/remove/disable an existing automation
 - edit_automation     → user wants to update/change/rename/modify an existing automation
-- list_automations    → user wants to see/list/show existing automations
-- list_areas          → user wants to see/list/show areas
-- list_devices        → user wants to see/list/show devices
-- list_entities       → user wants to see/list/show entities
-- unknown             → request is unclear or not one of the supported Home Assistant operations
+- list_automations    → user explicitly asks to list/show/enumerate existing automations
+- list_areas          → user explicitly asks to list/show/enumerate areas
+- list_devices        → user explicitly asks to list/show/enumerate devices as an inventory
+- list_entities       → user explicitly asks to list/show/enumerate entities or entity IDs as an inventory
+- other               → Home Assistant related, but not one of the supported operations above
+- unknown             → request is unclear or not Home Assistant related
 
 Decision rule:
 - If the user asks you to create/build/add/set up an automation, classify as create_automation.
 - Use recommend_hardware only when the user is asking about hardware feasibility or hardware choices and is not asking you to actually create the automation.
+- Use other for Home Assistant status/context questions that need current HA data.
+- Use other for existence, count, lookup, or state questions about specific HA devices, sensors, entities, rooms, or device types.
+- "Do I have any thermometers?" is other, not list_devices.
+- "What is the state of my thermometer?" is other, not list_entities.
+- Use unknown for non-Home-Assistant requests.
 """
+
+HA_OTHER_PROMPT = """You answer Home Assistant questions using tool data.
+
+You may call get_simplified_ha_data when you need current Home Assistant floors, areas, devices, entities, or states.
+Answer the user's request directly and concisely.
+Do not invent Home Assistant entities, states, rooms, devices, or automations.
+If the available data cannot answer the request, say what is missing.
+"""
+
+HA_OTHER_TOOL = {
+    "name": "get_simplified_ha_data",
+    "description": "Fetch compact Home Assistant floors, areas, devices, entities, and current entity states.",
+    "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+}
 
 HARDWARE_SELECTION_PROMPT = """You are a Home Assistant hardware selection specialist.
 
@@ -452,6 +477,7 @@ class HomeAssistantAgent(LLMAgent):
         self._device_cache_ttl = 30.0
         self._automation_cache: dict[str, Any] = {"timestamp": 0.0, "data": None}
         self._automation_cache_ttl = 30.0
+        self._other_tool_max_rounds = 3
 
     # ── Cost tracking helper ─────────────────────────────────────────────────
 
@@ -558,6 +584,9 @@ class HomeAssistantAgent(LLMAgent):
             # return await self._create_automation(text, entities, hardware_result.get("hardware", []))
             return await self._recommend_hardware(text, devices)
 
+        if action == "other":
+            return await self._handle_other_request(text)
+
         return self._unsupported_action_response(text)
 
     # ── Intent classification ────────────────────────────────────────────────
@@ -573,6 +602,7 @@ class HomeAssistantAgent(LLMAgent):
             "list_areas",
             "list_devices",
             "list_entities",
+            "other",
             "unknown",
         }
 
@@ -604,7 +634,7 @@ class HomeAssistantAgent(LLMAgent):
             return "list_devices"
         if any(w in lower for w in ("list entities", "show entities", "show me entities", "what entities")):
             return "list_entities"
-        if any(w in lower for w in ("list", "show me", "show all", "what automations", "what are my automations")):
+        if any(w in lower for w in ("list automations", "show automations", "show all automations", "what automations", "what are my automations")):
             return "list_automations"
         if any(w in lower for w in ("delete", "remove automation", "disable automation")):
             return "delete_automation"
@@ -619,6 +649,14 @@ class HomeAssistantAgent(LLMAgent):
             return "recommend_hardware"
         if any(w in lower for w in ("create", "add automation", "new automation", "build automation", "make automation")):
             return "create_automation"
+        ha_context_terms = (
+            "home assistant", "hass", "entity", "entities", "device", "devices",
+            "sensor", "sensors", "light", "lights", "switch", "thermostat",
+            "thermometer", "thermometers", "temperature", "humidity", "garage", "kitchen", "bedroom",
+            "living room", "hallway", "bathroom", "room", "rooms",
+        )
+        if re.search(r"\bha\b", lower) or any(term in lower for term in ha_context_terms):
+            return "other"
         return "unknown"
 
     @staticmethod
@@ -629,6 +667,85 @@ class HomeAssistantAgent(LLMAgent):
                 "I can help with Home Assistant hardware recommendations and automations: "
                 "create, edit, delete, list automations, list areas, list devices, and list entities."
             ),
+        }
+
+    async def _handle_other_request(self, text: str) -> dict[str, Any]:
+        if not self.ha_url or not self.ha_token:
+            return {
+                "task": text,
+                "result": "HA_URL or HA_TOKEN not configured.",
+                "error": "HA_URL or HA_TOKEN not configured.",
+            }
+        if self.llm is None:
+            return {
+                "task": text,
+                "result": "No LLM provider configured.",
+                "error": "No LLM provider configured.",
+            }
+
+        messages: list[dict[str, Any]] = [{"role": "user", "content": text}]
+        tool_cache: dict[str, str] = {}
+        tools = [HA_OTHER_TOOL]
+
+        for _round in range(self._other_tool_max_rounds):
+            try:
+                completion = await self.llm.complete_with_tools(
+                    messages=messages,
+                    tools=tools,
+                    system=HA_OTHER_PROMPT,
+                    max_tokens=1200,
+                )
+            except Exception as exc:
+                logger.warning("[%s] Other HA tool loop failed: %s", self.name, exc)
+                return {
+                    "task": text,
+                    "result": f"Home Assistant tool request failed: {exc}",
+                    "error": str(exc),
+                }
+
+            self._accumulate_usage(getattr(completion, "usage", {}))
+            tool_calls = list(getattr(completion, "tool_calls", []) or [])
+            if not tool_calls:
+                content = str(getattr(completion, "content", "") or "").strip()
+                return {"task": text, "result": content or "I could not answer that Home Assistant request."}
+
+            assistant_message = getattr(completion, "assistant_message", None)
+            if assistant_message:
+                messages.append(assistant_message)
+
+            for call in tool_calls:
+                tool_name = getattr(call, "name", "")
+                tool_call_id = getattr(call, "id", "") or tool_name
+                if tool_name != "get_simplified_ha_data":
+                    result_text = f"Unsupported tool: {tool_name}"
+                    is_error = True
+                else:
+                    is_error = False
+                    if tool_name not in tool_cache:
+                        try:
+                            data = await get_simplified_ha_data(self.ha_url, self.ha_token)
+                            tool_cache[tool_name] = json.dumps(data, default=str)
+                        except Exception as exc:
+                            tool_cache[tool_name] = f"Home Assistant data fetch failed: {exc}"
+                            is_error = True
+                    result_text = tool_cache[tool_name]
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "name": tool_name,
+                        "content": result_text,
+                        "is_error": is_error,
+                    }
+                )
+
+        return {
+            "task": text,
+            "result": (
+                "I could not complete that Home Assistant request within "
+                f"{self._other_tool_max_rounds} tool rounds."
+            ),
+            "error": "tool_round_limit",
         }
 
     # ── Device discovery ─────────────────────────────────────────────────────
