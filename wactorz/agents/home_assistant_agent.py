@@ -33,11 +33,11 @@ from ..core.actor import Message, MessageType
 from ..core.integrations.home_assistant.ha_helper import (
     create_automation_via_rest,
     delete_automation,
-    fetch_devices_entities_with_location,
     get_areas,
     get_automations,
     get_devices,
     get_entities,
+    get_simplified_ha_data,
     update_automation,
 )
 from .llm_agent import LLMAgent, LLMProvider
@@ -153,25 +153,105 @@ Task:
 
 Input:
 - user_request: natural language request
-- device_discovery: Home Assistant connection and discovered devices
+- device_discovery: Home Assistant connection and discovered devices/entities
+- device_discovery.connected: boolean
+- device_discovery.floors: list of objects with this schema:
+    {
+        "floor_id": string,
+        "name": string
+    }
+- device_discovery.areas: list of objects with this schema:
+    {
+        "area_id": string,
+        "name": string
+    }
 - device_discovery.devices: list of objects with this schema:
     {
-        "device_id": string,
+        "id": string,
         "name": string,
-        "manufacturer": string,
-        "model": string,
-        "area": string,
-        "entities": [
-            {
-                "entity_id": string,
-                "unique_id": string,
-                "platform": string,
-                "area": string,
-                "original_name": string,
-                "name": string
-            }
-        ]
+        "area_id": string | null,
+        "manufacturer": string | null,
+        "model": string | null,
+        "disabled_by": string | null
     }
+- device_discovery.entities: list of objects with this schema:
+    {
+        "entity_id": string,
+        "domain": string,
+        "name": string | null,
+        "area_id": string | null,
+        "device_id": string | null,
+        "platform": string | null,
+        "state": string | null,
+
+        "disabled_by": string | null,
+        "entity_category": string | null,
+        "device_class": string | null,
+        "state_class": string | null,
+        "unit_of_measurement": string | null,
+
+        "supported_features": number | null,
+        "supported_color_modes": [string] | null,
+
+        "brightness": number | null,
+        "color_mode": string | null,
+        "color_temp_kelvin": number | null,
+        "min_color_temp_kelvin": number | null,
+        "max_color_temp_kelvin": number | null,
+        "hs_color": [number] | null,
+        "rgb_color": [number] | null,
+        "rgbw_color": [number] | null,
+        "xy_color": [number] | null,
+        "effect": string | null,
+        "effect_list": [string] | null,
+
+        "options": [string] | null,
+        "min": number | null,
+        "max": number | null,
+        "step": number | null,
+        "mode": string | null,
+
+        "auto_update": boolean | null,
+        "display_precision": number | null,
+        "installed_version": string | null,
+        "latest_version": string | null,
+        "in_progress": boolean | null,
+        "release_url": string | null,
+
+        "event_types": [string] | null,
+        "event_type": string | null,
+
+        "temperature": number | null,
+        "temperature_unit": string | null,
+        "humidity": number | null,
+        "cloud_coverage": number | null,
+        "uv_index": number | null,
+        "pressure": number | null,
+        "pressure_unit": string | null,
+        "wind_bearing": number | null,
+        "wind_speed": number | null,
+        "wind_speed_unit": string | null,
+        "visibility_unit": string | null,
+        "precipitation_unit": string | null,
+        "dew_point": number | null,
+
+        "battery_level": number | null,
+        "battery_voltage": number | null,
+        "battery_size": string | null,
+        "battery_quantity": number | null
+    }
+
+Schema rules:
+- The payload may omit keys whose value would be JSON null.
+- If an expected optional key is missing, treat it as null/unknown, not false, empty, unavailable, or unsupported.
+- Use entities as the primary automation-capability source.
+- Use devices only as supporting metadata for manufacturer, model, and physical device identity.
+- Match room-based requests using entity.area_id first.
+- If entity.area_id is missing, you may use the matching device.area_id via entity.device_id.
+- Ignore entities and devices with disabled_by set unless the user explicitly asks about disabled or unavailable items.
+- protocol should usually come from entity.platform or the matching device manufacturer/model when platform is not enough.
+- required_domains should be derived from the domains of the required_entities.
+
 
 Rules:
 - If device_discovery.connected is false, return can_fulfill=false with empty primary_hardware and empty alternatives.
@@ -190,11 +270,23 @@ Rules:
 - If the request cannot be fully satisfied with current hardware, set can_fulfill=false and explain the gap using only the discovered hardware context.
 - Keep the explanation concise and concrete.
 
+Capability guidance:
+- Color-capable lights must have domain="light" and supported_color_modes containing a color mode such as "rgb", "rgbw", "rgbww", "hs", or "xy".
+- Brightness-capable lights should have domain="light" and either brightness present, supported_features indicating brightness support, or a supported_color_modes value that implies dimming.
+- Color temperature-capable lights must have supported_color_modes containing "color_temp" or color temperature fields such as min_color_temp_kelvin/max_color_temp_kelvin.
+- Motion or occupancy triggers should use binary_sensor entities with device_class="motion" or device_class="occupancy".
+- Door/window/contact triggers should use binary_sensor entities with device_class="opening", "door", "window", or similar.
+- Temperature conditions or triggers should use sensor entities with device_class="temperature".
+- Humidity conditions or triggers should use sensor entities with device_class="humidity".
+- Power/energy conditions or triggers should use sensor entities with device_class="power", "energy", "current", or "voltage" as appropriate.
+- Firmware update availability should use update entities, preferably with device_class="firmware". A state of "on" usually means an update is available; "off" usually means no update is available; "unknown" means the availability is unknown.
+
+
 Validation before final answer:
 1) If can_fulfill=true then len(primary_hardware) >= 1.
 2) Every primary_hardware item must include hardware, why, protocol, required_domains, and required_entities.
 3) Every alternatives item must include hardware, why, protocol, required_domains, required_entities, and alternative_to.
-4) Every required_entities value must be an entity_id present in device_discovery.devices.
+4) Every required_entities value must be an entity_id present in device_discovery.entities.
 5) Every alternative_to value must exactly match one entity_id from primary_hardware.required_entities.
 6) If connected=false, both primary_hardware and alternatives must be empty.
 7) Do not include the same entity_id in both primary_hardware and alternatives.
@@ -550,7 +642,6 @@ class HomeAssistantAgent(LLMAgent):
         if not self.ha_url or not self.ha_token:
             data: dict[str, Any] = {
                 "connected": False,
-                "domains": set(),
                 "devices": [],
                 "reason": "HOME_ASSISTANT_URL or HOME_ASSISTANT_TOKEN is not configured",
             }
@@ -558,22 +649,15 @@ class HomeAssistantAgent(LLMAgent):
             return data
 
         try:
-            devices = await fetch_devices_entities_with_location(self.ha_url, self.ha_token, include_states=True)
-            if not isinstance(devices, list):
+            devices = await get_simplified_ha_data(self.ha_url, self.ha_token)
+            if not isinstance(devices, dict):
                 devices = []
-            domains: set[str] = set()
-            for device in devices:
-                for entity in device.get("entities", []) or []:
-                    eid = str(entity.get("entity_id", ""))
-                    if "." in eid:
-                        domains.add(eid.split(".", 1)[0])
-            data = {"connected": True, "domains": domains, "devices": devices, "reason": ""}
+            data = {"connected": True, "devices": devices, "reason": ""}
             self._device_cache = {"timestamp": now, "data": data}
             return data
         except Exception as exc:
             data = {
                 "connected": False,
-                "domains": set(),
                 "devices": [],
                 "reason": f"Could not query Home Assistant devices: {exc}",
             }
@@ -705,8 +789,10 @@ class HomeAssistantAgent(LLMAgent):
             "device_discovery": {
                 "connected": connected,
                 "reason": devices.get("reason", ""),
-                "domains": sorted(list(devices.get("domains", set()) or set())),
-                "devices": devices.get("devices", []) or [],
+                "devices": devices.get("devices", {}).get("devices", []) or [],
+                "entities": devices.get("devices", {}).get("entities", []) or [],
+                "floors": devices.get("devices", {}).get("floors", []) or [],
+                "areas": devices.get("devices", {}).get("areas", []) or [],
             },
         }
         user_msg = {"role": "user", "content": json.dumps(payload)}
@@ -1282,6 +1368,13 @@ class HomeAssistantAgent(LLMAgent):
 
     @staticmethod
     def _strip_fences(text: str) -> str:
+        """Remove markdown code fences from an LLM response.
+
+        LLMs often wrap JSON output in triple-backtick fences (e.g. ```json ... ```).
+        This strips the opening fence and optional language tag as well as the closing
+        fence, returning only the inner content. If no fences are present the text is
+        returned unchanged (after stripping surrounding whitespace).
+        """
         cleaned = (text or "").strip()
         if cleaned.startswith("```"):
             cleaned = re.sub(r"^```[a-zA-Z]*", "", cleaned).strip()
@@ -1304,16 +1397,20 @@ class HomeAssistantAgent(LLMAgent):
 
     @staticmethod
     def _available_entity_ids(devices: dict[str, Any]) -> set[str]:
+        """Extract the flat set of all entity IDs from a device-discovery result.
+
+        Walks ``devices["devices"]["entities"]`` and collects every non-empty
+        ``entity_id`` string. The resulting set is used as the ground-truth
+        allowlist when normalizing LLM hardware recommendations, so that any
+        entity ID the LLM invented but that is not present here gets discarded.
+        """
         available: set[str] = set()
-        for device in devices.get("devices", []) or []:
-            if not isinstance(device, dict):
+        for entity in devices.get("devices", {}).get("entities", []) or []:
+            if not isinstance(entity, dict):
                 continue
-            for entity in device.get("entities", []) or []:
-                if not isinstance(entity, dict):
-                    continue
-                entity_id = str(entity.get("entity_id", "")).strip()
-                if entity_id:
-                    available.add(entity_id)
+            entity_id = str(entity.get("entity_id", "")).strip()
+            if entity_id:
+                available.add(entity_id)
         return available
 
     @staticmethod
@@ -1321,6 +1418,20 @@ class HomeAssistantAgent(LLMAgent):
         items: list[dict[str, Any]],
         available_entities: set[str],
     ) -> list[dict[str, Any]]:
+        """Validate and sanitize raw LLM hardware items against discovered HA entities.
+
+        For each item returned by the LLM:
+        - Keeps only ``required_entities`` that exist in ``available_entities``,
+          discarding hallucinated entity IDs.
+        - Drops the item entirely if no valid entities remain after filtering.
+        - Derives ``required_domains`` from entity ID prefixes when the LLM omitted them.
+        - Drops items that still lack a hardware name or resolvable domain.
+        - Deduplicates by ``(hardware_name, entity_ids)`` to prevent repeated entries.
+        - Normalises the output shape to a consistent set of fields.
+
+        The result is a clean, grounded list where every recommendation is backed
+        by real, currently-discovered Home Assistant entities.
+        """
         normalized: list[dict[str, Any]] = []
         seen: set[tuple[str, tuple[str, ...]]] = set()
 
@@ -1381,6 +1492,20 @@ class HomeAssistantAgent(LLMAgent):
         primary_hardware: list[dict[str, Any]],
         alternatives: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
+        """Remove alternatives that are not genuine substitutes for primary hardware.
+
+        An alternative survives only if all four conditions hold:
+        - It has at least one ``required_entity``.
+        - Its ``alternative_to`` field is non-empty and matches an entity ID that
+          appears in ``primary_hardware`` — linking it to a specific primary item.
+        - None of its own ``required_entities`` overlap with the primary entity set,
+          preventing the LLM from re-listing a primary item as its own alternative.
+        - Its ``(hardware_name, entity_ids)`` identity has not been seen before,
+          removing duplicates.
+
+        The result is a deduplicated list of alternatives that each offer a distinct,
+        non-overlapping swap for one of the recommended primary hardware items.
+        """
         primary_entities = {
             str(entity_id).strip()
             for item in primary_hardware
