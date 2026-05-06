@@ -25,6 +25,7 @@ class _SpawnPlaceholder:
 
 SPAWN_REGISTRY_KEY   = "_spawned_agents"
 PIPELINE_RULES_KEY   = "_pipeline_rules"
+PENDING_PLANS_KEY    = "_pending_plans"     # dry-run proposals awaiting user approval
 NODE_REGISTRY_KEY  = "_known_nodes"       # tracks online remote nodes
 
 ORCHESTRATOR_PROMPT = """You are the main orchestrator in a multi-agent system.
@@ -367,6 +368,45 @@ This stops the old agent and starts the new one immediately:
 }
 </spawn>
 
+== DELETING AN AGENT ==
+When the user explicitly asks to remove, stop, delete, or kill an agent, emit a
+<delete> block. The framework will stop the agent, remove it from the spawn
+registry (so it does NOT auto-restore on restart), clear its manifest, and
+record the deletion in conversation history. This is the orchestrator-side
+counterpart of <spawn>.
+
+Use <delete> ONLY when the user's intent is clearly to permanently remove an
+agent. Do NOT use it to "restart" an agent — use <spawn> with "replace": true
+for that. Do NOT use it just because the user is frustrated with output —
+ask for clarification first.
+
+Format (JSON):
+<delete>
+{"name": "math-agent"}
+</delete>
+
+Or the shorthand bare-name form (when only a name is needed):
+<delete>math-agent</delete>
+
+You can include multiple <delete> blocks in one response, and you can mix
+<delete> with <spawn> in the same turn (e.g. "delete the old math-agent and
+spawn a new calculator-agent" → emit one <delete> block AND one <spawn>
+block in the same response).
+
+Protected names that you CANNOT delete: main, monitor, installer,
+home-assistant-agent, anomaly-detector, code-agent, catalog. Requests to
+delete these should be politely refused — explain they are system agents.
+
+If the user asks to delete an agent that doesn't exist, do NOT emit a
+<delete> block — just tell them it isn't running.
+
+After emitting a <delete> block, write a short user-facing confirmation in
+plain prose (the block itself is hidden from the user). Example:
+
+  User: "delete the math-agent please"
+  You:  "Removed the math-agent."
+        <delete>{"name": "math-agent"}</delete>
+
 == RULES ==
 - Always import libraries INSIDE functions (not at module level)
 - Use agent.state to pass data between setup() and process()
@@ -699,6 +739,31 @@ CAMERA OPENING ON RASPBERRY PI — always use this pattern for RPI nodes:
   Never use cv2.VideoCapture(0) alone on RPI — it fails with OpenCV/FFMPEG warning
   Always run blocking cv2 calls in run_in_executor to avoid blocking the event loop
 
+CAMERA OPENING ON WINDOWS — the framework auto-injects a resilient cv2 shim:
+  cv2.VideoCapture(0) is automatically wrapped with retry+backoff and forced
+  onto the CAP_DSHOW backend (more reliable than the default MSMF). Just call
+  cv2.VideoCapture(0) — DO NOT pass cv2.CAP_MSMF explicitly.
+
+CRITICAL — DO NOT RELEASE+REOPEN THE CAMERA INSIDE process():
+  On a failed cap.read(), simply `return` from process(). The framework will
+  call process() again after poll_interval, and the camera handle is still
+  valid — a transient frame failure does NOT mean the device is dead. Calling
+  cap.release() + cv2.VideoCapture(...) on every failed read produces a flap
+  loop on Windows because MSMF/DSHOW need wall-clock time to release the
+  device handle, and a tight reopen loop never gives them that time.
+
+  WRONG (causes flap loop):
+      ok, frame = cap.read()
+      if not ok:
+          cap.release()
+          agent.state['cap'] = cv2.VideoCapture(0)
+          return
+
+  RIGHT:
+      ok, frame = cap.read()
+      if not ok:
+          return   # next process() tick will retry on the same handle
+
 <spawn>
 {
   "name": "yolo-agent",
@@ -812,6 +877,8 @@ class MainActor(LLMAgent):
         await self._restore_spawned_agents()
         # Listen for remote node heartbeats so we know what's online
         self._tasks.append(asyncio.create_task(self._node_heartbeat_listener()))
+        # Detect nodes that go silent and clean up their agents
+        self._tasks.append(asyncio.create_task(self._node_offline_watcher()))
         # Listen for agent capability manifests to build topic registry
         self._tasks.append(asyncio.create_task(self._manifest_listener()))
         # Inject persisted user facts into system prompt
@@ -835,6 +902,62 @@ class MainActor(LLMAgent):
             self.persist(SPAWN_REGISTRY_KEY, reg)
             logger.info(f"[{self.name}] Removed '{name}' from spawn registry.")
 
+    async def _clear_agent_manifest(self, name: str, actor_id: Optional[str] = None):
+        """
+        Clear an agent's manifest from main's in-memory caches AND from the
+        retained MQTT manifest topic. Without this, list_capabilities() will
+        keep reporting the agent (with running=false but never disappearing),
+        and on next restart it would be re-loaded from the retained message.
+
+        Call this whenever an agent is stopped/deleted/replaced.
+        """
+        # Drop from in-memory caches immediately
+        self._agent_manifests.pop(name, None)
+        for topic, entries in list(self._topic_registry.items()):
+            self._topic_registry[topic] = [m for m in entries if m.get("name") != name]
+            if not self._topic_registry[topic]:
+                self._topic_registry.pop(topic, None)
+        # Publish empty retained payload to clear the broker-side retained manifest.
+        # Need actor_id for the topic — fall back to looking it up from the registry
+        # (only works if the actor is still alive — best-effort).
+        if not actor_id and self._registry:
+            target = self._registry.find_by_name(name)
+            if target:
+                actor_id = target.actor_id
+        if actor_id:
+            await self._mqtt_publish(
+                f"agents/{actor_id}/manifest", b"", retain=True
+            )
+            logger.debug(f"[{self.name}] Cleared retained manifest for '{name}'")
+
+    def _record_agent_deletion(self, name: str, reason: str = "user request"):
+        """
+        Inject a system-style note into conversation history that an agent was
+        deleted. This is critical because the LLM otherwise sees its own earlier
+        turn ("Spawned 'chat-agent'") and assumes the agent still exists when
+        the user later asks to spawn one with the same name.
+
+        Strengthens the running-agents system prompt block with explicit textual
+        evidence inside the message stream — which models weight more heavily
+        than system-prompt assertions.
+        """
+        try:
+            note = (
+                f"[SYSTEM] Agent '{name}' was deleted ({reason}). "
+                f"It is no longer running. If the user asks to spawn an agent "
+                f"with this name again, treat it as a fresh spawn — do NOT claim "
+                f"it already exists."
+            )
+            self._conversation_history.append({"role": "user", "content": note})
+            self._conversation_history.append({
+                "role": "assistant",
+                "content": f"Acknowledged — '{name}' has been removed from my view.",
+            })
+            self.persist("conversation_history", self._conversation_history)
+            logger.info(f"[{self.name}] Recorded deletion note for '{name}' in history")
+        except Exception as e:
+            logger.warning(f"[{self.name}] Failed to record deletion note: {e}")
+
     # ── Pipeline rules registry ────────────────────────────────────────────
     # Stores grouped rules: one entry per user request, listing all agents spawned for it.
     # Schema: { rule_id: { "rule_id", "task", "agents": [str], "created_at": float } }
@@ -848,6 +971,150 @@ class MainActor(LLMAgent):
         self.persist(PIPELINE_RULES_KEY, rules)
         logger.info(f"[{self.name}] Pipeline rule saved: {rule['rule_id']} agents={rule.get('agents', [])}")
 
+    # ── Pending-plan registry (dry-run / approval flow) ────────────────────
+    # When PIPELINE intent fires, the planner runs in plan_only mode and returns
+    # a proposal instead of spawning. We store the proposal here, show it to the
+    # user, and wait for approval before executing. Persisted so a restart in
+    # the middle of an approval flow doesn't lose the user's pending plans.
+    #
+    # Schema: { plan_id: {
+    #     "plan_id":    str,
+    #     "task":       str,            # original user request
+    #     "created_at": float,
+    #     "status":     "pending"|"approved"|"rejected"|"superseded"|"expired",
+    #     "envelope":   dict,           # the full plan envelope from the planner
+    # } }
+    PLAN_TTL_S = 24 * 3600   # auto-expire pending plans after 24h
+
+    def get_pending_plans(self) -> dict:
+        plans = self.recall(PENDING_PLANS_KEY) or {}
+        # Expire stale entries on every read so we don't have to gc separately
+        import time as _t
+        now = _t.time()
+        expired_ids = [
+            pid for pid, p in plans.items()
+            if p.get("status") == "pending"
+            and (now - p.get("created_at", now)) > self.PLAN_TTL_S
+        ]
+        if expired_ids:
+            for pid in expired_ids:
+                plans[pid]["status"] = "expired"
+            self.persist(PENDING_PLANS_KEY, plans)
+        return plans
+
+    def save_pending_plan(self, plan: dict):
+        plans = self.recall(PENDING_PLANS_KEY) or {}
+        plans[plan["plan_id"]] = plan
+        self.persist(PENDING_PLANS_KEY, plans)
+
+    def update_plan_status(self, plan_id: str, status: str):
+        plans = self.recall(PENDING_PLANS_KEY) or {}
+        if plan_id in plans:
+            plans[plan_id]["status"] = status
+            self.persist(PENDING_PLANS_KEY, plans)
+
+    def _most_recent_pending_plan(self) -> Optional[dict]:
+        """Returns the most-recently-created plan still in 'pending' status, or None."""
+        plans = self.get_pending_plans()
+        pending = [p for p in plans.values() if p.get("status") == "pending"]
+        if not pending:
+            return None
+        return max(pending, key=lambda p: p.get("created_at", 0))
+
+    def _format_plan_proposal(self, plan: dict) -> str:
+        """
+        Render a pending plan as a human-readable summary for the user.
+
+        Goals (in priority order):
+          1. Show what the rule WILL DO in plain English (most important).
+          2. Show which inputs / topics it listens to (so user can spot
+             "did you really mean THIS sensor?").
+          3. Show side effects: notifications sent, devices controlled, files
+             written. Anything that affects the world.
+          4. Hide raw code by default — link to expansion via /plans show <id>.
+          5. Make the approval actions obvious.
+        """
+        envelope = plan.get("envelope", {})
+        agents   = envelope.get("plan", []) or envelope.get("agents", [])
+        task     = plan.get("task", envelope.get("task", "?"))
+        plan_id  = plan.get("plan_id", "?")
+
+        lines = []
+        lines.append(f"**Proposed pipeline** (id `{plan_id}`)")
+        lines.append(f"For: _{task}_")
+        lines.append("")
+        lines.append(f"This will create {len(agents)} agent(s):")
+
+        # Per-agent summary
+        for i, step in enumerate(agents, 1):
+            name = step.get("name", "?")
+            desc = step.get("description") or step.get("spawn_config", {}).get("description", "")
+            spawn_cfg = step.get("spawn_config", {})
+            agent_type = spawn_cfg.get("type", "dynamic")
+            install   = spawn_cfg.get("install", []) or []
+
+            lines.append(f"\n  {i}. **{name}** ({agent_type})")
+            if desc:
+                lines.append(f"     purpose: {desc}")
+
+            # For scheduled agents: render the schedule prominently — this is
+            # the field the user most needs to verify (did the LLM correctly
+            # interpret "5pm every weekday"?).
+            if agent_type == "scheduled":
+                schedule_spec = spawn_cfg.get("schedule") or {}
+                if isinstance(schedule_spec, dict) and schedule_spec:
+                    try:
+                        from .scheduled_agent import describe_schedule
+                        tz_name = schedule_spec.get("tz") or self.get_user_facts().get("pref_timezone")
+                        lines.append(f"     fires: {describe_schedule(schedule_spec, tz_name)}")
+                    except Exception:
+                        lines.append(f"     fires: {schedule_spec}")
+                topic = spawn_cfg.get("publish_topic") or f"schedule/{name}/fired"
+                lines.append(f"     publishes: {topic}")
+
+            # Inputs — what it listens to
+            subs = step.get("subscribes", []) or spawn_cfg.get("subscribe", []) or []
+            if subs:
+                lines.append(f"     listens on: {', '.join(subs)}")
+
+            # Outputs — what it publishes
+            pubs = step.get("publishes", []) or spawn_cfg.get("publish", []) or []
+            if pubs and agent_type != "scheduled":   # already shown above for scheduled
+                lines.append(f"     publishes: {', '.join(pubs)}")
+
+            # External side effects — webhooks/notifications/HA actions
+            # Best-effort heuristic from the code or spawn_cfg fields
+            side_effects = []
+            code = spawn_cfg.get("code", "") or ""
+            if "webhook" in code.lower() or "notification" in code.lower():
+                side_effects.append("sends notification")
+            if "discord.com/api/webhooks" in code:
+                side_effects.append("posts to Discord")
+            if "api.telegram.org" in code:
+                side_effects.append("posts to Telegram")
+            if "homeassistant" in code.lower() and ("turn_on" in code or "turn_off" in code or "call_service" in code):
+                side_effects.append("controls Home Assistant device")
+            if agent_type == "ha_actuator":
+                target = spawn_cfg.get("entity_id") or spawn_cfg.get("target", "?")
+                action = spawn_cfg.get("service") or spawn_cfg.get("action", "?")
+                side_effects.append(f"calls HA: {action} on {target}")
+            if side_effects:
+                lines.append(f"     side effects: {'; '.join(side_effects)}")
+
+            # Install requirements — surfaced because user pays the cost
+            if install:
+                pkgs = ", ".join(install if isinstance(install, list) else [install])
+                lines.append(f"     installs: {pkgs}")
+
+        lines.append("")
+        lines.append("**To proceed:**")
+        lines.append("  Reply **yes** (or **approve**) to spawn the agents above.")
+        lines.append("  Reply **no** (or **reject**) to discard this plan.")
+        lines.append("  Reply with a correction (e.g. _'use the bedroom sensor instead'_) to revise.")
+        lines.append(f"  Or run `/plans show {plan_id}` to see the full code.")
+
+        return "\n".join(lines)
+
     def get_notification_urls(self) -> dict:
         """Return persisted notification webhook URLs (discord, telegram, slack, etc.)"""
         return self.recall("_notification_urls") or {}
@@ -858,59 +1125,302 @@ class MainActor(LLMAgent):
     # survive summarization and persist indefinitely.
 
     _FACTS_EXTRACT_PROMPT = (
-        "Extract durable facts from this conversation exchange that would be useful to remember "
-        "long-term. Focus on: names, locations, device entity IDs, URLs, credentials, preferences, "
-        "configurations, and any explicit statements about the user's setup.\n"
-        "Return a JSON object with short descriptive keys and concise values. "
-        "Return {} if nothing worth remembering was said.\n"
-        "Example: {\"ha_url\": \"http://192.168.1.10:8123\", \"user_name\": \"Alex\", "
-        "\"living_room_light\": \"light.wiz_rgbw_tunable_02cba0\"}\n"
-        "Output only valid JSON. No explanation, no markdown."
+        "You extract durable facts the assistant should remember about the user "
+        "long-term. Read the EXCHANGE below and return any new facts as JSON.\n\n"
+        "## What to extract — three buckets\n"
+        "Use these key prefixes so the assistant can group facts later:\n\n"
+        "**pref_*** — Personal identity, preferences, routines (slow-changing).\n"
+        "  Examples: pref_user_name, pref_location, pref_timezone, pref_language,\n"
+        "  pref_favorite_sport, pref_communication_style ('terse'/'detailed'),\n"
+        "  pref_units ('metric'/'imperial'), pref_work_hours, pref_sleep_time,\n"
+        "  pref_household_members.\n\n"
+        "**device_*** — System and device topology (the user's setup).\n"
+        "  Examples: device_ha_url, device_mqtt_broker, device_living_room_light\n"
+        "  (entity ID), device_kitchen_camera (model + entity), device_pi_node_kitchen\n"
+        "  (hardware spec), device_yolo_model_path, device_webhook_discord.\n\n"
+        "**policy_*** — Standing instructions / rules of engagement.\n"
+        "  Examples: policy_quiet_hours ('23:00-07:00'), policy_alert_channel\n"
+        "  ('telegram'), policy_temperature_unit ('celsius'),\n"
+        "  policy_low_battery_threshold ('20%'), policy_ask_before_spawn\n"
+        "  ('always for cv2/webcam'), policy_planner_style ('no follow-up\n"
+        "  questions, just pick something').\n\n"
+        "## Rules\n"
+        "  - Snake_case keys, ALWAYS prefixed with one of the three above.\n"
+        "  - Values: a short phrase, not a sentence.\n"
+        "  - SUPERSEDE: if the user updates a fact ('actually call me Yannis'),\n"
+        "    return the SAME key with the new value — the system overwrites.\n"
+        "  - Return ALL applicable facts in one object — don't pick just one.\n"
+        "  - Return {} if nothing durable was stated.\n\n"
+        "## What NOT to extract\n"
+        "  - Things the ASSISTANT said. Only the user's explicit statements.\n"
+        "  - One-off questions ('what time is it?', 'how do I do X?').\n"
+        "  - Transient state ('user is debugging Y right now').\n"
+        "  - Speculation or 'maybe' statements ('I might get a Yale lock soon').\n"
+        "  - Plain-text passwords or full API tokens. URLs and entity IDs are fine.\n"
+        "  - Facts about devices/agents that the user just deleted in this turn.\n\n"
+        "## Examples\n"
+        '  USER: "I am John, I like football"\n'
+        '  → {"pref_user_name": "John", "pref_favorite_sport": "football"}\n\n'
+        '  USER: "my home assistant is at http://192.168.1.10:8123"\n'
+        '  → {"device_ha_url": "http://192.168.1.10:8123"}\n\n'
+        '  USER: "use Telegram for alerts, not Discord"\n'
+        '  → {"policy_alert_channel": "telegram"}\n\n'
+        '  USER: "the living room light is light.wiz_rgbw_02cba0 and I prefer warm white"\n'
+        '  → {"device_living_room_light": "light.wiz_rgbw_02cba0", "pref_light_color": "warm white"}\n\n'
+        '  USER: "actually call me Yannis"\n'
+        '  → {"pref_user_name": "Yannis"}\n\n'
+        '  USER: "what time is it?"\n'
+        "  → {}\n\n"
+        '  USER: "I might switch to Zigbee2MQTT eventually"\n'
+        "  → {}\n\n"
+        "Output ONLY a valid JSON object. No prose, no markdown fences, no explanation."
     )
 
     def get_user_facts(self) -> dict:
         return self.recall("_user_facts") or {}
 
-    def _inject_user_facts_into_prompt(self):
-        """Prepend known user facts to the system prompt so the LLM always has them."""
-        facts = self.get_user_facts()
-        if not facts:
-            return
-        facts_lines = "\n".join(f"  {k}: {v}" for k, v in facts.items())
-        facts_block = f"\n\n== KNOWN USER FACTS (always keep in mind) ==\n{facts_lines}"
-        # Avoid duplicating if already injected
-        marker = "== KNOWN USER FACTS"
-        base_prompt = ORCHESTRATOR_PROMPT
-        if marker in self.system_prompt:
-            # Replace existing facts block
-            self.system_prompt = base_prompt + facts_block
+    def _get_running_agents_summary(self) -> str:
+        """
+        Build a short, authoritative description of currently running agents
+        by reading the live registry (same source the planner uses).
+        Returns empty string if registry is unavailable or only main is running.
+        """
+        if not self._registry:
+            return ""
+        skip = {"main", "monitor", "installer"}
+        lines = []
+        for actor in self._registry.all_actors():
+            if actor.name in skip:
+                continue
+            # Skip transient planner instances — they're supervisors of their
+            # spawned pipeline agents and not user-facing capabilities.
+            if actor.name.startswith("planner-"):
+                continue
+            desc = (
+                getattr(actor, "DESCRIPTION", None)
+                or getattr(actor, "description", "")
+                or (getattr(actor, "system_prompt", "") or "")[:80]
+                or type(actor).__name__
+            )
+            # Single-line summary, trimmed
+            desc = " ".join(str(desc).split())[:120]
+            lines.append(f"  {actor.name} — {desc}" if desc else f"  {actor.name}")
+        if not lines:
+            return ""
+        return "\n".join(lines)
+
+    def _prefix_with_live_context(self, user_text: str) -> str:
+        """
+        Wrap the user's message with a `[CURRENT SYSTEM STATE]` block so the LLM
+        sees the live agent list INSIDE the user message — not just the system
+        prompt.
+
+        Why both? Models weight in-message content more heavily than system prompts
+        for "what is true right now" questions. Having the same list in both places
+        is belt-and-braces: the system prompt sets the rule ("trust this list"),
+        the per-message prefix supplies fresh evidence the rule applies to.
+
+        The prefix is wrapped in clear delimiters so it's visually obvious to the
+        model that it's context, not the user's actual question.
+        """
+        live_names = []
+        if self._registry:
+            skip = {"main", "monitor", "installer"}
+            for actor in self._registry.all_actors():
+                if actor.name in skip:
+                    continue
+                if actor.name.startswith("planner-"):
+                    continue
+                live_names.append(actor.name)
+        live_names.sort()
+
+        if live_names:
+            ctx = (
+                "[CURRENT SYSTEM STATE — auto-injected, NOT from the user]\n"
+                f"Currently running agents (live, just queried): {', '.join(live_names)}\n"
+                "If the user asks what agents exist or are running, answer using EXACTLY\n"
+                "this list. Do not add agents from your memory of earlier turns.\n"
+                "[END SYSTEM STATE]\n\n"
+            )
         else:
-            self.system_prompt = self.system_prompt + facts_block
+            ctx = (
+                "[CURRENT SYSTEM STATE — auto-injected, NOT from the user]\n"
+                "Currently running agents (live, just queried): NONE\n"
+                "No user-spawned agents exist right now. If the user asks what's running,\n"
+                "say so plainly. Do not invent agents from earlier in the conversation.\n"
+                "[END SYSTEM STATE]\n\n"
+            )
+        return ctx + user_text
+
+    def _rebuild_system_prompt(self):
+        """
+        Reconstruct the system prompt from ORCHESTRATOR_PROMPT plus dynamic blocks:
+          1. Currently running agents (live registry — authoritative, refreshed each call)
+          2. Known user facts (persisted)
+
+        This is the single source of truth for the system prompt. It MUST be called
+        before every LLM turn so main never answers from a stale view of the world.
+        Both blocks are appended in a fixed order so the prompt is deterministic.
+
+        IMPORTANT: ORCHESTRATOR_PROMPT references agent.capabilities() — that's
+        documentation aimed at spawned DynamicAgents which have an _AgentAPI.
+        Main itself has NO such method. Without an explicit override, the LLM
+        reads the documentation, "calls" the function (it can't), and confabulates
+        the result based on conversation history. We prepend an OVERRIDE block that
+        tells main directly: the running-agents list below IS the result of that
+        lookup, do not pretend to call anything.
+        """
+        # ── Override block for main specifically ──
+        override = (
+            "== MAIN-SPECIFIC OVERRIDE (read this FIRST) ==\n"
+            "You are 'main'. You are NOT a DynamicAgent. You do NOT have an `agent` object.\n"
+            "You CANNOT call agent.capabilities(), agent.send_to(), agent.topics(), "
+            "agent.subscribe(), agent.window(), agent.mqtt_get(), or any other agent.* method.\n"
+            "Those methods exist for OTHER agents you SPAWN. They do not exist for you.\n\n"
+            "If you see those methods mentioned later in this prompt, that is reference\n"
+            "documentation for code you WRITE inside <spawn> blocks — NOT a tool you can\n"
+            "invoke yourself. Never write 'Let me call agent.capabilities()' in a reply.\n"
+            "Never fabricate the output of such a call.\n\n"
+            "When the user asks what agents exist, what's running, or anything about\n"
+            "current system state, READ THE 'CURRENTLY RUNNING AGENTS' BLOCK BELOW.\n"
+            "That block IS your capability lookup — already done for you, refreshed live\n"
+            "on every turn. Do not pretend to perform a separate lookup.\n"
+        )
+
+        prompt = override + "\n" + ORCHESTRATOR_PROMPT
+
+        # ── Block 1: live running agents (so main knows the truth, not its memory) ──
+        # Wording is deliberately strong: the LLM tends to trust earlier conversation
+        # turns ("I just spawned X") over the system prompt. We need to override that.
+        agents_summary = self._get_running_agents_summary()
+        header = (
+            "\n\n== CURRENTLY RUNNING AGENTS (LIVE GROUND TRUTH — overrides conversation history) ==\n"
+            "This block is regenerated from the live registry on EVERY turn. It is the ONLY\n"
+            "authoritative source for which agents exist. If something is not on this list,\n"
+            "it does NOT exist right now — even if conversation history says you spawned it.\n"
+            "Agents can be deleted by the user at any time, and the conversation will not\n"
+            "necessarily mention it. ALWAYS trust this list over your memory of past turns.\n\n"
+            "When the user asks what agents are running, list EXACTLY these names — no\n"
+            "more, no less. Do not invent entries from memory. Do not include agents from\n"
+            "earlier turns that aren't here now.\n\n"
+            "When the user asks to spawn an agent and that name is NOT on this list:\n"
+            "spawn it. Do NOT say 'it already exists' — that claim is based on stale memory.\n"
+        )
+        if agents_summary:
+            prompt += header + agents_summary
+        else:
+            prompt += header + "  (no user-spawned agents are currently running)"
+
+        # ── Block 2: persisted user facts, grouped by bucket ──
+        facts = self.get_user_facts()
+        if facts:
+            buckets = {
+                "pref_":   ("PREFERENCES & IDENTITY", []),
+                "device_": ("DEVICES & SETUP",        []),
+                "policy_": ("STANDING POLICIES",      []),
+                "":        ("OTHER FACTS",            []),   # legacy / unprefixed
+            }
+            for k, v in facts.items():
+                placed = False
+                for prefix, (_, items) in buckets.items():
+                    if prefix and k.startswith(prefix):
+                        items.append(f"  {k[len(prefix):]}: {v}")
+                        placed = True
+                        break
+                if not placed:
+                    buckets[""][1].append(f"  {k}: {v}")
+
+            sections = []
+            for _, (heading, items) in buckets.items():
+                if items:
+                    sections.append(f"\n[{heading}]\n" + "\n".join(items))
+            if sections:
+                prompt += (
+                    "\n\n== KNOWN USER FACTS (always keep in mind) =="
+                    + "".join(sections)
+                    + "\nWhen a POLICY conflicts with a default behavior, follow the policy."
+                )
+
+        self.system_prompt = prompt
+
+    def _inject_user_facts_into_prompt(self):
+        """Backward-compatible alias — delegates to the unified rebuild."""
+        self._rebuild_system_prompt()
 
     async def _extract_and_save_facts(self, user_message: str, assistant_response: str):
-        """After each exchange, ask the LLM to extract any new durable facts."""
+        """
+        After each exchange, ask the LLM to extract any new durable facts.
+
+        Observability: this method logs every attempt at INFO level (start),
+        success at INFO (with extracted keys), and failures at WARNING. If you
+        suspect facts aren't being saved, search the log for
+        '[main] Facts extraction'.
+
+        Namespace normalization: the prompt asks for keys prefixed with one of
+        pref_/device_/policy_, but LLMs sometimes return raw keys ('user_name'
+        instead of 'pref_user_name'). We normalize on save so a stray unprefixed
+        key still ends up in a sensible bucket rather than the OTHER catch-all.
+        """
         if self.llm is None:
+            logger.warning(f"[{self.name}] Facts extraction skipped: no LLM provider")
             return
+        if not user_message or not user_message.strip():
+            return
+        logger.info(f"[{self.name}] Facts extraction running on: {user_message[:80]!r}")
         exchange = f"USER: {user_message[:600]}\nASSISTANT: {assistant_response[:600]}"
         try:
             raw, _ = await self.llm.complete(
                 messages=[{"role": "user", "content": exchange}],
                 system=self._FACTS_EXTRACT_PROMPT,
-                max_tokens=200,
+                max_tokens=300,
             )
-            import json as _json, re as _re
+            import json as _json
             clean = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
-            new_facts = _json.loads(clean)
-            if not isinstance(new_facts, dict) or not new_facts:
+            if not clean:
+                logger.warning(f"[{self.name}] Facts extraction returned empty string")
                 return
-            # Merge with existing facts
+            new_facts = _json.loads(clean)
+            if not isinstance(new_facts, dict):
+                logger.warning(f"[{self.name}] Facts extraction returned non-dict: {type(new_facts).__name__}")
+                return
+            if not new_facts:
+                logger.info(f"[{self.name}] Facts extraction: nothing durable in this turn")
+                return
+
+            # Normalize keys: if the LLM forgot the namespace prefix, infer one
+            # from common patterns. This keeps the bucketed display clean.
+            normalized = {}
+            for k, v in new_facts.items():
+                if k.startswith(("pref_", "device_", "policy_")):
+                    normalized[k] = v
+                    continue
+                # Heuristic guesses for common unprefixed keys
+                if k.endswith("_url") or k.endswith("_endpoint") or k.endswith("_path"):
+                    normalized[f"device_{k}"] = v
+                elif k.startswith(("user_", "favorite_", "pref_")) or k in ("name", "age", "location", "language"):
+                    normalized[f"pref_{k}"] = v
+                elif "policy" in k or "rule" in k or "threshold" in k:
+                    normalized[f"policy_{k}"] = v
+                else:
+                    normalized[f"pref_{k}"] = v   # default bucket for unknowns
+
+            # Merge with existing facts (supersede on key collision — by design)
             facts = self.get_user_facts()
-            facts.update(new_facts)
+            superseded = [k for k in normalized if k in facts and facts[k] != normalized[k]]
+            facts.update(normalized)
             self.persist("_user_facts", facts)
             self._inject_user_facts_into_prompt()
-            logger.info(f"[{self.name}] User facts updated: {list(new_facts.keys())}")
+            log_msg = f"[{self.name}] User facts updated: {list(normalized.keys())}"
+            if superseded:
+                log_msg += f" (superseded: {superseded})"
+            logger.info(log_msg)
+        except _json.JSONDecodeError as e:
+            logger.warning(
+                f"[{self.name}] Facts extraction JSON parse failed: {e}. "
+                f"Raw response (first 200 chars): {raw[:200]!r}"
+            )
         except Exception as e:
-            logger.info(f"[{self.name}] Facts extraction skipped: {e}")
+            logger.warning(f"[{self.name}] Facts extraction failed: {e!r}")
 
     async def delete_pipeline_rule(self, rule_id: str) -> str:
         """Stop all agents for a rule and remove it from registry."""
@@ -925,8 +1435,11 @@ class MainActor(LLMAgent):
             if self._registry:
                 actor = self._registry.find_by_name(agent_name)
                 if actor:
+                    actor_id = actor.actor_id
                     await actor.stop()
-                    await self._registry.unregister(actor.actor_id)
+                    await self._registry.unregister(actor_id)
+                    await self._clear_agent_manifest(agent_name, actor_id)
+                    self._record_agent_deletion(agent_name, reason=f"pipeline rule '{rule_id}' deleted")
                     stopped.append(agent_name)
         del rules[rule_id]
         self.persist(PIPELINE_RULES_KEY, rules)
@@ -937,8 +1450,36 @@ class MainActor(LLMAgent):
         reg = self._get_spawn_registry()
         if not reg:
             return
-        logger.info(f"[{self.name}] Restoring {len(reg)} agent(s): {list(reg.keys())}")
-        for name, config in reg.items():
+
+        # ── Skip names already brought up by the Supervisor's factories ─────
+        # Both the Supervisor (registry.py) and this method spawn user agents
+        # at startup. Without this guard they race: supervisor.start() spawns
+        # instance #1 via its stored factory, then on_start() runs us here and
+        # we spawn instance #2. Both register under the same deterministic
+        # actor_id (uuid5 of name) — the dict entry gets overwritten but the
+        # first instance's aiomqtt subscribe listeners keep running, causing
+        # every MQTT message to be delivered twice.
+        sup = getattr(self._registry, "_supervisor_ref", None) if self._registry else None
+        already_supervised: set[str] = set()
+        if sup is not None:
+            for sup_name, spec in sup._specs.items():
+                if spec.actor is not None and not spec.retired:
+                    already_supervised.add(sup_name)
+
+        if already_supervised:
+            skip = sorted(n for n in reg.keys() if n in already_supervised)
+            if skip:
+                logger.info(
+                    f"[{self.name}] Supervisor already restarted "
+                    f"{len(skip)} agent(s); skipping restore for: {skip}"
+                )
+
+        pending = {n: c for n, c in reg.items() if n not in already_supervised}
+        if not pending:
+            return
+
+        logger.info(f"[{self.name}] Restoring {len(pending)} agent(s): {list(pending.keys())}")
+        for name, config in pending.items():
             node = config.get("node", "").strip()
             if node:
                 # Remote agent — re-publish spawn to its node; no local object expected
@@ -1141,10 +1682,25 @@ class MainActor(LLMAgent):
 
     # ── User input ─────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _strip_live_context(message: str) -> str:
+        """Remove the [CURRENT SYSTEM STATE...][END SYSTEM STATE] prefix if present.
+        Used before fact extraction so the auto-injected agent list doesn't get
+        treated as user-stated facts."""
+        if not isinstance(message, str) or "[CURRENT SYSTEM STATE" not in message:
+            return message
+        end_marker = "[END SYSTEM STATE]"
+        idx = message.find(end_marker)
+        if idx == -1:
+            return message
+        # Skip past the marker and any whitespace following it
+        return message[idx + len(end_marker):].lstrip("\n").lstrip()
+
     async def chat(self, user_message: str) -> str:
         response = await super().chat(user_message)
-        # Fire-and-forget fact extraction — don't block the response
-        asyncio.create_task(self._extract_and_save_facts(user_message, response))
+        # Fire-and-forget fact extraction — strip auto-injected context first
+        clean_msg = self._strip_live_context(user_message)
+        asyncio.create_task(self._extract_and_save_facts(clean_msg, response))
         return response
 
     async def chat_stream(self, user_message: str):
@@ -1155,11 +1711,41 @@ class MainActor(LLMAgent):
             else:
                 full_response.append(chunk)
                 yield chunk
-        # Extract facts from completed response
+        # Extract facts from completed response — strip auto-injected context first
         if full_response:
+            clean_msg = self._strip_live_context(user_message)
             asyncio.create_task(
-                self._extract_and_save_facts(user_message, "".join(full_response))
+                self._extract_and_save_facts(clean_msg, "".join(full_response))
             )
+
+    async def _record_external_exchange(self, user_message: str, assistant_response: str):
+        """
+        Record a turn that was handled OUTSIDE self.chat() / self.chat_stream() —
+        i.e. by the HA, ACTUATE, or PIPELINE branches that return before the LLM
+        is called on main. Without this, those exchanges vanish from history and
+        future turns have no memory of them.
+
+        Mirrors what LLMAgent.chat() does for OTHER turns:
+          - append user + assistant to _conversation_history
+          - run rolling summarization if needed
+          - persist history to disk
+          - trigger fact extraction
+        """
+        if not user_message or assistant_response is None:
+            return
+        try:
+            self.metrics.messages_processed += 1
+            self._conversation_history.append({"role": "user",      "content": user_message})
+            self._conversation_history.append({"role": "assistant", "content": str(assistant_response)})
+            # Same summarization + persistence path that LLMAgent.chat() uses
+            await self._maybe_summarize()
+            self.persist("conversation_history", self._conversation_history)
+        except Exception as e:
+            logger.warning(f"[{self.name}] Failed to record external exchange: {e}")
+        # Fire-and-forget fact extraction — same as chat()
+        asyncio.create_task(
+            self._extract_and_save_facts(user_message, str(assistant_response))
+        )
 
 
     def _drain_notifications(self) -> str:
@@ -1177,6 +1763,30 @@ class MainActor(LLMAgent):
     async def process_user_input(self, text: str) -> str:
         note_prefix = self._drain_notifications()
 
+        # ── Pending-plan response detection ─────────────────────────────────
+        # If there's a dry-run plan waiting for approval and the user's message
+        # looks like "yes"/"no", handle it BEFORE any other processing. This
+        # must come first so a bare "yes" doesn't accidentally hit the intent
+        # classifier or get treated as a new prompt. Slash commands and other
+        # explicit prefixes are NOT intercepted (the user might want to inspect
+        # /plans or /registry while a plan is pending).
+        if not text.strip().startswith("/") and not text.strip().startswith("@"):
+            plan_response = await self._handle_pending_plan_response(text)
+            if plan_response is not None:
+                # Record the exchange so history reflects the approval/rejection
+                await self._record_external_exchange(text, plan_response)
+                return note_prefix + plan_response
+
+            # Pending-plan ambiguity guard: if the user has a plan pending
+            # and now types something that looks like another spawn / pipeline
+            # request, we'd otherwise silently create the new agents AND
+            # later spawn the pending ones too — duplicates galore. Warn
+            # the user and ask them to resolve the pending plan first.
+            warn = self._warn_if_pending_plan_collision(text)
+            if warn:
+                await self._record_external_exchange(text, warn)
+                return note_prefix + warn
+
         # ── Direct API intercepts — handle without LLM round-trip ──────────
         stripped = text.strip().rstrip("()")
 
@@ -1191,13 +1801,23 @@ class MainActor(LLMAgent):
                 "  /capabilities         — alias for /agents",
                 "  /agents stop <name>   — stop and remove an agent (local or remote)",
                 "  /agents delete <name> — alias for /agents stop",
+                "  /registry             — diagnostic: compare live registry, spawn registry, and manifest cache",
+                "  /plans                — list pending pipeline proposals (dry-run)",
+                "  /plans show <id>      — inspect a proposal's full code",
+                "  /plans approve <id>   — execute a proposed pipeline",
+                "  /plans reject <id>    — discard a proposed pipeline",
+                "  pipeline! <task>      — bypass approval and execute immediately (power users)",
                 "  @agent-name <msg>     — send a message directly to a named agent",
                 "  @catalog list         — list available catalog recipes",
                 "  @catalog spawn <n>    — spawn a catalog agent",
                 "",
                 "**Nodes**",
-                "  /nodes                — list remote nodes and their agents",
-                "  /nodes remove <node>  — stop all agents on a node and remove it",
+                "  /nodes                            — list remote nodes and their agents",
+                "  /nodes remove <node>              — stop all agents on a node and remove it",
+                "  /deploy <node> [host [user [pw [broker]]]]",
+                "                                    — deploy a remote Wactorz node",
+                "                                      (run with just <node> to auto-discover hosts)",
+                "  /migrate <agent> <node>           — move an agent to a different node",
                 "",
                 "**Pipelines**",
                 "  /rules                — list active pipeline rules",
@@ -1314,7 +1934,8 @@ class MainActor(LLMAgent):
                 self.persist("_user_facts", {})
                 self.persist("history_summary", "")
                 self._history_summary = ""
-                self.system_prompt = ORCHESTRATOR_PROMPT
+                # Rebuild fresh — running agents block is preserved, facts are gone
+                self._rebuild_system_prompt()
                 return note_prefix + "Memory cleared — user facts and conversation summary reset."
             if sub.startswith("forget "):
                 key = sub[7:].strip()
@@ -1325,14 +1946,31 @@ class MainActor(LLMAgent):
                     self._inject_user_facts_into_prompt()
                     return note_prefix + f"Forgotten: '{key}'"
                 return note_prefix + f"No fact found with key '{key}'."
-            # Default: show memory
+            # Default: show memory, grouped by bucket so it's easy to scan
             facts = self.get_user_facts()
             summary = self._history_summary
             lines = []
             if facts:
                 lines.append(f"User facts ({len(facts)}):")
-                for k, v in facts.items():
-                    lines.append(f"  {k}: {v}")
+                buckets = [
+                    ("pref_",   "Preferences & identity"),
+                    ("device_", "Devices & setup"),
+                    ("policy_", "Standing policies"),
+                ]
+                shown = set()
+                for prefix, heading in buckets:
+                    items = [(k, v) for k, v in facts.items() if k.startswith(prefix)]
+                    if items:
+                        lines.append(f"\n  [{heading}]")
+                        for k, v in sorted(items):
+                            lines.append(f"    {k[len(prefix):]}: {v}")
+                            shown.add(k)
+                # Anything left over (legacy or unprefixed keys)
+                leftover = [(k, v) for k, v in facts.items() if k not in shown]
+                if leftover:
+                    lines.append(f"\n  [Other / legacy]")
+                    for k, v in sorted(leftover):
+                        lines.append(f"    {k}: {v}")
             else:
                 lines.append("No user facts stored yet.")
             if summary:
@@ -1431,14 +2069,22 @@ class MainActor(LLMAgent):
                     await self._mqtt_publish(
                         f"nodes/{node}/stop", {"name": agent_name}, qos=1
                     )
+                    # Clear our cached manifest so /agents listings reflect reality.
+                    # The actor_id lookup may fail (remote actor not in our registry),
+                    # but the in-memory cache cleanup still happens.
+                    await self._clear_agent_manifest(agent_name)
+                    self._record_agent_deletion(agent_name, reason=f"manually stopped via /agents on node '{node}'")
                     return note_prefix + f"Stop signal sent to '{agent_name}' on node '{node}'."
                 else:
                     # Local agent
                     if self._registry:
                         target = self._registry.find_by_name(agent_name)
                         if target:
-                            await self._registry.unregister(target.actor_id)
+                            actor_id = target.actor_id
+                            await self._registry.unregister(actor_id)
                             await target.stop()
+                            await self._clear_agent_manifest(agent_name, actor_id)
+                            self._record_agent_deletion(agent_name, reason="manually stopped via /agents")
                             return note_prefix + f"Agent '{agent_name}' stopped."
                     return note_prefix + f"Agent '{agent_name}' not found locally."
 
@@ -1491,6 +2137,180 @@ class MainActor(LLMAgent):
                     lines.append(f"    spawnable   : yes — @catalog spawn {a['name']}")
             lines.append("\nLegend: \U0001f7e2 running  \U0001f4e6 spawnable (not yet running)  \U0001f534 stopped")
             lines.append("Filter: /agents <keyword>   e.g. /agents discord")
+            return note_prefix + "\n".join(lines)
+
+        # ── /registry — diagnostic: compare all three sources of truth ──────
+        if stripped == "/registry":
+            # 1. Live in-memory registry — what's actually running in this process
+            live_names = (
+                {a.name for a in self._registry.all_actors()}
+                if self._registry else set()
+            )
+            # Skip housekeeping actors so the comparison focuses on user agents
+            housekeeping = {"main", "monitor", "installer", "home-assistant-agent",
+                            "anomaly-detector", "code-agent"}
+            live_user = live_names - housekeeping
+
+            # 2. Spawn registry — what main intends to have running (persisted)
+            spawn_reg = self._get_spawn_registry()
+            spawn_names = set(spawn_reg.keys())
+
+            # 3. Manifest cache — every agent that has ever announced itself,
+            #    including remote ones on other nodes
+            manifest_names = set(self._agent_manifests.keys()) - housekeeping
+
+            # 4. Node heartbeats — what each remote node says it's running
+            heartbeat_names: set[str] = set()
+            for nd_info in self._known_nodes.values():
+                heartbeat_names.update(nd_info.get("agents", []))
+
+            lines = ["**Agent registry diagnostic**", ""]
+
+            # ── Live registry ──
+            lines.append("\U0001f7e2 **Live registry** (running NOW in this process):")
+            if live_user:
+                for name in sorted(live_user):
+                    actor = self._registry.find_by_name(name)
+                    state = actor.state.name if actor else "?"
+                    lines.append(f"    {name}  ({state})")
+            else:
+                lines.append("    (none)")
+
+            # ── Spawn registry ──
+            lines.append("")
+            lines.append("\U0001f4be **Spawn registry** (auto-restore on restart, persisted to disk):")
+            if spawn_names:
+                for name in sorted(spawn_names):
+                    cfg  = spawn_reg.get(name, {})
+                    node = cfg.get("node", "").strip() or "local"
+                    lines.append(f"    {name}  on {node}")
+            else:
+                lines.append("    (none)")
+
+            # ── Manifest cache ──
+            lines.append("")
+            lines.append("\U0001f4e6 **Manifest cache** (announced via MQTT — includes remote agents):")
+            if manifest_names:
+                for name in sorted(manifest_names):
+                    m    = self._agent_manifests.get(name, {})
+                    node = m.get("node") or "local"
+                    lines.append(f"    {name}  on {node}")
+            else:
+                lines.append("    (none)")
+
+            # ── Discrepancy report — this is the value-add ──
+            issues = []
+            # Live but not in spawn registry → an ad-hoc spawn that won't survive restart
+            for name in sorted(live_user - spawn_names):
+                issues.append(f"\u26a0\ufe0f  '{name}' is RUNNING but NOT in spawn registry — won't auto-restore on restart")
+            # Spawn registry says local but not live → main thinks it should be running
+            for name in sorted(spawn_names - live_names):
+                cfg = spawn_reg.get(name, {})
+                if not cfg.get("node", "").strip():   # local-only check
+                    issues.append(f"\u26a0\ufe0f  '{name}' is in spawn registry but NOT running locally — start failed or was stopped without cleanup")
+            # In manifest but not live and not in spawn registry → ghost
+            ghosts = manifest_names - live_user - spawn_names - heartbeat_names
+            for name in sorted(ghosts):
+                issues.append(f"\U0001f47b '{name}' is in manifest cache but nowhere else — stale entry, run `/agents delete {name}` to clean up")
+            # In spawn registry as remote, but the node is offline / not heartbeating
+            online_nodes = {n for n, info in self._known_nodes.items()
+                             if (__import__("time").time() - info.get("last_seen", 0)) < 30}
+            for name, cfg in spawn_reg.items():
+                node = cfg.get("node", "").strip()
+                if node and node not in online_nodes:
+                    issues.append(f"\u26a0\ufe0f  '{name}' assigned to node '{node}' which is OFFLINE — agent unreachable")
+
+            lines.append("")
+            if issues:
+                lines.append("**Discrepancies found:**")
+                for s in issues:
+                    lines.append(f"  {s}")
+            else:
+                lines.append("\u2705 All three sources agree — registry is consistent.")
+
+            return note_prefix + "\n".join(lines)
+
+        # ── /plans — pending dry-run proposals ──────────────────────────────
+        if stripped == "/plans" or stripped.startswith("/plans "):
+            parts = stripped.split(None, 2)
+            sub = parts[1] if len(parts) > 1 else ""
+
+            # /plans show <id>
+            if sub == "show" and len(parts) == 3:
+                pid = parts[2]
+                p = self.get_pending_plans().get(pid)
+                if not p:
+                    return note_prefix + f"No plan with id `{pid}`."
+                envelope = p.get("envelope", {})
+                agents = envelope.get("plan", [])
+                lines = [self._format_plan_proposal(p), "", "**Full agent code:**"]
+                for step in agents:
+                    name = step.get("name", "?")
+                    code = step.get("spawn_config", {}).get("code", "") or "(no code — pre-built type)"
+                    lines.append(f"\n--- {name} ---")
+                    lines.append("```python")
+                    lines.append(code[:2000])
+                    if len(code) > 2000:
+                        lines.append(f"... ({len(code) - 2000} more chars truncated)")
+                    lines.append("```")
+                return note_prefix + "\n".join(lines)
+
+            # /plans approve <id>
+            if sub == "approve" and len(parts) == 3:
+                pid = parts[2]
+                p = self.get_pending_plans().get(pid)
+                if not p:
+                    return note_prefix + f"No plan with id `{pid}`."
+                if p.get("status") != "pending":
+                    return note_prefix + f"Plan `{pid}` is `{p.get('status')}`, not pending."
+                return note_prefix + await self._execute_pending_plan(p)
+
+            # /plans reject <id>
+            if sub == "reject" and len(parts) == 3:
+                pid = parts[2]
+                p = self.get_pending_plans().get(pid)
+                if not p:
+                    return note_prefix + f"No plan with id `{pid}`."
+                if p.get("status") != "pending":
+                    return note_prefix + f"Plan `{pid}` is `{p.get('status')}`, not pending."
+                return note_prefix + self._reject_pending_plan(p)
+
+            # /plans clear — drop all non-pending plans (housekeeping)
+            if sub == "clear":
+                plans = self.recall(PENDING_PLANS_KEY) or {}
+                kept = {pid: p for pid, p in plans.items() if p.get("status") == "pending"}
+                dropped = len(plans) - len(kept)
+                self.persist(PENDING_PLANS_KEY, kept)
+                return note_prefix + f"Cleared {dropped} resolved plan(s). {len(kept)} still pending."
+
+            # /plans (no args) — list
+            plans = self.get_pending_plans()
+            pending  = [p for p in plans.values() if p.get("status") == "pending"]
+            resolved = [p for p in plans.values() if p.get("status") != "pending"]
+            lines = []
+            if pending:
+                lines.append(f"**Pending plans ({len(pending)})** — awaiting your approval")
+                for p in sorted(pending, key=lambda x: -x.get("created_at", 0)):
+                    pid     = p.get("plan_id", "?")
+                    task    = p.get("task", "?")[:60]
+                    n_agents = len(p.get("envelope", {}).get("plan", []))
+                    age_s   = int(__import__("time").time() - p.get("created_at", 0))
+                    lines.append(f"  `{pid}` ({n_agents} agent(s), {age_s}s ago) — {task}")
+                lines.append("\n  /plans show <id>      — see full plan with code")
+                lines.append("  /plans approve <id>   — execute the plan")
+                lines.append("  /plans reject <id>    — discard the plan")
+            else:
+                lines.append("No pending plans.")
+            if resolved:
+                lines.append(f"\n_Recent resolved plans ({len(resolved)})_:")
+                for p in sorted(resolved, key=lambda x: -x.get("created_at", 0))[:5]:
+                    pid    = p.get("plan_id", "?")
+                    status = p.get("status", "?")
+                    task   = p.get("task", "?")[:50]
+                    icon   = {"approved": "\u2705", "rejected": "\u274c",
+                              "expired": "\u23f0", "superseded": "\u21bb"}.get(status, "?")
+                    lines.append(f"  {icon} `{pid}` ({status}) — {task}")
+                lines.append("\n  /plans clear          — drop resolved entries")
             return note_prefix + "\n".join(lines)
 
                 # ── @mention direct routing ─────────────────────────────────────────
@@ -1593,28 +2413,56 @@ class MainActor(LLMAgent):
             "@planner", "set up a pipeline", "create a rule", "set up a rule",
         )):
             result = await self._run_planner(text)
-            return note_prefix + (result or "Planner did not return a result. Please retry.")
+            response = result or "Planner did not return a result. Please retry."
+            await self._record_external_exchange(text, response)
+            return note_prefix + response
 
         # Single LLM call classifies intent: ACTUATE, HA, PIPELINE (reactive rule), OTHER
         intent = await self._classify_intent(text)
         logger.info(f"[{self.name}] Intent: {intent} — {text[:60]}")
 
         if intent == "PIPELINE":
-            result = await self._run_planner(text)
-            return note_prefix + (result or "Planner did not return a result. Please retry.")
-            
+            response = await self._propose_or_execute_pipeline(text)
+            await self._record_external_exchange(text, response)
+            return note_prefix + response
+
         if intent == "ACTUATE":
-            return note_prefix + await self._handle_actuate_intent(text)
+            response = await self._handle_actuate_intent(text)
+            await self._record_external_exchange(text, response)
+            return note_prefix + response
 
         if intent == "HA":
             result = await self.delegate_task("home-assistant-agent", text, timeout=120.0)
             if result and isinstance(result, dict) and result.get("result"):
-                return note_prefix + str(result["result"])
-            if not result:
-                return note_prefix + "I could not reach the Home Assistant agent right now. Please retry."
-            return note_prefix + "The Home Assistant agent did not return a result. Please retry."
+                response = str(result["result"])
+            elif not result:
+                response = "I could not reach the Home Assistant agent right now. Please retry."
+            else:
+                response = "The Home Assistant agent did not return a result. Please retry."
+            await self._record_external_exchange(text, response)
+            return note_prefix + response
 
-        response = await self.chat(text)
+        # Refresh the system prompt with live registry + facts before any LLM call.
+        # This ensures the LLM never answers from a stale view of which agents exist.
+        self._rebuild_system_prompt()
+
+        # Belt-and-braces: also inject the live agent list as a prefix on the
+        # user message itself. Models trust in-message context over system-prompt
+        # claims, so this is the strongest signal we can give without using a tool.
+        # We send the prefixed text to the LLM but replace it with the clean
+        # original in conversation history afterward — otherwise stale prefixes
+        # would accumulate across turns and bloat the context window.
+        prefixed_text = self._prefix_with_live_context(text)
+        response = await self.chat(prefixed_text)
+        # Find the most recent user message in history that matches the prefixed
+        # text and replace it with the user's original. The assistant turn after
+        # it remains unchanged.
+        for i in range(len(self._conversation_history) - 1, -1, -1):
+            m = self._conversation_history[i]
+            if m.get("role") == "user" and m.get("content") == prefixed_text:
+                m["content"] = text
+                break
+        self.persist("conversation_history", self._conversation_history)
 
         # If the LLM wrote agent code but forgot the <spawn> wrapper, remind it once
         has_spawn   = "<spawn>" in response
@@ -1630,6 +2478,11 @@ class MainActor(LLMAgent):
 
         clean, spawned = await self._process_spawn_commands(response)
 
+        # Process any <delete>{"name": "..."}</delete> blocks the LLM produced.
+        # This is the orchestrator-side counterpart of <spawn> — lets the LLM
+        # remove agents in response to user requests like "delete the math agent".
+        clean, deleted, missing = await self._process_delete_commands(clean)
+
         # Execute any @agent-name {payload} delegation patterns the LLM produced
         clean = await self._execute_llm_delegations(clean)
 
@@ -1638,18 +2491,25 @@ class MainActor(LLMAgent):
             {"type": "user_interaction", "input": text[:100], "response": clean[:200]},
         )
 
+        # Build a system footer summarizing spawn/delete actions
+        footer_parts = []
         if spawned:
             bg_names   = [a.name for a in spawned if isinstance(a, _SpawnPlaceholder)]
             live_names = [a.name for a in spawned if not isinstance(a, _SpawnPlaceholder)]
-            parts = []
             if live_names:
                 replaced = '"replace": true' in response or '"replace":true' in response
                 action   = "Replaced" if replaced else "Spawned"
-                parts.append(f"{action} {', '.join(live_names)}")
+                footer_parts.append(f"{action} {', '.join(live_names)} — will auto-restore on restart")
             if bg_names:
-                parts.append(f"Installing packages for {', '.join(bg_names)} — will appear shortly")
-            if parts:
-                clean += f"\n\n[System: {' | '.join(parts)} — will auto-restore on restart]"
+                footer_parts.append(f"Installing packages for {', '.join(bg_names)} — will appear shortly")
+        if deleted:
+            footer_parts.append(f"Deleted {', '.join(deleted)}")
+        if missing:
+            footer_parts.append(
+                f"Could not delete {', '.join(missing)} — not currently registered"
+            )
+        if footer_parts:
+            clean += f"\n\n[System: {' | '.join(footer_parts)}]"
 
         return note_prefix + clean
 
@@ -1666,6 +2526,23 @@ class MainActor(LLMAgent):
         note_prefix = self._drain_notifications()
         if note_prefix:
             yield note_prefix
+
+        # ── Pending-plan response detection (same as non-streaming path) ─────
+        if not text.strip().startswith("/") and not text.strip().startswith("@"):
+            plan_response = await self._handle_pending_plan_response(text)
+            if plan_response is not None:
+                await self._record_external_exchange(text, plan_response)
+                yield plan_response
+                yield {"done": True, "spawned": [], "system_msg": ""}
+                return
+
+            # Collision guard — see process_user_input for rationale
+            warn = self._warn_if_pending_plan_collision(text)
+            if warn:
+                await self._record_external_exchange(text, warn)
+                yield warn
+                yield {"done": True, "spawned": [], "system_msg": ""}
+                return
 
         # All slash-commands and direct API intercepts are handled by process_user_input
         # Route them there to avoid duplicating all that logic here
@@ -1688,7 +2565,9 @@ class MainActor(LLMAgent):
             "@planner", "set up a pipeline", "create a rule", "set up a rule",
         )):
             result = await self._run_planner(text)
-            yield result or "Planner did not return a result. Please retry."
+            response = result or "Planner did not return a result. Please retry."
+            await self._record_external_exchange(text, response)
+            yield response
             yield {"done": True, "spawned": [], "system_msg": ""}
             return
 
@@ -1697,40 +2576,64 @@ class MainActor(LLMAgent):
         logger.info(f"[{self.name}] Intent: {intent} — {text[:60]}")
 
         if intent == "PIPELINE":
-            result = await self._run_planner(text)
-            yield result or "Planner did not return a result. Please retry."
+            response = await self._propose_or_execute_pipeline(text)
+            await self._record_external_exchange(text, response)
+            yield response
             yield {"done": True, "spawned": [], "system_msg": ""}
             return
-            
+
         if intent == "ACTUATE":
-            result = await self._handle_actuate_intent(text)
-            yield result
+            response = await self._handle_actuate_intent(text)
+            await self._record_external_exchange(text, response)
+            yield response
             yield {"done": True, "spawned": [], "system_msg": ""}
             return
 
         if intent == "HA":
             result = await self.delegate_task("home-assistant-agent", text, timeout=120.0)
             if result and isinstance(result, dict) and result.get("result"):
-                yield str(result["result"])
+                response = str(result["result"])
             elif not result:
-                yield "I could not reach the Home Assistant agent right now. Please retry."
+                response = "I could not reach the Home Assistant agent right now. Please retry."
             else:
-                yield "The Home Assistant agent did not return a result. Please retry."
+                response = "The Home Assistant agent did not return a result. Please retry."
+            await self._record_external_exchange(text, response)
+            yield response
             yield {"done": True, "spawned": [], "system_msg": ""}
             return
 
+        # Refresh the system prompt with live registry + facts before any LLM call.
+        # This ensures the LLM never answers from a stale view of which agents exist.
+        self._rebuild_system_prompt()
+
+        # Belt-and-braces: inject live agent list as a prefix on the user message.
+        # Same as the non-streaming path — see _prefix_with_live_context for why.
+        prefixed_text = self._prefix_with_live_context(text)
+
         # Stream the LLM response chunk by chunk
         full_chunks = []
-        async for chunk in self.chat_stream(text):
+        async for chunk in self.chat_stream(prefixed_text):
             if isinstance(chunk, dict):
                 break   # usage dict — discard, already tracked inside chat_stream
             full_chunks.append(chunk)
             yield chunk
 
+        # Replace the prefixed user message in history with the clean original
+        # so future turns aren't polluted with stale prefixes.
+        for i in range(len(self._conversation_history) - 1, -1, -1):
+            m = self._conversation_history[i]
+            if m.get("role") == "user" and m.get("content") == prefixed_text:
+                m["content"] = text
+                break
+        self.persist("conversation_history", self._conversation_history)
+
         full_response = "".join(full_chunks)
 
         # Process any <spawn> blocks in the completed response
         _, spawned = await self._process_spawn_commands(full_response)
+
+        # Process any <delete> blocks — orchestrator-side counterpart of <spawn>
+        _, deleted, missing = await self._process_delete_commands(full_response)
 
         # Execute any @agent-name {payload} delegation patterns the LLM produced
         # If delegations ran, yield the results as an additional chunk
@@ -1743,17 +2646,20 @@ class MainActor(LLMAgent):
                 yield "\n" + "\n".join(results)
         full_response = delegated
 
-        system_msg = ""
+        system_msg_parts = []
         if spawned:
             names      = ", ".join(f"'{a.name}'" for a in spawned if not isinstance(a, _SpawnPlaceholder))
             bg_names   = [a.name for a in spawned if isinstance(a, _SpawnPlaceholder)]
-            parts = []
             if names:
                 replaced = '"replace": true' in full_response or '"replace":true' in full_response
-                parts.append(f"{'Replaced' if replaced else 'Spawned'} {names} — will auto-restore on restart")
+                system_msg_parts.append(f"{'Replaced' if replaced else 'Spawned'} {names} — will auto-restore on restart")
             if bg_names:
-                parts.append(f"Installing packages for {', '.join(bg_names)} — will appear shortly")
-            system_msg = " | ".join(parts)
+                system_msg_parts.append(f"Installing packages for {', '.join(bg_names)} — will appear shortly")
+        if deleted:
+            system_msg_parts.append(f"Deleted {', '.join(deleted)}")
+        if missing:
+            system_msg_parts.append(f"Could not delete {', '.join(missing)} — not currently registered")
+        system_msg = " | ".join(system_msg_parts)
 
         await self._mqtt_publish(
             f"agents/{self.actor_id}/logs",
@@ -1809,15 +2715,46 @@ class MainActor(LLMAgent):
 
         return False
 
-    async def _run_planner(self, task: str) -> Optional[str]:
-        """Spawn a PlannerAgent, hand it the task, wait for the result."""
+    async def _run_planner(
+        self,
+        task: str,
+        is_pipeline_intent: bool = False,
+        plan_only: bool = False,
+        approved_plan: Optional[dict] = None,
+    ) -> Optional[str]:
+        """Spawn a PlannerAgent, hand it the task, wait for the result.
+
+        is_pipeline_intent: when True, the caller has classified this as a
+        reactive-rule task ("if X then Y", "wherever Z happens..."). For these,
+        we DELIBERATELY skip the conversation-history enrichment because:
+          - Pipelines are imperative declarations, not follow-ups.
+          - Including unrelated prior turns has been observed to bleed irrelevant
+            context into the planner's LLM (e.g. a prior "door open" pipeline
+            poisoning a fresh "camera person detection" pipeline, causing the
+            planner to generate a door-themed agent name and code).
+          - Pronoun resolution — the main reason enrichment exists — rarely
+            applies to pipeline declarations.
+
+        plan_only: when True, the planner builds a plan but does NOT spawn.
+        Returns a JSON string containing the plan envelope (use _parse_plan_envelope
+        to extract). Used by the dry-run flow.
+
+        approved_plan: when provided, the planner skips planning entirely and
+        executes the supplied plan directly. Used after the user approves a
+        previously-generated plan.
+        """
         from .planner_agent import PlannerAgent
         import uuid
 
         # Enrich vague follow-up tasks with recent conversation context
-        # so the planner has the full picture (e.g. which entity was found)
+        # so the planner has the full picture (e.g. which entity was found).
+        # PIPELINE intent skips this — see docstring.
+        # approved_plan also skips: the plan was already built with the right context.
         enriched_task = task
-        if self._conversation_history and len(task.split()) < 15:
+        if (not is_pipeline_intent
+                and not approved_plan
+                and self._conversation_history
+                and len(task.split()) < 15):
             # Short/vague task — inject last 3 exchanges as context
             recent = self._conversation_history[-6:]  # 3 user+assistant pairs
             ctx_lines = []
@@ -1833,11 +2770,12 @@ class MainActor(LLMAgent):
                 )
 
         planner_name = f"planner-{uuid.uuid4().hex[:6]}"
-        logger.info(f"[{self.name}] Spawning planner '{planner_name}' for: {enriched_task[:60]}")
+        mode = "approved-execute" if approved_plan else ("plan-only" if plan_only else "plan-and-execute")
+        logger.info(f"[{self.name}] Spawning planner '{planner_name}' (mode={mode}) for: {enriched_task[:60]}")
 
         await self._mqtt_publish(
             f"agents/{self.actor_id}/logs",
-            {"type": "log", "message": f"Complex task detected — spawning planner...", "timestamp": __import__('time').time()},
+            {"type": "log", "message": f"Complex task detected — spawning planner ({mode})...", "timestamp": __import__('time').time()},
         )
 
         task_id = f"plan_{uuid.uuid4().hex[:8]}"
@@ -1853,6 +2791,8 @@ class MainActor(LLMAgent):
                 reply_to_id=self.actor_id,
                 reply_task_id=task_id,
                 auto_terminate=True,
+                plan_only=plan_only,
+                approved_plan=approved_plan,
                 persistence_dir=str(self._persistence_dir.parent),
             )
             if not planner:
@@ -1873,6 +2813,342 @@ class MainActor(LLMAgent):
             return None
         finally:
             self._result_futures.pop(task_id, None)
+
+    @staticmethod
+    def _parse_plan_envelope(planner_result: str) -> Optional[dict]:
+        """
+        Try to parse a planner result string as a plan envelope (the JSON dict
+        returned by plan_only mode). Returns the envelope dict if it's a valid
+        proposal, or None if the result is a regular answer (e.g. error message,
+        feasibility failure, or fallback prose).
+        """
+        if not planner_result or not planner_result.strip().startswith("{"):
+            return None
+        try:
+            envelope = json.loads(planner_result)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        if isinstance(envelope, dict) and envelope.get("_plan_proposal") is True:
+            return envelope
+        return None
+
+    def _dryrun_enabled(self, text: str) -> bool:
+        """
+        Decide whether dry-run / approval should gate this PIPELINE request.
+
+        Bypass conditions (always skip approval):
+          - Text uses the explicit bypass marker `pipeline!` or `coordinate!`
+          - User policy `policy_dryrun` is set to "off" / "false" / "disabled"
+
+        Otherwise dry-run is on by default for PIPELINE intent.
+        """
+        if not text:
+            return True
+        lowered = text.lower().lstrip()
+        for bypass in ("pipeline!", "coordinate!", "@planner!"):
+            if lowered.startswith(bypass):
+                return False
+        # Check user-set policy
+        facts = self.get_user_facts()
+        for key in ("policy_dryrun", "policy_dry_run", "policy_approval"):
+            v = str(facts.get(key, "")).strip().lower()
+            if v in ("off", "false", "disabled", "no", "skip"):
+                return False
+        return True
+
+    @staticmethod
+    def _strip_dryrun_bypass(text: str) -> str:
+        """Strip the `pipeline!` / `coordinate!` bypass marker from the user's
+        text so the planner doesn't see it as part of the task."""
+        if not text:
+            return text
+        lowered = text.lower().lstrip()
+        for bypass in ("pipeline!", "coordinate!", "@planner!"):
+            if lowered.startswith(bypass):
+                # Find the bypass in the original (case-insensitive) and skip it
+                idx = text.lower().find(bypass)
+                if idx != -1:
+                    return text[idx + len(bypass):].lstrip(" :,-")
+        return text
+
+    async def _propose_or_execute_pipeline(self, text: str) -> str:
+        """
+        Top-level entry for PIPELINE intent. Decides between dry-run (build
+        plan, ask for approval, store proposal) and immediate execution
+        (bypass marker or policy-disabled). Returns the user-facing response.
+        """
+        if not self._dryrun_enabled(text):
+            # Bypass — execute immediately as before
+            cleaned = self._strip_dryrun_bypass(text)
+            result = await self._run_planner(cleaned, is_pipeline_intent=True)
+            return result or "Planner did not return a result. Please retry."
+
+        # Dry-run path: get a plan, don't execute
+        planner_result = await self._run_planner(text, is_pipeline_intent=True, plan_only=True)
+        if not planner_result:
+            return "Planner did not return a result. Please retry."
+
+        envelope = self._parse_plan_envelope(planner_result)
+        if not envelope:
+            # Planner returned a regular answer (error, feasibility failure,
+            # or fallback prose). Pass it through unchanged.
+            return planner_result
+
+        # Store the proposal
+        import uuid as _uuid, time as _t
+        plan_id = _uuid.uuid4().hex[:8]
+        proposal = {
+            "plan_id":    plan_id,
+            "task":       text,
+            "created_at": _t.time(),
+            "status":     "pending",
+            "envelope":   envelope,
+        }
+        self.save_pending_plan(proposal)
+        return self._format_plan_proposal(proposal)
+
+    # Approval/rejection vocabulary — exact-match-only after my v2 fix.
+    # The previous version used `cleaned.startswith(w + " ")` which silently
+    # treated any sentence beginning with "ok " as approval — including
+    # corrections like "ok lets go for 55 as a threshold". The new logic
+    # requires the message to be SHORT enough that it can only be approval
+    # or rejection. See _looks_like_approval / _looks_like_rejection.
+    _APPROVE_PHRASES = {
+        "yes", "y", "yep", "yeah", "yup", "ya",
+        "ok", "okay", "k", "kk",
+        "sure", "fine", "alright",
+        "go", "go ahead", "do it", "send it", "ship it",
+        "approve", "approved", "approved!",
+        "proceed", "confirm", "confirmed",
+        "spawn it", "create it", "make it",
+    }
+    _APPROVE_EMPHASIS = {
+        "please", "now", "go", "do it", "thanks", "thx", "ahead",
+        "confirm", "confirmed", "approved", "ok", "yes", "good",
+    }
+    _REJECT_PHRASES = {
+        "no", "n", "nope", "nah",
+        "reject", "rejected",
+        "cancel", "skip", "discard", "drop it",
+        "abort", "stop", "stop it",
+        "nevermind", "never mind", "forget it",
+    }
+
+    @classmethod
+    def _looks_like_approval(cls, cleaned: str) -> bool:
+        """Strict approval detection. Only fires when the message is short
+        enough that it cannot also be a correction or a new request."""
+        if cleaned in cls._APPROVE_PHRASES:
+            return True
+        # Allow up to a 3-token expansion where every extra token is itself
+        # approval-flavored, so "yes please" / "ok do it" / "go ahead now" all
+        # match — but "ok lets go for 55 as a threshold" does NOT.
+        tokens = cleaned.split()
+        if len(tokens) <= 3 and tokens and tokens[0] in cls._APPROVE_PHRASES:
+            tail = " ".join(tokens[1:])
+            if not tail:
+                return True
+            # Tail must be entirely emphasis/approval words (or a recognized
+            # multi-word approval phrase joined back together).
+            if tail in cls._APPROVE_PHRASES or tail in cls._APPROVE_EMPHASIS:
+                return True
+            if all(t in cls._APPROVE_EMPHASIS or t in cls._APPROVE_PHRASES for t in tokens[1:]):
+                return True
+        return False
+
+    @classmethod
+    def _looks_like_rejection(cls, cleaned: str) -> bool:
+        """Strict rejection detection — same shape as approval."""
+        if cleaned in cls._REJECT_PHRASES:
+            return True
+        tokens = cleaned.split()
+        if len(tokens) <= 3 and tokens and tokens[0] in cls._REJECT_PHRASES:
+            return True   # "no thanks", "cancel that", "stop please" — all clearly negative
+        return False
+
+    # Correction-intent signals: words that suggest the user is adjusting
+    # the pending plan rather than confirming or starting fresh. Used only
+    # when a plan is pending — outside that context these words are noise.
+    _CORRECTION_HINTS = (
+        "actually", "instead", "rather", "let's", "lets", "make it",
+        "change", "change it", "use ", "set it to", "set the",
+        "should be", "needs to be", "make that", "but ",
+        " threshold", " interval", " every ", " seconds", " minutes",
+        " hours", " minutes", " degrees", "%", "celsius", "fahrenheit",
+        "increase", "decrease", "raise", "lower", "higher", "lower",
+    )
+
+    @classmethod
+    def _looks_like_correction(cls, text: str) -> bool:
+        """Heuristic: does this message look like an adjustment to a pending
+        plan rather than a fresh request? Pure heuristic — false positives
+        get a confirm-or-new prompt, false negatives fall through to OTHER
+        intent (mildly annoying but not destructive)."""
+        lowered = text.lower()
+        # Numbers + units strongly suggest correction ("change to 55%", "every 30s")
+        import re
+        if re.search(r"\b\d+(\.\d+)?\s*(%|c|°|sec|secs|seconds|min|mins|minutes|hour|hours|hr|hrs)\b", lowered):
+            return True
+        if re.search(r"\b(threshold|interval|frequency|rate|delay)\b", lowered):
+            return True
+        return any(h in lowered for h in cls._CORRECTION_HINTS)
+
+    async def _handle_pending_plan_response(self, text: str) -> Optional[str]:
+        """
+        If there is a pending plan and the user's message looks like a
+        response to it (yes/no/correction), handle it and return the result.
+        Returns None if there's no pending plan or the message clearly
+        isn't a response — the message then flows through normal processing.
+
+        Decision tree (in priority order):
+          1. Strict approval match → execute the plan.
+          2. Strict rejection match → reject and discard.
+          3. Looks-like-correction (numbers/units, "let's", "instead", etc.)
+             → revise the pending plan with this feedback.
+          4. Anything else → return None, message processed normally
+             (collision guard catches spawn-intent later).
+        """
+        pending = self._most_recent_pending_plan()
+        if not pending:
+            return None
+
+        cleaned = text.strip().lower().rstrip(".,!?")
+        if not cleaned:
+            return None
+
+        if self._looks_like_approval(cleaned):
+            return await self._execute_pending_plan(pending)
+        if self._looks_like_rejection(cleaned):
+            return self._reject_pending_plan(pending)
+        if self._looks_like_correction(text):
+            return await self._revise_pending_plan(pending, text)
+
+        # Not approval, rejection, or correction — leave the plan pending,
+        # let the message flow through normal handling. The collision guard
+        # downstream will catch spawn-intent messages and ask the user to
+        # resolve the pending plan first.
+        return None
+
+    async def _revise_pending_plan(self, proposal: dict, correction: str) -> str:
+        """
+        The user typed something that looks like an adjustment to a pending
+        plan ("let's use 55 instead", "change the interval to 30 seconds").
+        Mark the old plan superseded, re-run the planner with the original
+        task plus the correction as feedback, and present the new proposal.
+        """
+        old_id = proposal["plan_id"]
+        original_task = proposal["task"]
+        revised_task = (
+            f"{original_task}\n\n"
+            f"[User correction to the previous plan: {correction.strip()}]"
+        )
+        logger.info(f"[{self.name}] Revising plan {old_id} with correction: {correction[:80]!r}")
+        self.update_plan_status(old_id, "superseded")
+
+        # Re-run planner in plan_only mode with the enriched task
+        planner_result = await self._run_planner(revised_task, is_pipeline_intent=True, plan_only=True)
+        if not planner_result:
+            return f"Could not revise plan `{old_id}`. The planner did not respond — please retry."
+
+        envelope = self._parse_plan_envelope(planner_result)
+        if not envelope:
+            # Planner returned a regular answer — pass it through
+            return planner_result
+
+        import uuid as _uuid, time as _t
+        new_id = _uuid.uuid4().hex[:8]
+        new_proposal = {
+            "plan_id":    new_id,
+            "task":       original_task,   # keep original; correction lives in envelope
+            "created_at": _t.time(),
+            "status":     "pending",
+            "envelope":   envelope,
+            "supersedes": old_id,
+        }
+        self.save_pending_plan(new_proposal)
+        formatted = self._format_plan_proposal(new_proposal)
+        return (
+            f"📝 Got it — revising plan `{old_id}` based on your feedback.\n"
+            f"Plan `{old_id}` is now superseded by `{new_id}`:\n\n"
+            f"{formatted}"
+        )
+
+    async def _execute_pending_plan(self, proposal: dict) -> str:
+        """Execute an approved plan by calling the planner with approved_plan set."""
+        plan_id = proposal["plan_id"]
+        envelope = proposal["envelope"]
+        original_task = proposal["task"]
+        logger.info(f"[{self.name}] Executing approved plan {plan_id}")
+        self.update_plan_status(plan_id, "approved")
+
+        result = await self._run_planner(
+            original_task,
+            is_pipeline_intent=True,
+            approved_plan=envelope,
+        )
+        return f"✅ Approved plan `{plan_id}`. {result or 'Spawn complete.'}"
+
+    def _reject_pending_plan(self, proposal: dict) -> str:
+        plan_id = proposal["plan_id"]
+        self.update_plan_status(plan_id, "rejected")
+        logger.info(f"[{self.name}] Rejected plan {plan_id}")
+        return (
+            f"❌ Discarded plan `{plan_id}`. No agents were spawned.\n"
+            f"If you'd like to try again with different wording, just ask."
+        )
+
+    # Heuristic words that suggest the user wants to spawn / create / build
+    # something. Cheap pre-LLM check used by the collision guard. False
+    # positives are tolerable because the worst case is an unnecessary
+    # warning (one extra message); false NEGATIVES are what we're avoiding
+    # because they cause silent duplicate spawns.
+    _SPAWN_INTENT_WORDS = (
+        "spawn", "create", "build", "make a", "add a", "set up a", "set up an",
+        "start a", "start an", "deploy", "launch", "i want a", "i need a",
+        "generate", "produce", "watch for", "monitor", "alert me",
+        "if ", "when ", "whenever ", "trigger ", "schedule",
+        "every ", "each ",
+    )
+
+    def _warn_if_pending_plan_collision(self, text: str) -> Optional[str]:
+        """
+        If a plan is already pending and the user types something that looks
+        like another spawn / pipeline request, return a warning message and
+        do NOT process the request. This stops the silent-duplicate scenario:
+          1. user types pipeline request → plan A pending
+          2. user types ANOTHER pipeline request → would spawn agents X, Y
+          3. user later approves plan A → spawns plan A's agents too
+          4. user is now stuck with both, didn't intend either configuration
+
+        The user must resolve the pending plan first (yes/no/cancel) or
+        explicitly mark this new request to bypass.
+
+        Returns None if there's no collision and processing should continue.
+        """
+        pending = self._most_recent_pending_plan()
+        if not pending:
+            return None
+        # Bypass marker means "I know what I'm doing, just do it"
+        if not self._dryrun_enabled(text):
+            return None
+        lowered = text.lower().strip()
+        if not any(w in lowered for w in self._SPAWN_INTENT_WORDS):
+            return None
+        # Spawn-like request while a plan is pending — warn
+        pid     = pending["plan_id"]
+        ptask   = pending.get("task", "?")[:80]
+        return (
+            f"⚠️  You have a pending plan `{pid}` for: _{ptask}_\n\n"
+            f"Your new message looks like another spawn or rule request, which would\n"
+            f"create separate agents that may conflict with the pending plan once approved.\n\n"
+            f"Please resolve the pending plan first:\n"
+            f"  • Reply **yes** to approve and spawn it, then send your new request.\n"
+            f"  • Reply **no** to discard it, then send your new request.\n"
+            f"  • Or send `/plans show {pid}` to inspect, then `/plans approve {pid}` "
+            f"or `/plans reject {pid}`.\n\n"
+            f"To bypass this check for one-off requests, prefix with `pipeline!` "
+            f"(e.g. `pipeline! {text[:40]}...`)."
+        )
 
         # ── Spawn ──────────────────────────────────────────────────────────────
 
@@ -2052,6 +3328,82 @@ class MainActor(LLMAgent):
         clean = re.sub(pattern, '', response, flags=re.DOTALL).strip()
         return clean, spawned
 
+    async def _process_delete_commands(self, response: str):
+        """
+        Scan the LLM response for <delete>{"name": "agent-name"}</delete> blocks
+        and execute them. Mirrors _process_spawn_commands so deletion has the same
+        UX as spawn: the LLM emits a tagged block, we parse and execute, and the
+        block is stripped from the user-visible response.
+
+        Returns (cleaned_response, [deleted_names], [missing_names]):
+          - cleaned_response: response with <delete> blocks removed
+          - deleted_names:    names that were actually running and got removed
+          - missing_names:    names the LLM asked to delete that didn't exist
+
+        We track the missing list separately so the response footer can tell the
+        user "you asked me to delete X but it wasn't running" instead of silently
+        dropping the request.
+        """
+        pattern = r'<delete>(.*?)</delete>'
+        deleted: list[str] = []
+        missing: list[str] = []
+
+        # Build the set of currently-known agent names ONCE up front, so a delete
+        # block that lists a name we then delete doesn't accidentally appear as
+        # "missing" if a later block references the same name.
+        known_names = set(self._agent_manifests.keys())
+        if self._registry:
+            known_names |= {a.name for a in self._registry.all_actors()}
+        # Spawn registry is the strongest signal — if it's persisted there, deletion
+        # is meaningful even if the live actor isn't currently up.
+        known_names |= set(self._get_spawn_registry().keys())
+
+        # Names main itself never deletes (housekeeping/system actors).
+        protected = {"main", "monitor", "installer", "home-assistant-agent",
+                     "anomaly-detector", "code-agent", "catalog"}
+
+        for match in re.findall(pattern, response, re.DOTALL):
+            block = match.strip()
+            try:
+                # Accept either a JSON object {"name": "x"} or a bare string "x"
+                # so the LLM has a forgiving format.
+                name: Optional[str] = None
+                stripped = block.strip()
+                if stripped.startswith("{"):
+                    payload = json.loads(stripped)
+                    if isinstance(payload, dict):
+                        name = payload.get("name") or payload.get("agent")
+                else:
+                    # Bare token form: <delete>math-agent</delete>
+                    name = stripped.strip("\"'").split()[0] if stripped else None
+                if not name or not isinstance(name, str):
+                    logger.warning(f"[{self.name}] Empty or malformed <delete> block: {block[:200]}")
+                    continue
+                name = name.strip()
+
+                if name in protected:
+                    logger.warning(f"[{self.name}] Refused to delete protected agent '{name}'")
+                    continue
+
+                if name not in known_names:
+                    logger.info(f"[{self.name}] LLM requested deletion of unknown agent '{name}'")
+                    missing.append(name)
+                    continue
+
+                logger.info(f"[{self.name}] LLM-requested deletion of '{name}'")
+                # Reuse the existing helper — it handles spawn registry, stop,
+                # manifest cleanup, history note, and remote-vs-local routing.
+                await self.delete_spawned_agent(name)
+                deleted.append(name)
+            except json.JSONDecodeError as e:
+                logger.error(f"[{self.name}] Invalid <delete> JSON: {e}\nRaw block: {block[:200]}")
+            except Exception as e:
+                logger.error(f"[{self.name}] Delete failed: {e}\nRaw block:\n{block[:500]}")
+
+        clean = re.sub(pattern, '', response, flags=re.DOTALL).strip()
+        return clean, deleted, missing
+
+
     async def _spawn_from_config(self, config: dict, save: bool = True) -> Optional[Actor]:
         name = config.get("name", "dynamic-agent")
         node = config.get("node", "").strip()
@@ -2066,6 +3418,16 @@ class MainActor(LLMAgent):
         existing = self._registry.find_by_name(name) if self._registry else None
         replace  = config.get("replace", False)
 
+        # Also consult the Supervisor — its factory may have already brought up
+        # an instance whose registration hasn't completed yet (race window during
+        # parallel startup). find_by_name() would miss it.
+        if existing is None and self._registry is not None:
+            sup = getattr(self._registry, "_supervisor_ref", None)
+            if sup is not None:
+                spec = sup._specs.get(name)
+                if spec is not None and spec.actor is not None and not spec.retired:
+                    existing = spec.actor
+
         if existing:
             if not replace:
                 logger.info(f"[{self.name}] '{name}' already exists (use replace=true to update).")
@@ -2076,6 +3438,11 @@ class MainActor(LLMAgent):
                 if self._registry:
                     await self._registry.unregister(existing.actor_id)
                 await existing.stop()
+                # Clear cached manifest in-memory so a list query during the brief
+                # window before the new agent publishes doesn't show stale data.
+                # We do NOT tombstone the MQTT topic — the new agent will reuse
+                # the same deterministic actor_id and republish immediately.
+                self._agent_manifests.pop(name, None)
                 await asyncio.sleep(0.5)
             except Exception as e:
                 logger.warning(f"[{self.name}] Error stopping old '{name}': {e}")
@@ -2087,6 +3454,8 @@ class MainActor(LLMAgent):
         # Route to the right agent class
         if agent_type == "ha_actuator":
             actor = await self._spawn_ha_actuator(config, name)
+        elif agent_type == "scheduled":
+            actor = await self._spawn_scheduled_agent(config, name)
         elif agent_type == "manual" or name == "manual-agent":
             actor = await self._spawn_manual_agent(config, name)
         elif agent_type == "llm" or (not code and system_prompt):
@@ -2132,6 +3501,51 @@ class MainActor(LLMAgent):
             persistence_dir = str(self._persistence_dir.parent),
         )
         return actor
+
+    async def _spawn_scheduled_agent(self, config: dict, name: str):
+        """
+        Spawn a ScheduledAgent. The schedule spec is validated at __init__
+        so a malformed config raises here, before save_to_spawn_registry runs.
+
+        We inject the user's preferred timezone (from facts) so a "5pm" schedule
+        means 5pm where the user lives, not 5pm UTC. The spec's own 'tz' field
+        wins if explicitly set.
+        """
+        from .scheduled_agent import ScheduledAgent
+
+        schedule_spec = config.get("schedule")
+        if not isinstance(schedule_spec, dict):
+            logger.warning(f"[{self.name}] Cannot spawn '{name}': missing or invalid 'schedule' dict")
+            return None
+
+        # Resolve user's timezone from facts (set by fact extraction)
+        user_tz = self.get_user_facts().get("pref_timezone")
+
+        publish_topic = config.get("publish_topic") or f"schedule/{name}/fired"
+        description   = config.get("description", "")
+
+        try:
+            actor = await self.spawn(
+                ScheduledAgent,
+                name            = name,
+                schedule        = schedule_spec,
+                timezone        = user_tz,
+                publish_topic   = publish_topic,
+                description     = description,
+                persistence_dir = str(self._persistence_dir.parent),
+            )
+            logger.info(
+                f"[{self.name}] Spawned ScheduledAgent '{name}' "
+                f"({schedule_spec.get('type')} → {publish_topic})"
+            )
+            return actor
+        except ValueError as e:
+            # Invalid schedule spec — surfaced from ScheduledAgent.__init__
+            logger.error(f"[{self.name}] Invalid schedule for '{name}': {e}")
+            return None
+        except Exception as e:
+            logger.error(f"[{self.name}] Failed to spawn ScheduledAgent '{name}': {e}")
+            return None
 
     async def _spawn_manual_agent(self, config: dict, name: str):
         """Spawn the pre-defined ManualAgent — robust PDF manual search and Q&A."""
@@ -2541,6 +3955,12 @@ class MainActor(LLMAgent):
         Subscribe to agents/+/manifest and build a searchable topic registry.
         Retained manifests are delivered immediately on subscribe so the registry
         is populated even for agents that started before main restarted.
+
+        An EMPTY retained payload is a tombstone — it means the agent has been
+        deleted. We extract the agent_id from the topic and drop any matching
+        manifest from both the agent registry and the topic registry. Without
+        this, _agent_manifests would grow forever and stale entries would be
+        reported as still-existing (with running=false but never disappearing).
         """
         try:
             import aiomqtt
@@ -2553,8 +3973,36 @@ class MainActor(LLMAgent):
                     await client.subscribe("agents/+/manifest")
                     logger.info("[main] Subscribed to agent manifests.")
                     async for msg in client.messages:
+                        # ── Tombstone: empty payload means agent was deleted ──
+                        raw_payload = msg.payload
+                        if raw_payload is None or len(raw_payload) == 0:
+                            # Topic format: agents/{actor_id}/manifest
+                            topic_str = str(msg.topic)
+                            try:
+                                target_id = topic_str.split("/")[1]
+                            except IndexError:
+                                continue
+                            # Find the manifest entry for this actor_id and drop it.
+                            # Manifests are keyed by name, but each contains an actor_id.
+                            removed_name = None
+                            for name, manifest in list(self._agent_manifests.items()):
+                                if manifest.get("actor_id") == target_id or name == target_id:
+                                    self._agent_manifests.pop(name, None)
+                                    removed_name = name
+                                    break
+                            if removed_name:
+                                # Also drop from topic registry
+                                for topic, entries in list(self._topic_registry.items()):
+                                    self._topic_registry[topic] = [
+                                        m for m in entries if m.get("name") != removed_name
+                                    ]
+                                    if not self._topic_registry[topic]:
+                                        self._topic_registry.pop(topic, None)
+                                logger.info(f"[main] Manifest tombstone — removed '{removed_name}'")
+                            continue
+
                         try:
-                            data = json.loads(msg.payload.decode())
+                            data = json.loads(raw_payload.decode())
                         except Exception:
                             continue
                         if not isinstance(data, dict):
@@ -2621,6 +4069,8 @@ class MainActor(LLMAgent):
                     try:
                         await self._registry.unregister(local.actor_id)
                         await local.stop()
+                        # In-memory only — remote will republish its own manifest
+                        self._agent_manifests.pop(agent_name, None)
                         await asyncio.sleep(0.3)
                     except Exception as e:
                         logger.warning(f"[{self.name}] Could not stop local '{agent_name}': {e}")
@@ -2646,6 +4096,12 @@ class MainActor(LLMAgent):
         """
         Subscribe to nodes/+/heartbeat so main knows which remote nodes are online.
         Updates self._known_nodes which is used by list_nodes() and the LLM context.
+
+        Also detects agents that silently vanished from a node (crash, OOM kill,
+        manual kill, deploy gone wrong) by diffing each heartbeat's agent list
+        against what we last saw. Anything that disappeared and is still in the
+        spawn registry as belonging to this node is treated as a deletion event:
+        manifest cleared, registry entry removed, history note added.
         """
         try:
             import aiomqtt
@@ -2673,9 +4129,39 @@ class MainActor(LLMAgent):
 
                         if topic.endswith("/heartbeat"):
                             import time as _t
+                            new_agents = data.get("agents", [])
+                            # ── Diff against previous snapshot for this node ──
+                            prev = self._known_nodes.get(node_name, {})
+                            prev_agents = set(prev.get("agents", []))
+                            curr_agents = set(new_agents)
+                            disappeared = prev_agents - curr_agents
+                            if disappeared:
+                                # Only count as silent-loss if the spawn registry still
+                                # claims the agent should be on this node. Migration
+                                # updates the registry before the old node stops the
+                                # agent, so a migrated agent won't trip this check.
+                                reg = self._get_spawn_registry()
+                                for agent_name in disappeared:
+                                    cfg = reg.get(agent_name)
+                                    if not cfg:
+                                        continue   # already deleted via /agents — nothing to do
+                                    if cfg.get("node", "").strip() != node_name:
+                                        continue   # migrated away — expected disappearance
+                                    logger.warning(
+                                        f"[main] Agent '{agent_name}' silently disappeared "
+                                        f"from node '{node_name}' (crash/kill suspected)"
+                                    )
+                                    # Same cleanup as a manual delete, minus the node-side
+                                    # stop signal (it's already gone there).
+                                    self._remove_from_spawn_registry(agent_name)
+                                    await self._clear_agent_manifest(agent_name)
+                                    self._record_agent_deletion(
+                                        agent_name,
+                                        reason=f"vanished from node '{node_name}' (crash or external kill)",
+                                    )
                             self._known_nodes[node_name] = {
                                 "last_seen": _t.time(),
-                                "agents":   data.get("agents", []),
+                                "agents":   new_agents,
                                 "node_id":  data.get("node_id", ""),
                             }
                         elif topic.endswith("/migrate_result"):
@@ -2700,6 +4186,72 @@ class MainActor(LLMAgent):
                 if self.state.value not in ("stopped", "failed"):
                     logger.warning(f"[main] Node heartbeat listener error: {e}. Reconnecting in 5s…")
                     await asyncio.sleep(5)
+
+    async def _node_offline_watcher(self):
+        """
+        Periodically check for nodes that have gone silent. If a node has not
+        sent a heartbeat in NODE_OFFLINE_GRACE_S, treat all its agents as gone
+        and drop the node from our tracking.
+
+        Uses a longer threshold (90s) than the visual "offline" indicator (30s)
+        so brief network blips don't trigger false deletion notes. The visual
+        indicator stays at 30s for snappy UX; this watcher waits long enough
+        to be sure the node is genuinely down.
+        """
+        import time as _t
+        NODE_OFFLINE_GRACE_S = 90.0
+        CHECK_INTERVAL_S      = 15.0
+
+        while self.state.value not in ("stopped", "failed"):
+            try:
+                await asyncio.sleep(CHECK_INTERVAL_S)
+                now = _t.time()
+                # Snapshot to avoid mutation-during-iteration
+                stale_nodes = [
+                    (name, info)
+                    for name, info in list(self._known_nodes.items())
+                    if (now - info.get("last_seen", 0)) > NODE_OFFLINE_GRACE_S
+                ]
+                if not stale_nodes:
+                    continue
+
+                reg = self._get_spawn_registry()
+                for node_name, info in stale_nodes:
+                    logger.warning(
+                        f"[main] Node '{node_name}' has been silent for >"
+                        f"{NODE_OFFLINE_GRACE_S:.0f}s — treating as offline"
+                    )
+                    # Find all agents that belong to this node according to the
+                    # spawn registry (the heartbeat's last-known agent list may
+                    # be stale).
+                    lost = [
+                        n for n, cfg in reg.items()
+                        if cfg.get("node", "").strip() == node_name
+                    ]
+                    for agent_name in lost:
+                        self._remove_from_spawn_registry(agent_name)
+                        await self._clear_agent_manifest(agent_name)
+                        self._record_agent_deletion(
+                            agent_name,
+                            reason=f"node '{node_name}' went offline",
+                        )
+                    # Drop the node from our tracking. If it comes back, the
+                    # heartbeat listener will re-add it as a fresh entry.
+                    self._known_nodes.pop(node_name, None)
+                    if lost:
+                        self._pending_notifications.append({
+                            "_monitor_notification": True,
+                            "message": (
+                                f"Node '{node_name}' is offline. "
+                                f"Lost agents: {', '.join(lost)}."
+                            ),
+                            "severity": "warning",
+                            "timestamp": now,
+                        })
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[main] Node offline watcher error: {e}")
 
     # ── Delegation ─────────────────────────────────────────────────────────
 
@@ -2738,15 +4290,21 @@ class MainActor(LLMAgent):
         target = self._registry.find_by_name(target_name)
         if not target:
             return None
+        task_id = uuid.uuid4().hex
         future = asyncio.get_event_loop().create_future()
-        self._result_futures[task] = future
-        await self.send(target.actor_id, MessageType.TASK, {"text": task, "reply_to": self.actor_id})
+        self._result_futures[task_id] = future
+        await self.send(target.actor_id, MessageType.TASK, {
+            "text": task,
+            "_task_id": task_id,
+            "task": task_id,
+            "reply_to": self.actor_id,
+        })
         try:
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             return None
         finally:
-            self._result_futures.pop(task, None)
+            self._result_futures.pop(task_id, None)
 
     async def list_agents(self) -> list[dict]:
         if not self._registry:
@@ -2771,9 +4329,16 @@ class MainActor(LLMAgent):
         if node:
             await self._update_node_desired_state(node, remove_name=name)
             await self._mqtt_publish(f"nodes/{node}/stop", {"name": name}, qos=1)
+            # Clear cached manifest for the remote agent
+            await self._clear_agent_manifest(name)
+            self._record_agent_deletion(name, reason=f"deleted from node '{node}'")
+            return
 
         if self._registry:
             target = self._registry.find_by_name(name)
             if target:
-                await self._registry.unregister(target.actor_id)
+                actor_id = target.actor_id
+                await self._registry.unregister(actor_id)
                 await target.stop()
+                await self._clear_agent_manifest(name, actor_id)
+                self._record_agent_deletion(name, reason="deleted")

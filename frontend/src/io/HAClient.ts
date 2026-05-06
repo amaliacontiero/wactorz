@@ -35,6 +35,10 @@ export class HAClient {
     private readonly token: string,
   ) {}
 
+  get connected(): boolean {
+    return this.ws !== null && this.ws.readyState !== WebSocket.CLOSED;
+  }
+
   connect(onUpdate: HAUpdateHandler): void {
     this.onUpdate = onUpdate;
     // Convert http[s]://... to ws[s]://...
@@ -88,6 +92,7 @@ export class HAClient {
         }
       } else if (data.type === "event" && data.event?.data?.new_state) {
         const newState = data.event.data.new_state as HAEntity;
+        console.log("[HA] state_changed:", newState.entity_id, "→", newState.state);
         const idx = this.entities.findIndex(
           (e) => e.entity_id === newState.entity_id,
         );
@@ -97,6 +102,15 @@ export class HAClient {
           this.entities.push(newState);
         }
         this.onUpdate?.(this.entities);
+        document.dispatchEvent(
+          new CustomEvent("af-ha-state-change", {
+            detail: {
+              entityId: newState.entity_id,
+              state: newState.state,
+              friendlyName: newState.attributes?.friendly_name ?? newState.entity_id,
+            },
+          }),
+        );
       }
     };
 

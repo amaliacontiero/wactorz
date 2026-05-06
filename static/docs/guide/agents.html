@@ -657,6 +657,41 @@
 </code></pre></div>
 
 <hr />
+<h3 id="fusekiagent-optional">FusekiAgent <code>[optional]</code></h3>
+<p><strong>File:</strong> <code>wactorz/agents/fuseki_agent.py</code></p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>name</strong></td>
+<td><code>fern-agent</code></td>
+</tr>
+<tr>
+<td><strong>protected</strong></td>
+<td><code>false</code> — can be stopped/deleted from the dashboard</td>
+</tr>
+</tbody>
+</table>
+<p>SPARQL interface to Apache Jena Fuseki. Executes <code>SELECT</code>, <code>CONSTRUCT</code>, <code>DESCRIBE</code>, and <code>ASK</code> queries against the configured triplestore. No LLM involved — pure graph query agent.</p>
+<h4 id="configuration_1">Configuration</h4>
+<div class="highlight"><pre><span></span><code><span class="nv">FUSEKI_URL</span><span class="o">=</span>http://fuseki:3030<span class="w">   </span><span class="c1"># default</span>
+<span class="nv">FUSEKI_DATASET</span><span class="o">=</span>/ds<span class="w">              </span><span class="c1"># default</span>
+</code></pre></div>
+
+<h4 id="commands_2">Commands</h4>
+<div class="highlight"><pre><span></span><code><span class="nv">@fern</span><span class="o">-</span><span class="n">agent</span><span class="w"> </span><span class="n">query</span><span class="w"> </span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="err">{</span><span class="w"> </span><span class="vm">?</span><span class="n">s</span><span class="w"> </span><span class="vm">?</span><span class="n">p</span><span class="w"> </span><span class="vm">?</span><span class="n">o</span><span class="w"> </span><span class="err">}</span><span class="w"> </span><span class="k">LIMIT</span><span class="w"> </span><span class="mi">5</span>
+<span class="nv">@fern</span><span class="o">-</span><span class="n">agent</span><span class="w"> </span><span class="n">ask</span><span class="w"> </span><span class="n">ASK</span><span class="w"> </span><span class="err">{</span><span class="w"> </span><span class="o">&lt;</span><span class="nl">http</span><span class="p">:</span><span class="o">//</span><span class="n">example</span><span class="p">.</span><span class="n">org</span><span class="o">/</span><span class="n">foo</span><span class="o">&gt;</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="nl">owl</span><span class="p">:</span><span class="k">Class</span><span class="w"> </span><span class="err">}</span>
+<span class="nv">@fern</span><span class="o">-</span><span class="n">agent</span><span class="w"> </span><span class="n">prefixes</span><span class="w">           </span><span class="err">—</span><span class="w"> </span><span class="n">list</span><span class="w"> </span><span class="n">common</span><span class="w"> </span><span class="n">RDF</span><span class="w"> </span><span class="k">prefix</span><span class="w"> </span><span class="n">bindings</span>
+<span class="nv">@fern</span><span class="o">-</span><span class="n">agent</span><span class="w"> </span><span class="n">datasets</span><span class="w">           </span><span class="err">—</span><span class="w"> </span><span class="n">list</span><span class="w"> </span><span class="n">available</span><span class="w"> </span><span class="n">Fuseki</span><span class="w"> </span><span class="n">datasets</span>
+</code></pre></div>
+
+<p>The Wactorz ontology (<code>infra/fuseki/ontology/wactorz.ttl</code>) models the running agent topology as RDF: each agent is an <code>af:Agent</code> with <code>af:publishesTo</code> / <code>af:subscribesTo</code> links to <code>af:Channel</code> nodes. Live agent metrics (<code>messagesProcessed</code>, <code>errorsCount</code>, <code>costUsd</code>, etc.) are updated continuously by <code>MetricsBridge</code>, which subscribes to <code>agents/+/metrics</code> MQTT and writes each heartbeat payload to Fuseki via <code>FusekiClient.upsert_agent_metrics()</code>.</p>
+<hr />
 <h2 id="dynamicagent">DynamicAgent</h2>
 <p><strong>File:</strong> <code>wactorz/agents/dynamic_agent.py</code></p>
 <table>
@@ -920,8 +955,8 @@
 <td><code>aiohttp</code>, <code>aiomqtt</code></td>
 </tr>
 <tr>
-<td><code>ha-actuator-agent</code></td>
-<td><code>ha_actuator_agent.py</code></td>
+<td><code>homeassistant-actuator-agent</code></td>
+<td><code>home_assistant_actuator_agent.py</code></td>
 <td>Subscribes to an MQTT topic and calls a Home Assistant service when a detection filter matches the payload. Used as the action side of HA pipelines.</td>
 <td><code>aiomqtt</code></td>
 </tr>

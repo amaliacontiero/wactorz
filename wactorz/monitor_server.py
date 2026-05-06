@@ -45,6 +45,9 @@ MQTT_TOPICS  = ["agents/#", "system/#", "nodes/#", "io/chat"]
 # <registry> → direct mode (Option B)
 registry = None
 
+# Injected by cli.py — used to query historical cost data for deleted agents.
+db = None
+
 IO_GATEWAY_ID = "io-gateway"
 
 state = {
@@ -376,6 +379,25 @@ async def ws_handler(request):
     # Advertise chat mode so the frontend knows where to send messages
     await ws.send_str(json.dumps({"type": "config", "chat_mode": _chat_mode()}))
 
+    # Per-connection accumulator for streamed assistant replies.
+    # We only persist once at stream_end so chat_log gets one row per turn
+    # with the full content, not a row per chunk.
+    _stream_buffer: list[str] = []
+
+    def _persist_chat(role: str, content: str, agent_name: str = "main") -> None:
+        """Best-effort write to chat_log. Never raises into the WS path."""
+        if db is None or not content:
+            return
+        try:
+            db.write_chat_log(
+                ts=time.time(),
+                agent_name=agent_name,
+                role=role,
+                content=content,
+            )
+        except Exception as exc:
+            logger.warning(f"[ws] chat_log write failed: {exc}")
+
     async def ws_reply(text: str):
         try:
             await ws.send_str(json.dumps({
@@ -384,6 +406,9 @@ async def ws_handler(request):
                 "content":   text,
                 "timestamp": time.time(),
             }))
+            # Non-streamed replies (slash command output, errors, system
+            # messages) — persist immediately.
+            _persist_chat("assistant", text)
         except Exception:
             pass
 
@@ -395,6 +420,9 @@ async def ws_handler(request):
                 "content":   chunk,
                 "timestamp": time.time(),
             }))
+            # Buffer for end-of-stream persistence; do NOT write per chunk.
+            if chunk:
+                _stream_buffer.append(chunk)
         except Exception:
             pass
 
@@ -405,8 +433,18 @@ async def ws_handler(request):
                 "from":      IO_GATEWAY_ID,
                 "timestamp": time.time(),
             }))
+            # Now persist the full assembled assistant turn — once.
+            if _stream_buffer:
+                full = "".join(_stream_buffer)
+                _stream_buffer.clear()
+                _persist_chat("assistant", full)
         except Exception:
-            pass
+            # Even if the send_str failed, flush anything we accumulated
+            # so the user's session isn't lost on a transient ws hiccup.
+            if _stream_buffer:
+                full = "".join(_stream_buffer)
+                _stream_buffer.clear()
+                _persist_chat("assistant", full)
 
     try:
         async for msg in ws:
@@ -421,6 +459,9 @@ async def ws_handler(request):
                     elif msg_type == "chat":
                         content = (data.get("content") or "").strip()
                         if content and registry is not None:
+                            # Persist the user's turn first so chat_log has the
+                            # request even if the assistant reply errors out.
+                            _persist_chat("user", content)
                             async def _safe_route(c=content):
                                 try:
                                     await _route_chat(c, ws_reply,
@@ -573,17 +614,83 @@ def _node_online(last_seen: float) -> bool:
     return (time.time() - last_seen) < 45
 
 
+def _historical_cost_usd(live_names: set) -> float:
+    """Sum _final_cost for agents not in live_names."""
+    if db is None:
+        return 0.0
+    try:
+        import json as _json
+        rows = db.conn.execute(
+            "SELECT value FROM kv_store WHERE key = '_final_cost'"
+        ).fetchall()
+        total = 0.0
+        for row in rows:
+            try:
+                entry = _json.loads(row[0])
+                if entry.get("name") not in live_names:
+                    total += entry.get("cost_usd", 0.0)
+            except Exception:
+                pass
+        return total
+    except Exception:
+        return 0.0
+
+
+def _historical_messages(live_names: set) -> int:
+    """Sum _messages_processed for agents not in live_names."""
+    if db is None:
+        return 0
+    try:
+        import json as _json
+        rows = db.conn.execute(
+            "SELECT agent, value FROM kv_store WHERE key = '_messages_processed'"
+        ).fetchall()
+        total = 0
+        for agent_name, value in rows:
+            if agent_name not in live_names:
+                try:
+                    entry = _json.loads(value)
+                    total += entry.get("count", 0)
+                except Exception:
+                    pass
+        return total
+    except Exception:
+        return 0
+
+
 def _snapshot() -> dict:
     for nd in state["nodes"].values():
         nd["online"] = _node_online(nd.get("last_seen", 0))
-    total_cost = sum(a.get("cost_usd", 0.0) for a in state["agents"].values())
+
+    # Prefer MQTT-derived data from state["agents"]; fall back to live actor
+    # objects for the window between restart and first MQTT heartbeat (0.5s).
+    if registry is not None:
+        live_names = {a.name for a in registry.all_actors()}
+        live_cost = sum(
+            state["agents"].get(a.actor_id, {}).get("cost_usd")
+            or getattr(a, "total_cost_usd", 0.0)
+            for a in registry.all_actors()
+        )
+        live_msgs = sum(
+            state["agents"].get(a.actor_id, {}).get("messages_processed")
+            or getattr(getattr(a, "metrics", None), "messages_processed", 0)
+            for a in registry.all_actors()
+        )
+    else:
+        live_names = {a.get("name", "") for a in state["agents"].values()}
+        live_cost = sum(a.get("cost_usd", 0.0) for a in state["agents"].values())
+        live_msgs = sum(a.get("messages_processed", 0) for a in state["agents"].values())
+
+    total_cost = live_cost + _historical_cost_usd(live_names)
+    total_msgs = live_msgs + _historical_messages(live_names)
     return {
-        "agents":         list(state["agents"].values()),
-        "nodes":          list(state["nodes"].values()),
-        "alerts":         state["alerts"][:10],
-        "log_feed":       state["log_feed"][:20],
-        "system_health":  state["system_health"],
-        "total_cost_usd": round(total_cost, 6),
+        "agents":           list(state["agents"].values()),
+        "nodes":            list(state["nodes"].values()),
+        "alerts":           state["alerts"][:10],
+        "log_feed":         state["log_feed"][:20],
+        "system_health":    state["system_health"],
+        "total_cost_usd":   round(total_cost, 6),
+        "total_messages":   total_msgs,
     }
 
 
@@ -596,48 +703,55 @@ async def mqtt_listener():
         return
 
     logger.info(f"Connecting to MQTT {MQTT_BROKER}:{MQTT_PORT}...")
-    while True:
-        try:
-            async with aiomqtt.Client(MQTT_BROKER, MQTT_PORT) as client:
-                mqtt_client_ref = client
-                logger.info("MQTT connected.")
+    try:
+        while True:
+            try:
+                async with aiomqtt.Client(MQTT_BROKER, MQTT_PORT) as client:
+                    mqtt_client_ref = client
+                    logger.info("MQTT connected.")
 
-                if registry is not None:
-                    await client.publish(
-                        f"agents/{IO_GATEWAY_ID}/spawn",
-                        json.dumps({
-                            "agentId":   IO_GATEWAY_ID,
-                            "agentName": IO_GATEWAY_ID,
-                            "agentType": "gateway",
-                            "timestamp": time.time(),
-                        }),
-                    )
+                    if registry is not None:
+                        await client.publish(
+                            f"agents/{IO_GATEWAY_ID}/spawn",
+                            json.dumps({
+                                "agentId":   IO_GATEWAY_ID,
+                                "agentName": IO_GATEWAY_ID,
+                                "agentType": "gateway",
+                                "timestamp": time.time(),
+                            }),
+                        )
 
-                for topic in MQTT_TOPICS:
-                    await client.subscribe(topic)
+                    for topic in MQTT_TOPICS:
+                        await client.subscribe(topic)
 
-                async for message in client.messages:
-                    topic   = str(message.topic)
-                    payload = message.payload.decode(errors="replace")
+                    async for message in client.messages:
+                        topic   = str(message.topic)
+                        payload = message.payload.decode(errors="replace")
 
-                    if topic == "io/chat":
-                        if registry is not None:
-                            try:
-                                asyncio.create_task(handle_chat_mqtt(json.loads(payload)))
-                            except Exception as exc:
-                                logger.error(f"[io/chat] error: {exc}")
-                        continue
+                        if topic == "io/chat":
+                            if registry is not None:
+                                try:
+                                    asyncio.create_task(handle_chat_mqtt(json.loads(payload)))
+                                except Exception as exc:
+                                    logger.error(f"[io/chat] error: {exc}")
+                            continue
 
-                    event = parse_topic(topic, payload)
-                    if event:
-                        metric    = event.get("metric", "")
-                        log_event = None if metric == "heartbeat" else event
-                        await broadcast({"type": "patch", "event": log_event, "state": _snapshot()})
+                        event = parse_topic(topic, payload)
+                        if event:
+                            metric    = event.get("metric", "")
+                            log_event = None if metric == "heartbeat" else event
+                            await broadcast({"type": "patch", "event": log_event, "state": _snapshot()})
 
-        except Exception as e:
-            mqtt_client_ref = None
-            logger.warning(f"MQTT error: {e}. Reconnecting in 5s...")
-            await asyncio.sleep(5)
+            except Exception as e:
+                mqtt_client_ref = None
+                logger.warning(f"MQTT error: {e}. Reconnecting in 5s...")
+                await asyncio.sleep(5)
+    finally:
+        # Drop ref and force GC while loop is still open so paho's __del__
+        # doesn't fire after the event loop closes (avoids RuntimeError noise).
+        import gc
+        mqtt_client_ref = None
+        gc.collect()
 
 
 # ── Startup checks ─────────────────────────────────────────────────────────
@@ -868,6 +982,153 @@ def _actor_payload(ag: dict) -> dict:
     }
 
 
+def _actor_cost(actor, ag: dict):
+    """Return the most accurate cost available: MQTT-derived first, then live object, then SQLite."""
+    mqtt_cost = ag.get("cost_usd")
+    if mqtt_cost is not None:
+        return mqtt_cost
+    live_cost = getattr(actor, "total_cost_usd", None)
+    if live_cost:
+        return round(live_cost, 6)
+    if db is not None:
+        try:
+            import json as _json
+            row = db.conn.execute(
+                "SELECT value FROM kv_store WHERE agent=? AND key='_final_cost'",
+                (actor.name,),
+            ).fetchone()
+            if row:
+                entry = _json.loads(row[0])
+                return entry.get("cost_usd")
+        except Exception:
+            pass
+    return None
+
+
+async def health_handler(request):
+    from aiohttp import web
+    return web.json_response({"status": "ok"})
+
+
+async def send_message_handler(request):
+    from aiohttp import web
+    actor_id = request.match_info["actor_id"]
+    if registry is None:
+        return web.json_response({"error": "registry not available"}, status=503)
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    content = data.get("content", "").strip()
+    if not content:
+        return web.json_response({"error": "content required"}, status=400)
+    actor = registry.get(actor_id) or registry.find_by_name(actor_id)
+    if actor is None:
+        return web.json_response({"error": "actor not found"}, status=404)
+    asyncio.create_task(_route_chat(content, lambda t: None))
+    return web.json_response({"status": "sent"})
+
+
+async def delete_actor_handler(request):
+    from aiohttp import web
+    actor_id = request.match_info["actor_id"]
+    if registry is None:
+        return web.json_response({"error": "registry not available"}, status=503)
+    actor = registry.get(actor_id) or registry.find_by_name(actor_id)
+    if actor is None:
+        return web.json_response({"error": "actor not found"}, status=404)
+    if getattr(actor, "protected", False):
+        return web.json_response({"error": "actor is protected"}, status=403)
+    if mqtt_client_ref:
+        await mqtt_client_ref.publish(
+            f"agents/{actor_id}/commands",
+            json.dumps({"command": "stop", "sender": "api", "timestamp": time.time()}),
+        )
+    return web.Response(status=200, text="stopping")
+
+
+async def pause_actor_handler(request):
+    from aiohttp import web
+    actor_id = request.match_info["actor_id"]
+    if registry is None:
+        return web.json_response({"error": "registry not available"}, status=503)
+    actor = registry.get(actor_id) or registry.find_by_name(actor_id)
+    if actor is None:
+        return web.json_response({"error": "actor not found"}, status=404)
+    if getattr(actor, "protected", False):
+        return web.json_response({"error": "actor is protected"}, status=403)
+    if mqtt_client_ref:
+        await mqtt_client_ref.publish(
+            f"agents/{actor_id}/commands",
+            json.dumps({"command": "pause", "sender": "api", "timestamp": time.time()}),
+        )
+    return web.json_response({"status": "pausing"})
+
+
+async def resume_actor_handler(request):
+    from aiohttp import web
+    actor_id = request.match_info["actor_id"]
+    if registry is None:
+        return web.json_response({"error": "registry not available"}, status=503)
+    actor = registry.get(actor_id) or registry.find_by_name(actor_id)
+    if actor is None:
+        return web.json_response({"error": "actor not found"}, status=404)
+    if getattr(actor, "protected", False):
+        return web.json_response({"error": "actor is protected"}, status=403)
+    if mqtt_client_ref:
+        await mqtt_client_ref.publish(
+            f"agents/{actor_id}/commands",
+            json.dumps({"command": "resume", "sender": "api", "timestamp": time.time()}),
+        )
+    return web.json_response({"status": "resuming"})
+
+
+async def actor_metrics_handler(request):
+    from aiohttp import web
+    actor_id = request.match_info["actor_id"]
+    ag = state["agents"].get(actor_id)
+    actor = None
+    if registry is not None:
+        actor = registry.get(actor_id) or registry.find_by_name(actor_id)
+    if actor is None and ag is None:
+        return web.json_response({"error": "actor not found"}, status=404)
+    metrics_obj = getattr(actor, "metrics", None) if actor else None
+    return web.json_response({
+        "messages_processed": (
+            getattr(metrics_obj, "messages_processed", None)
+            or (ag.get("messages_processed") if ag else None)
+            or 0
+        ),
+        "cpu":      ag.get("cpu")       if ag else None,
+        "mem":      ag.get("mem")       if ag else None,
+        "task":     ag.get("task")      if ag else None,
+        "cost_usd": (
+            getattr(actor, "total_cost_usd", None)
+            or (ag.get("cost_usd") if ag else None)
+        ),
+    })
+
+
+async def rest_chat_handler(request):
+    """POST /chat — fire-and-forget a message to a named agent."""
+    from aiohttp import web
+    if registry is None:
+        return web.json_response({"error": "registry not available"}, status=503)
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    message    = data.get("message", "").strip()
+    agent_name = data.get("agent_name", "main-actor")
+    if not message:
+        return web.json_response({"error": "message required"}, status=400)
+    target = registry.find_by_name(agent_name)
+    if target is None:
+        return web.json_response({"error": f"agent '{agent_name}' not found"}, status=404)
+    asyncio.create_task(_route_chat(message, lambda t: None))
+    return web.json_response({"status": "sent", "agent": agent_name})
+
+
 async def actors_handler(request):
     from aiohttp import web
     # Prefer the live registry (injected by cli.py) — actor objects carry the
@@ -885,8 +1146,9 @@ async def actors_handler(request):
                 "cpu":               ag.get("cpu"),
                 "mem":               ag.get("mem"),
                 "task":              ag.get("task"),
-                "messagesProcessed": ag.get("messages_processed"),
-                "costUsd":           ag.get("cost_usd"),
+                "messagesProcessed": ag.get("messages_processed") if ag.get("messages_processed") is not None
+                                     else getattr(getattr(actor, "metrics", None), "messages_processed", None),
+                "costUsd":           _actor_cost(actor, ag),
             })
         return web.json_response(result)
     return web.json_response([_actor_payload(ag) for ag in state["agents"].values()])
@@ -899,6 +1161,129 @@ async def actor_handler(request):
     if ag is None:
         return web.json_response({"error": "actor not found"}, status=404)
     return web.json_response(_actor_payload(ag))
+
+
+async def actor_history_handler(request):
+    from aiohttp import web
+    actor_id = request.match_info["actor_id"]
+
+    # Resolve actor: the frontend sends the agent NAME (not UUID), so try
+    # direct UUID lookup first, then fall back to name-based lookup.
+    actor = None
+    if registry is not None:
+        actor = registry.get(actor_id) or registry.find_by_name(actor_id)
+
+    if actor is not None and hasattr(actor, "recall"):
+        history = actor.recall("conversation_history", [])
+    elif db is not None:
+        # Actor not in registry (deleted or name-only lookup) — read from SQLite.
+        # actor_id might be a display name (e.g. "main") — try it directly.
+        try:
+            import json as _json
+            row = db.conn.execute(
+                "SELECT value FROM kv_store WHERE agent=? AND key='conversation_history'",
+                (actor_id,),
+            ).fetchone()
+            history = _json.loads(row[0]) if row else []
+        except Exception:
+            history = []
+    else:
+        history = []
+
+    visible = [m for m in history if isinstance(m, dict) and m.get("role") in ("user", "assistant")]
+    return web.json_response(visible)
+
+
+async def chat_log_handler(request):
+    """GET /api/chats — query the persistent chat_log table.
+
+    Query params:
+      agent   — filter by agent name
+      role    — filter by role (user | assistant)
+      since   — Unix timestamp float, only return rows newer than this
+      limit   — max rows to return (default 200, max 1000)
+    """
+    from aiohttp import web
+    if db is None:
+        return web.json_response([], status=200)
+    try:
+        agent  = request.rel_url.query.get("agent")
+        role   = request.rel_url.query.get("role")
+        since  = float(request.rel_url.query["since"]) if "since" in request.rel_url.query else None
+        limit  = min(int(request.rel_url.query.get("limit", 200)), 1000)
+        rows   = db.query_chat_log(agent_name=agent, role=role, since=since, limit=limit)
+        return web.json_response(rows)
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+
+
+_tts_voices_cache: list | None = None
+
+
+async def _warm_tts_voices(_app=None) -> None:
+    """Load edge-tts voice list once at startup and cache it."""
+    global _tts_voices_cache
+    try:
+        import edge_tts
+        voices = await edge_tts.list_voices()
+        _tts_voices_cache = [
+            {"name": v["ShortName"], "locale": v["Locale"], "gender": v["Gender"]}
+            for v in sorted(voices, key=lambda v: v["ShortName"])
+        ]
+    except Exception:
+        _tts_voices_cache = []
+
+
+async def tts_voices_handler(request):
+    """GET /api/tts/voices — list available edge-tts voices."""
+    from aiohttp import web
+    try:
+        import edge_tts as _  # noqa: F401 — check installed
+    except ImportError:
+        return web.json_response([])
+    if _tts_voices_cache is None:
+        await _warm_tts_voices()
+    return web.json_response(_tts_voices_cache or [])
+
+
+async def tts_handler(request):
+    """GET /api/tts?text=...&voice=... — synthesize speech via edge-tts.
+
+    Returns audio/mpeg. Falls back 503 if edge-tts is not installed so the
+    frontend can transparently fall back to the Web Speech API.
+    """
+    from aiohttp import web
+    import os
+    try:
+        import edge_tts
+    except ImportError:
+        return web.Response(status=503, text="edge-tts not installed — pip install 'wactorz[tts]'")
+
+    text = request.rel_url.query.get("text", "").strip()
+    if not text:
+        return web.Response(status=400, text="text param required")
+
+    # Mirror TTSManager: strip code blocks, cap at 300 chars
+    import re
+    text = re.sub(r"```[\s\S]*?```", "code block", text)[:300]
+
+    default_voice = os.environ.get("TTS_VOICE", "en-US-JennyNeural")
+    voice = request.rel_url.query.get("voice", default_voice) or default_voice
+
+    try:
+        communicate = edge_tts.Communicate(text, voice)
+        chunks: list[bytes] = []
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                chunks.append(chunk["data"])
+        audio = b"".join(chunks)
+        return web.Response(
+            body=audio,
+            content_type="audio/mpeg",
+            headers={"Cache-Control": "no-store"},
+        )
+    except Exception as exc:
+        return web.Response(status=500, text=str(exc))
 
 
 async def config_handler(request):
@@ -943,6 +1328,85 @@ async def config_handler(request):
     })
 
 
+async def feed_handler(request):
+    """
+    Return recent chat events for the UI feed, with REAL persisted timestamps.
+
+    Previously this read from kv_store.conversation_history, which is just a
+    JSON list with no timestamps — so each entry got `i` (the loop index) as
+    its timestamp and the frontend re-dated them to "now - i*delta", causing
+    timestamps to reset on every page reload / restart.
+
+    Now we read from the chat_log table, which has a real `ts REAL` column
+    written at the moment each turn happens. Falls back to the legacy
+    kv_store path only if chat_log is empty (e.g. a freshly upgraded DB
+    where nothing has been written yet) so existing users still see their
+    pre-upgrade history on first launch.
+    """
+    from aiohttp import web
+    if db is None:
+        return web.json_response([])
+    try:
+        # Primary path — persistent chat_log with real timestamps.
+        try:
+            rows = db.query_chat_log(limit=50)
+        except Exception as exc:
+            logger.warning(f"[feed] chat_log query failed: {exc}")
+            rows = []
+
+        if rows:
+            # query_chat_log returns newest-first; the frontend expects
+            # chronological (oldest-first) so the latest message ends up
+            # at the bottom of the feed.
+            rows = list(reversed(rows))
+            items = [{
+                "type":      "chat",
+                "label":     str(r.get("content", "")),
+                "agentName": r.get("agent_name", ""),
+                "role":      r.get("role", ""),
+                "timestamp": float(r.get("ts", 0.0)),  # REAL Unix time, not an index
+                "_seq":      i,
+                "_agent":    r.get("agent_name", ""),
+            } for i, r in enumerate(rows)]
+            return web.json_response(items)
+
+        # Fallback — legacy kv_store path. Keeps old DBs displaying *something*
+        # until new chat turns start populating chat_log. Synthesises a
+        # timestamp by anchoring the last entry to "now" and walking backwards
+        # in 1-second steps, so at least entries are ordered consistently.
+        import json as _json
+        kv_rows = db.conn.execute(
+            "SELECT agent, value FROM kv_store WHERE key='conversation_history'"
+        ).fetchall()
+        items = []
+        now = time.time()
+        for agent_name, value in kv_rows:
+            try:
+                history = _json.loads(value)
+                visible = [m for m in history
+                           if isinstance(m, dict)
+                           and m.get("role") in ("user", "assistant")]
+                n = len(visible)
+                for i, msg in enumerate(visible):
+                    items.append({
+                        "type":      "chat",
+                        "label":     str(msg.get("content", "")),
+                        "agentName": agent_name,
+                        "role":      msg.get("role", ""),
+                        # Synthesised but at least monotonic and anchored
+                        # to a real wall-clock value, not a bare index.
+                        "timestamp": now - (n - 1 - i),
+                        "_seq":      i,
+                        "_agent":    agent_name,
+                    })
+            except Exception:
+                pass
+        return web.json_response(items[-50:])
+    except Exception as exc:
+        logger.warning(f"[feed] handler failed: {exc}")
+        return web.json_response([])
+
+
 # ── Entry point ────────────────────────────────────────────────────────────
 
 async def main(exit_on_failure: bool = False):
@@ -963,17 +1427,46 @@ async def main(exit_on_failure: bool = False):
 
     app = web.Application()
     app.router.add_get("/",                      index_handler)
+    app.router.add_get("/health",                health_handler)
     app.router.add_get("/ws",                    ws_handler)
     app.router.add_get("/mqtt",                  mqtt_proxy_handler)
-    
-    # Add both /api and non-api versions to satisfy the frontend's different fetch patterns
+
+    # Actor collection
     app.router.add_get("/api/actors",            actors_handler)
     app.router.add_get("/actors",                actors_handler)
-    app.router.add_get("/api/actors/{actor_id}", actor_handler)
-    app.router.add_get("/actors/{actor_id}",     actor_handler)
-    
+
+    # Actor control — sub-routes must be registered before /{actor_id} catch-all
+    app.router.add_post("/api/actors/{actor_id}/message", send_message_handler)
+    app.router.add_post("/actors/{actor_id}/message",     send_message_handler)
+    app.router.add_post("/api/actors/{actor_id}/pause",   pause_actor_handler)
+    app.router.add_post("/actors/{actor_id}/pause",       pause_actor_handler)
+    app.router.add_post("/api/actors/{actor_id}/resume",  resume_actor_handler)
+    app.router.add_post("/actors/{actor_id}/resume",      resume_actor_handler)
+    app.router.add_get("/api/actors/{actor_id}/metrics",  actor_metrics_handler)
+    app.router.add_get("/actors/{actor_id}/metrics",      actor_metrics_handler)
+    app.router.add_get("/api/actors/{actor_id}/history",  actor_history_handler)
+    app.router.add_get("/actors/{actor_id}/history",      actor_history_handler)
+
+    # Actor CRUD
+    app.router.add_get("/api/actors/{actor_id}",          actor_handler)
+    app.router.add_get("/actors/{actor_id}",              actor_handler)
+    app.router.add_delete("/api/actors/{actor_id}",       delete_actor_handler)
+    app.router.add_delete("/actors/{actor_id}",           delete_actor_handler)
+
+    # Chat (REST fire-and-forget)
+    app.router.add_post("/api/chat",             rest_chat_handler)
+    app.router.add_post("/chat",                 rest_chat_handler)
+
+    app.router.add_get("/api/chats",             chat_log_handler)
+    app.router.add_get("/chats",                 chat_log_handler)
+    app.router.add_get("/api/tts/voices",        tts_voices_handler)
+    app.router.add_get("/api/tts",               tts_handler)
+    app.on_startup.append(_warm_tts_voices)
+
     app.router.add_get("/api/config",            config_handler)
     app.router.add_get("/config",                config_handler)
+    app.router.add_get("/api/feed",              feed_handler)
+    app.router.add_get("/feed",                  feed_handler)
     app.router.add_get("/favicon.svg",           index_handler)
     from .fuseki_proxy import fuseki_proxy_handler
     app.router.add_post("/api/fuseki/{dataset}/sparql",  fuseki_proxy_handler)

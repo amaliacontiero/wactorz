@@ -21,6 +21,7 @@ import { MentionPopup } from "./ui/MentionPopup";
 import { VoiceInput } from "./io/VoiceInput";
 import { IOManager } from "./io/IOManager";
 import { WSChatClient } from "./io/WSChatClient";
+import type { LogFeedItem } from "./io/WSChatClient";
 import { tts } from "./io/TTSManager";
 import { SettingsPanel } from "./ui/SettingsPanel";
 import { desktopNotifyBackground, desktopNotify, clearUnreadBadge, initNotifications } from "./io/DesktopNotify";
@@ -109,6 +110,7 @@ const mqtt = new MQTTClient(MQTT_BROKER);
 const hud = new AgentHUD();
 const themeSwitcher = new ThemeSwitcher();
 const chatPanel = new ChatPanel();
+chatPanel.setApiBase(_apiBase);
 const voice = new VoiceInput();
 const ioManager = new IOManager(mqtt, chatPanel);
 const ioBar = new IOBar(voice, ioManager);
@@ -137,10 +139,12 @@ function refreshLiveActors(): void {
     )
     .then((actors: AgentInfo[]) => {
       scene.reconcileAgents(
-        actors.map((a) => ({
-          ...a,
-          name: resolveAgentName(a.name, a.id),
-        })),
+        actors
+          .filter((a) => !deletedAgentIds.has(a.id))
+          .map((a) => ({
+            ...a,
+            name: resolveAgentName(a.name, a.id),
+          })),
       );
       syncAgentViews();
       console.info(
@@ -170,7 +174,7 @@ wsChat.onChat((content, from, timestampMs) => {
   scene.onChat(from, "user");
   const feedItem = {
     type: "chat" as const,
-    label: content.slice(0, 60),
+    label: content,
     agentName: from,
     timestamp: timestampMs,
   };
@@ -188,11 +192,13 @@ ioManager.setWSClient(wsChat);
 
 // State patches broadcast by the server over the same /ws connection.
 // This is how pause/stop/resume state changes reach the UI without polling.
-wsChat.onStatePatch((agents, deletedId) => {
+wsChat.onStatePatch((agents, deletedId, stats) => {
   if (deletedId) {
     deletedAgentIds.add(deletedId);
     scene.removeAgent(deletedId);
   }
+  if (stats?.totalCostUsd !== undefined) scene.setTotalCostUsd(stats.totalCostUsd);
+  if (stats?.totalMessages !== undefined) scene.setTotalMessages(stats.totalMessages);
   agents.forEach((a) => {
     if (!a.agent_id) return;
     const rawState = (a.state ?? a.status ?? "running") as string;
@@ -227,6 +233,102 @@ wsChat.connect(`${_wsBase}/ws`);
 refreshLiveActors();
 window.setInterval(refreshLiveActors, 15000);
 
+// ── WS log_feed → Activity Feed ───────────────────────────────────────────────
+// The server embeds its in-memory log_feed (spawned/status/logs/alerts) in
+// every state-patch.  We use this as a reliable secondary path so MQTT events
+// appear in the feed even when the direct Mosquitto WebSocket is unavailable.
+
+let _logFeedMaxTs = 0;
+let _logFeedInitialized = false;
+let _mqttLive = false;
+
+function _mapLogFeedItem(item: LogFeedItem): Parameters<typeof pushFeed>[0] | null {
+  const agentId = item.agent_id ?? "";
+  const agentName = item.name ?? item.agentName ?? (nameFromWid(agentId) || agentId.slice(0, 8) || "system");
+  const ts = item.timestamp ? item.timestamp * 1000 : Date.now();
+
+  switch (item.type) {
+    case "spawned":
+      return {
+        type: "spawn",
+        label: `spawned (${item.agentType ?? item.agent_type ?? "agent"})`,
+        agentName: item.agentName ?? item.name ?? agentName,
+        timestamp: ts,
+      };
+    case "completed":
+      return { type: "spawn", label: "task completed", agentName, timestamp: ts };
+    case "log": {
+      const msg = item.message ?? item.text ?? "";
+      if (!msg) return null;
+      return { type: "chat", label: msg, agentName, timestamp: ts };
+    }
+    case "status": {
+      const st = (item.status as Record<string, unknown> | undefined)?.["state"] as string | undefined;
+      if (st === "stopped") return { type: "stopped", label: "stopped", agentName, timestamp: ts };
+      return null;
+    }
+    case "alert": {
+      const isError = item.severity === "error" || item.severity === "critical";
+      return {
+        type: isError ? "alert-error" : "alert-warning",
+        label: item.message ?? "",
+        agentName: item.name ?? agentName,
+        timestamp: ts,
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+wsChat.onLogFeed((items) => {
+  if (!_logFeedInitialized) {
+    _logFeedInitialized = true;
+    _logFeedMaxTs = items.length ? Math.max(...items.map((i) => i.timestamp ?? 0)) : 0;
+    // Push historical items (happened before browser connected — MQTT won't re-deliver them).
+    [...items].reverse().forEach((item) => {
+      const mapped = _mapLogFeedItem(item);
+      if (mapped) pushFeed(mapped);
+    });
+    return;
+  }
+
+  // Always advance the high-water mark so that when MQTT reconnects and later
+  // disconnects again, we don't replay the entire backlog.
+  const newItems = items.filter((item) => (item.timestamp ?? 0) > _logFeedMaxTs);
+  if (newItems.length) {
+    _logFeedMaxTs = Math.max(...newItems.map((i) => i.timestamp ?? 0));
+  }
+
+  // Direct MQTT is live — it delivers these events already; skip to avoid duplicates.
+  if (_mqttLive) return;
+
+  // Push new items oldest-first so the feed stays chronological.
+  [...newItems].reverse().forEach((item) => {
+    const mapped = _mapLogFeedItem(item);
+    if (mapped) pushFeed(mapped);
+  });
+});
+
+// Seed the activity feed from SQLite chat_log so the feed panel isn't empty
+// after a server restart. The server returns real Unix timestamps (seconds);
+// convert to ms for the feed.
+fetch(`${_apiBase}/api/feed`)
+  .then((r) => (r.ok ? r.json() : []))
+  .then((items: { type: string; label: string; agentName: string; timestamp?: number }[]) => {
+    console.log("[feed] /api/feed seed:", items.length, "items");
+    if (!items.length) return;
+    items.forEach((item) => {
+      pushFeed({
+        type: "chat",
+        label: item.label,
+        agentName: item.agentName,
+        timestamp: item.timestamp ? item.timestamp * 1000 : Date.now(),
+      });
+    });
+  })
+  .catch(() => {});
+
 // ── Seed localStorage from backend config (only for unset keys) ───────────────
 // Backend config (.env) provides defaults; a user-set localStorage value wins.
 fetch(`${_apiBase}/api/config`)
@@ -258,6 +360,7 @@ function pushFeed(item: Parameters<typeof feed.push>[0]): void {
 // ── MQTT → Scene/HUD/Feed wiring ──────────────────────────────────────────────
 
 mqtt.on("heartbeat", (payload) => {
+  if (deletedAgentIds.has(payload.agentId)) return;
   scene.onHeartbeat(payload);
   pushFeed({
     type: "heartbeat",
@@ -318,7 +421,7 @@ mqtt.on("chat", (msg) => {
   );
   pushFeed({
     type: "chat",
-    label: `→ ${msg.to}: ${msg.content.slice(0, 40)}${msg.content.length > 40 ? "…" : ""}`,
+    label: `→ ${msg.to}: ${msg.content}`,
     agentName: msg.from,
     timestamp: msg.timestampMs,
   });
@@ -359,6 +462,7 @@ function refreshStats(): void {
 let seeded = false;
 
 mqtt.on("connected", () => {
+  _mqttLive = true;
   console.info("[Dashboard] MQTT connected");
   hud.setSystemHealth(true);
   document.dispatchEvent(
@@ -405,7 +509,7 @@ mqtt.on("logs", (payload) => {
   if (!msg) return;
   pushFeed({
     type: "chat",
-    label: msg.slice(0, 80),
+    label: msg,
     agentName: payload.agentName,
     timestamp: Date.now(),
   });
@@ -442,7 +546,52 @@ mqtt.on("coin", (payload) => {
   });
 });
 
+// Only these domains produce meaningful on/off-style states worth showing in the feed.
+const _HA_FEED_DOMAINS = new Set([
+  "switch", "light", "fan", "input_boolean", "climate", "cover",
+  "media_player", "vacuum", "humidifier", "lock", "alarm_control_panel",
+]);
+
+// Dedup cache: prevents the same entity+state appearing twice within 5 s when
+// both the direct HAClient path and the MQTT agent path are active.
+const _recentHaEvents = new Map<string, number>();
+function _pushHaFeed(entityId: string, state: string, friendlyName: string): void {
+  const domain = entityId.split(".")[0] ?? "";
+  if (!_HA_FEED_DOMAINS.has(domain)) return;
+  // Skip raw numeric states (sensors leaking through) and "unknown"/"unavailable" spam
+  if (/^\d/.test(state) || state === "unknown") return;
+
+  const key = `${entityId}:${state}`;
+  const now = Date.now();
+  if (now - (_recentHaEvents.get(key) ?? 0) < 5000) return;
+  _recentHaEvents.set(key, now);
+  pushFeed({ type: "health", label: `${friendlyName} → ${state}`, agentName: "ha", timestamp: now });
+}
+
+// Path 1: direct HA WebSocket via HAClient (always works when HA is configured in frontend)
+document.addEventListener("af-ha-state-change", (e) => {
+  const { entityId, state, friendlyName } = (
+    e as CustomEvent<{ entityId: string; state: string; friendlyName: string }>
+  ).detail;
+  _pushHaFeed(entityId, state, friendlyName);
+});
+
+// Path 2: ha-state-bridge-agent → MQTT ha/state/{domain}/{entity_id}
+mqtt.on("raw", ({ topic, payload }) => {
+  if (!topic.startsWith("ha/")) return;
+  const p = payload as Record<string, unknown>;
+  const entityId = (p["entity_id"] as string | undefined) ?? topic.split("/").slice(-2).join(".");
+  const newState = p["new_state"] as Record<string, unknown> | undefined;
+  const state = (newState?.["state"] as string | undefined) ?? "";
+  const friendlyName = (
+    (newState?.["attributes"] as Record<string, unknown> | undefined)?.["friendly_name"] as string | undefined
+  ) ?? entityId;
+  if (!state) return;
+  _pushHaFeed(entityId, state, friendlyName);
+});
+
 mqtt.on("disconnected", () => {
+  _mqttLive = false;
   console.warn("[Dashboard] MQTT disconnected");
   hud.setSystemHealth(false);
   document.dispatchEvent(
@@ -568,8 +717,9 @@ if (_isTauri && btnSettings) {
 
 // ── Sound / TTS toggles ───────────────────────────────────────────────────────
 
-const btnBeep = document.getElementById("btn-beep");
-const btnTTS = document.getElementById("btn-tts");
+const btnBeep       = document.getElementById("btn-beep");
+const btnTTS        = document.getElementById("btn-tts");
+const voiceSelect   = document.getElementById("tts-voice-select") as HTMLSelectElement | null;
 
 function syncSoundButtons(): void {
   btnBeep?.classList.toggle("active", tts.beepEnabled);
@@ -585,6 +735,32 @@ btnTTS?.addEventListener("click", () => {
   tts.toggleTTS();
   syncSoundButtons();
 });
+
+// Populate voice selector when server voices arrive
+document.addEventListener("tts-voices-loaded", (e) => {
+  const { voices } = (e as CustomEvent).detail;
+  if (!voiceSelect || !voices?.length) return;
+  voiceSelect.innerHTML = "";
+  // Blank option = server default
+  const blank = document.createElement("option");
+  blank.value = "";
+  blank.textContent = "— default voice —";
+  voiceSelect.appendChild(blank);
+  for (const v of voices) {
+    const opt = document.createElement("option");
+    opt.value = v.name;
+    opt.textContent = `${v.name} (${v.locale})`;
+    voiceSelect.appendChild(opt);
+  }
+  voiceSelect.value = tts.selectedVoice;
+});
+
+voiceSelect?.addEventListener("change", () => {
+  tts.setVoice(voiceSelect.value);
+});
+
+// Probe server TTS availability + load voice list
+tts.init();
 
 // ── Connect ───────────────────────────────────────────────────────────────────
 

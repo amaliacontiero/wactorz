@@ -163,6 +163,22 @@ CREATE TABLE IF NOT EXISTS actuations (
 
 CREATE INDEX IF NOT EXISTS idx_actuation_ts     ON actuations (ts);
 CREATE INDEX IF NOT EXISTS idx_actuation_entity ON actuations (entity_id, ts);
+
+-- Chat log — every user/assistant turn the monitor server sees.
+-- This is what backs the UI feed across restarts. Without it, the feed
+-- has to be reconstructed from kv_store conversation_history, which has
+-- no real timestamps (turns are positional within the JSON blob).
+CREATE TABLE IF NOT EXISTS chat_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts         REAL    NOT NULL,             -- Unix timestamp of the turn
+    agent_name TEXT    NOT NULL,             -- agent that produced/received the message
+    role       TEXT    NOT NULL,             -- 'user' | 'assistant'
+    content    TEXT    NOT NULL,
+    session_id TEXT    DEFAULT ''            -- optional grouping (actor_id or custom)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chatlog_ts          ON chat_log (ts);
+CREATE INDEX IF NOT EXISTS idx_chatlog_agent_ts    ON chat_log (agent_name, ts);
 """
 
 
@@ -309,6 +325,47 @@ class WactorzDB:
             (ts, agent, domain, service, entity_id, payload, trigger, rule_id),
         )
         self._conn.commit()
+
+    # ── Chat log (persistent feed for the UI) ──────────────────────────────
+
+    def write_chat_log(self, ts: float, agent_name: str, role: str,
+                       content: str, session_id: str = ""):
+        """
+        Persist a single chat turn so the UI feed can be rebuilt with real
+        timestamps after a restart. The schema is created in init_state.sql.
+        """
+        self._conn.execute(
+            "INSERT INTO chat_log (ts, agent_name, role, content, session_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (ts, agent_name, role, content, session_id),
+        )
+        self._conn.commit()
+
+    def query_chat_log(self, agent_name: Optional[str] = None,
+                       role: Optional[str] = None,
+                       since: Optional[float] = None,
+                       limit: int = 200) -> list[dict]:
+        """
+        Return chat_log rows newest-first as plain dicts. Used by the
+        /api/chats endpoint and by feed_handler to seed the UI feed.
+        """
+        sql    = "SELECT id, ts, agent_name, role, content, session_id FROM chat_log"
+        clauses: list[str] = []
+        params:  list      = []
+        if agent_name:
+            clauses.append("agent_name = ?"); params.append(agent_name)
+        if role:
+            clauses.append("role = ?");       params.append(role)
+        if since is not None:
+            clauses.append("ts > ?");         params.append(float(since))
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY ts DESC LIMIT ?"
+        params.append(int(limit))
+        rows = self._conn.execute(sql, params).fetchall()
+        # rows are sqlite3.Row because connect() set row_factory; coerce to dict
+        return [dict(r) for r in rows]
+
 
     # ── Time-series queries (for ML agents) ────────────────────────────────
 
@@ -588,6 +645,8 @@ _SQLITE_KEYS = {
     "_agent_manifests",
     "conversation_history",    # must survive restarts — durable
     "history_summary",         # must survive restarts — durable
+    "_final_cost",             # lifetime LLM cost — durable, queryable for deleted agents
+    "_messages_processed",     # lifetime message count — durable, survives restarts
 }
 
 # Keys that go to Redis ONLY when Redis is actually running.
@@ -676,8 +735,9 @@ def migrate_from_pickle(state_dir: str, db: WactorzDB, redis: RedisStore):
     """
     One-time migration: read existing .pkl files and write to SQLite/Redis.
 
-    Safe to run multiple times — only migrates keys that do NOT already exist
-    in SQLite/Redis, so newer data is never overwritten by stale pickle data.
+    Only migrates keys that do NOT already exist in SQLite/Redis — this makes the
+    function safe to call on every startup without overwriting newer SQLite data
+    with stale pickle data from a previous session.
     """
     base = Path(state_dir)
     if not base.exists():

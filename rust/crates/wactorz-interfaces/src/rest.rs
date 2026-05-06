@@ -18,17 +18,21 @@ use anyhow::Result;
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
+use crate::ws::MonitorState;
 use wactorz_core::ActorSystem;
 use wactorz_core::message::{ActorCommand, Message};
 
@@ -47,6 +51,9 @@ pub struct RuntimeConfig {
     pub mqtt_ws_port: u16,
     pub llm_provider: String,
     pub llm_model: String,
+    /// Root data directory — actor DBs live at <data_dir>/actors/<name>.db
+    /// and the global chat log at <data_dir>/wactorz.db.
+    pub data_dir: String,
 }
 
 /// Shared application state injected into axum handlers.
@@ -55,6 +62,8 @@ pub struct AppState {
     pub system: ActorSystem,
     pub config: RuntimeConfig,
     pub http: reqwest::Client,
+    /// Live monitor state shared with WsBridge — used for GET /api/feed.
+    pub monitor: Option<Arc<Mutex<MonitorState>>>,
 }
 
 /// JSON body for POST /actors/{id}/message
@@ -94,6 +103,7 @@ impl RestServer {
                 system,
                 config,
                 http: reqwest::Client::new(),
+                monitor: None,
             },
             addr,
             static_dir,
@@ -104,6 +114,12 @@ impl RestServer {
     /// Merge a WsBridge router so /ws and /mqtt are served on the same port.
     pub fn with_ws(mut self, ws_router: axum::Router) -> Self {
         self.ws_router = Some(ws_router);
+        self
+    }
+
+    /// Share the WsBridge's live MonitorState so /api/feed can read it.
+    pub fn with_monitor(mut self, monitor: Arc<Mutex<MonitorState>>) -> Self {
+        self.state.monitor = Some(monitor);
         self
     }
 
@@ -134,6 +150,16 @@ impl RestServer {
             .route("/api/actors/{id}/metrics", get(get_metrics_handler))
             .route("/api/fuseki/{dataset}/sparql", post(fuseki_sparql_handler))
             .route("/api/fuseki/{dataset}/update", post(fuseki_update_handler))
+            // Python-compatible aliases
+            .route("/api/feed", get(feed_handler))
+            .route("/feed", get(feed_handler))
+            .route("/config", get(config_handler))
+            // Actor conversation history (kv_store → conversation_history)
+            .route("/api/actors/{id}/history", get(actor_history_handler))
+            .route("/actors/{id}/history", get(actor_history_handler))
+            // Global chat log
+            .route("/api/chats", get(chat_log_handler))
+            .route("/chats", get(chat_log_handler))
             .with_state(self.state.clone());
 
         // Merge /ws and /mqtt onto the same port so the frontend can reach
@@ -398,6 +424,166 @@ async fn fuseki_proxy_request(
             )
                 .into_response()
         }
+    }
+}
+
+async fn feed_handler(State(state): State<AppState>) -> impl IntoResponse {
+    match &state.monitor {
+        None => Json(serde_json::json!([])).into_response(),
+        Some(arc) => {
+            let monitor = arc.lock().await;
+            let mut feed: Vec<serde_json::Value> = monitor
+                .log_feed
+                .iter()
+                .take(50)
+                .enumerate()
+                .map(|(i, item)| {
+                    let mut obj = item.clone();
+                    if let Some(map) = obj.as_object_mut() {
+                        map.entry("_seq").or_insert_with(|| serde_json::json!(i));
+                    }
+                    obj
+                })
+                .collect();
+            // Chronological order (oldest first), matching Python's feed_handler
+            feed.reverse();
+            Json(feed).into_response()
+        }
+    }
+}
+
+async fn actor_history_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    let entry = match state.system.registry.get(&id).await {
+        Some(e) => e,
+        None => return (StatusCode::NOT_FOUND, "actor not found").into_response(),
+    };
+    let actor_name = entry.name.clone();
+    let data_dir = state.config.data_dir.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        let db = wactorz_core::ActorPersistence::open(
+            std::path::Path::new(&data_dir),
+            &actor_name,
+        )?;
+        let history = db
+            .get("conversation_history")
+            .unwrap_or_else(|| serde_json::json!([]));
+        let filtered: Vec<serde_json::Value> = history
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter(|msg| {
+                        msg.get("role")
+                            .and_then(|r| r.as_str())
+                            .map(|r| r == "user" || r == "assistant")
+                            .unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok::<_, anyhow::Error>(filtered)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(msgs)) => Json(msgs).into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn chat_log_handler(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> axum::response::Response {
+    let agent_filter = params.get("agent").cloned();
+    let role_filter = params.get("role").cloned();
+    let since: Option<f64> = params.get("since").and_then(|s| s.parse().ok());
+    let limit: i64 = params.get("limit").and_then(|s| s.parse().ok()).unwrap_or(100);
+    let data_dir = state.config.data_dir.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = std::path::Path::new(&data_dir).join("wactorz.db");
+        let conn = rusqlite::Connection::open(&db_path)?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS chat_log (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts      REAL,
+                agent_name TEXT,
+                role    TEXT,
+                content TEXT,
+                session_id TEXT
+            );",
+        )?;
+
+        let mut sql = String::from(
+            "SELECT id, ts, agent_name, role, content, session_id FROM chat_log",
+        );
+        let mut clauses: Vec<String> = Vec::new();
+        let mut bind_vals: Vec<rusqlite::types::Value> = Vec::new();
+
+        if let Some(ref a) = agent_filter {
+            clauses.push("agent_name = ?".into());
+            bind_vals.push(rusqlite::types::Value::Text(a.clone()));
+        }
+        if let Some(ref r) = role_filter {
+            clauses.push("role = ?".into());
+            bind_vals.push(rusqlite::types::Value::Text(r.clone()));
+        }
+        if let Some(s) = since {
+            clauses.push("ts >= ?".into());
+            bind_vals.push(rusqlite::types::Value::Real(s));
+        }
+        if !clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&clauses.join(" AND "));
+        }
+        sql.push_str(" ORDER BY ts DESC LIMIT ?");
+        bind_vals.push(rusqlite::types::Value::Integer(limit));
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(bind_vals.iter()),
+            |row| {
+                let id: i64 = row.get(0)?;
+                let ts: f64 = row.get(1).unwrap_or(0.0);
+                let agent_name: String = row.get(2).unwrap_or_default();
+                let role: String = row.get(3).unwrap_or_default();
+                let content: String = row.get(4).unwrap_or_default();
+                let session_id: String = row.get(5).unwrap_or_default();
+                Ok((id, ts, agent_name, role, content, session_id))
+            },
+        )?;
+
+        let mut messages: Vec<serde_json::Value> = rows
+            .filter_map(|r| r.ok())
+            .map(|(id, ts, agent_name, role, content, session_id)| {
+                serde_json::json!({
+                    "id": id,
+                    "ts": ts,
+                    "agent_name": agent_name,
+                    "role": role,
+                    "content": content,
+                    "session_id": session_id,
+                })
+            })
+            .collect();
+        messages.reverse(); // chronological order — oldest first, matching Python
+        Ok::<_, anyhow::Error>(messages)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(msgs)) => Json(msgs).into_response(),
+        Ok(Err(e)) => {
+            tracing::warn!("chat_log query error: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 

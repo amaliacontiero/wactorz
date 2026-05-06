@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"mod":["actor","message","metrics","publish","registry"]};

@@ -16,6 +16,8 @@
 import type { AgentInfo, AgentState, ChatMessage } from "../types/agent";
 import type { FeedItem } from "./ActivityFeed";
 import { HAClient, type HAEntity } from "../io/HAClient";
+import { ambient, AMBIENT_TRACKS } from "../io/AmbientManager";
+import { tts } from "../io/TTSManager";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -107,6 +109,7 @@ export class CardDashboard {
   private hideHeartbeats: boolean = true;
 
   private haClient: HAClient | null = null;
+  private _haEntities: import("../io/HAClient").HAEntity[] = [];
 
   // Streaming
   private _streamRow: HTMLElement | null = null;
@@ -115,6 +118,9 @@ export class CardDashboard {
   private _streamTarget: string | null = null;
   private _streamText: string = "";
   private _lastSentTarget: string = "main-actor";
+  private _historyLoaded: Set<string> = new Set();
+  private _totalCostUsd: number | null = null;
+  private _totalMessages: number | null = null;
 
   // Event listeners (stored for cleanup)
   private _evFeed: ((e: Event) => void) | null = null;
@@ -174,12 +180,22 @@ export class CardDashboard {
     this._wireEvents();
     this._renderView();
     this.tickTimer = setInterval(() => this._refreshTimestamps(), 5000);
+    // Connect HA once for the session — stays connected across sub-view changes
+    // so state_changed events flow to the activity feed at all times.
+    if (this.haClient && !this.haClient.connected) {
+      this.haClient.connect((entities) => {
+        this._haEntities = entities;
+        if (this.view === "ha") this._renderHADevices(entities);
+      });
+    }
   }
 
   hide(): void {
     this.root.classList.remove("cd-visible");
     this._showFloatingUI();
     this._unwireEvents();
+    this.haClient?.disconnect();
+    this._haEntities = [];
     if (this.tickTimer) {
       clearInterval(this.tickTimer);
       this.tickTimer = null;
@@ -189,6 +205,16 @@ export class CardDashboard {
   destroy(): void {
     this.hide();
     this.root.remove();
+  }
+
+  setTotalCostUsd(usd: number): void {
+    this._totalCostUsd = usd;
+    if (this.view === "overview") this._renderStats();
+  }
+
+  setTotalMessages(count: number): void {
+    this._totalMessages = count;
+    if (this.view === "overview") this._renderStats();
   }
 
   // ── Agent events ──────────────────────────────────────────────────────────
@@ -213,7 +239,10 @@ export class CardDashboard {
   }
 
   removeAgent(id: string): void {
+    const removed = this.agents.get(id);
     this.agents.delete(id);
+    // _historyLoaded is keyed by agent NAME, not UUID — look up name before deleting
+    if (removed) this._historyLoaded.delete(removed.name);
     if (!this.root.classList.contains("cd-visible")) return;
     const card = this.root.querySelector<HTMLElement>(
       `[data-id="${CSS.escape(id)}"]`,
@@ -383,14 +412,7 @@ export class CardDashboard {
   // ── Private: floating UI ──────────────────────────────────────────────────
 
   private _hideFloatingUI(): void {
-    [
-      "hud",
-      "hud-stats",
-      "io-bar",
-      "chat-panel",
-      "activity-feed",
-      "feed-toggle",
-    ].forEach((id) => {
+    ["hud", "hud-stats", "io-bar", "chat-panel"].forEach((id) => {
       const el = document.getElementById(id);
       if (el) el.style.display = "none";
     });
@@ -401,6 +423,9 @@ export class CardDashboard {
       const el = document.getElementById(id);
       if (el) el.style.display = "";
     });
+    // Restore feed panel if it was open before the dashboard was shown
+    const feedPanel = document.getElementById("activity-feed");
+    if (feedPanel) feedPanel.style.display = "";
   }
 
   // ── Private: view rendering ───────────────────────────────────────────────
@@ -425,6 +450,7 @@ export class CardDashboard {
       this._renderSidebar();
       this._renderChatPaneHeader();
       this._renderChatThread();
+      this._loadHistory(this.chatTarget);
     }
 
     this.root
@@ -457,15 +483,20 @@ export class CardDashboard {
   }
 
   private _setView(v: View): void {
-    if (this.view === "ha" && v !== "ha") {
-      this.haClient?.disconnect();
-    }
     if (v === "chat") this._syncChatTarget();
     this.view = v;
     this._renderView();
 
     if (this.view === "ha") {
-      this.haClient?.connect((entities) => this._renderHADevices(entities));
+      if (this.haClient?.connected) {
+        // Already connected — just re-render with cached entities
+        if (this._haEntities.length) this._renderHADevices(this._haEntities);
+      } else {
+        this.haClient?.connect((entities) => {
+          this._haEntities = entities;
+          if (this.view === "ha") this._renderHADevices(entities);
+        });
+      }
     }
   }
 
@@ -532,8 +563,12 @@ export class CardDashboard {
     const healthy = agents.filter(
       (a) => stateLabel(a.state) === "running",
     ).length;
-    const msgs = agents.reduce((s, a) => s + (a.messagesProcessed ?? 0), 0);
-    const cost = agents.reduce((s, a) => s + (a.costUsd ?? 0), 0);
+    const msgs = this._totalMessages !== null
+      ? this._totalMessages
+      : agents.reduce((s, a) => s + (a.messagesProcessed ?? 0), 0);
+    const cost = this._totalCostUsd !== null
+      ? this._totalCostUsd
+      : agents.reduce((s, a) => s + (a.costUsd ?? 0), 0);
     const events = this.feedItems.length;
 
     [
@@ -799,10 +834,8 @@ export class CardDashboard {
 
     const visible = this.feedItems.filter(
       (i) =>
-        !(
-          this.hideHeartbeats &&
-          (i.type === "heartbeat" || i.type === "health")
-        ) && !SYSTEM_AGENT_NAMES.has(nameFromWid(i.agentName)),
+        !(this.hideHeartbeats && i.type === "heartbeat") &&
+        !SYSTEM_AGENT_NAMES.has(nameFromWid(i.agentName)),
     );
     if (visible.length === 0) {
       const empty = document.createElement("div");
@@ -822,11 +855,7 @@ export class CardDashboard {
   private _appendFeedItemToView(item: FeedItem): void {
     const feed = this.root.querySelector<HTMLElement>("#af-feed-view");
     if (!feed) return;
-    if (
-      this.hideHeartbeats &&
-      (item.type === "heartbeat" || item.type === "health")
-    )
-      return;
+    if (this.hideHeartbeats && item.type === "heartbeat") return;
     if (SYSTEM_AGENT_NAMES.has(nameFromWid(item.agentName))) return;
     feed.querySelector(".af-feed-empty")?.remove();
     this._feedItemEl(feed, item);
@@ -875,7 +904,10 @@ export class CardDashboard {
 
     const text = document.createElement("span");
     text.className = "af-feed-text";
-    text.textContent = item.label;
+    const label = item.label ?? "";
+    const trimmed = label.length > 120 ? label.slice(0, 120) + "…" : label;
+    text.textContent = trimmed;
+    if (label.length > 120) text.title = label;
 
     row.append(icon, time, agent, text);
     container.appendChild(row);
@@ -986,7 +1018,10 @@ export class CardDashboard {
           this._renderSidebar();
           this._renderChatPaneHeader();
           this._renderChatThread();
+          this._loadHistory(agent.name);
           this._updateTargetSelect();
+          // Mobile: switch to pane view
+          this.root.querySelector(".af-chat")?.classList.add("agent-selected");
         });
       }
 
@@ -1013,6 +1048,16 @@ export class CardDashboard {
     const hdr = this.root.querySelector<HTMLElement>("#af-chat-pane-header");
     if (!hdr) return;
     hdr.innerHTML = "";
+
+    // Back button (mobile-only via CSS)
+    const backBtn = document.createElement("button");
+    backBtn.className = "af-chat-back-btn";
+    backBtn.textContent = "‹ Back";
+    backBtn.addEventListener("click", () => {
+      this.root.querySelector(".af-chat")?.classList.remove("agent-selected");
+    });
+    hdr.appendChild(backBtn);
+
     const agent = [...this.agents.values()].find(
       (a) => a.name === this.chatTarget,
     );
@@ -1043,6 +1088,59 @@ export class CardDashboard {
       return msg.to === this.chatTarget;
     // Regular agent messages: keyed by sender
     return msg.from === this.chatTarget;
+  }
+
+  private async _loadHistory(agentId: string): Promise<void> {
+    if (this._historyLoaded.has(agentId)) return;
+    this._historyLoaded.add(agentId);
+    const ingress: string = (window as any).__WACTORZ_INGRESS_PATH ?? "";
+    const liveIds = () => new Set(this.chatMessages.map((m) => m.id));
+    const prepend = (msgs: ChatMessage[]) => {
+      const ids = liveIds();
+      this.chatMessages.unshift(...msgs.filter((m) => !ids.has(m.id)));
+      this._renderChatThread();
+    };
+    try {
+      // Primary: chat_log table — real persisted timestamps
+      const chatRes = await fetch(
+        `${ingress}/api/chats?agent=${encodeURIComponent(agentId)}&limit=200`,
+      );
+      if (chatRes.ok) {
+        const rows: { id: number; ts: number; role: string; content: string }[] =
+          await chatRes.json();
+        if (rows.length) {
+          prepend(
+            rows.reverse().map((r) => ({
+              id: `hist-${agentId}-${r.id}`,
+              from: r.role === "user" ? "user" : agentId,
+              to:   r.role === "user" ? agentId : "user",
+              content: r.content,
+              timestampMs: r.ts < 1e10 ? r.ts * 1000 : r.ts,
+            })),
+          );
+          return;
+        }
+      }
+      // Fallback: actor kv_store history — no timestamps, synthesise
+      const res = await fetch(
+        `${ingress}/api/actors/${encodeURIComponent(agentId)}/history`,
+      );
+      if (!res.ok) return;
+      const raw: { role: string; content: string }[] = await res.json();
+      if (!raw.length) return;
+      const base = Date.now() - raw.length * 2000 - 5000;
+      prepend(
+        raw.map((m, i) => ({
+          id: `hist-${agentId}-${i}`,
+          from: m.role === "user" ? "user" : agentId,
+          to:   m.role === "user" ? agentId : "user",
+          content: m.content,
+          timestampMs: base + i * 2000,
+        })),
+      );
+    } catch {
+      // history unavailable — silent
+    }
   }
 
   private _renderChatThread(): void {
@@ -1803,6 +1901,29 @@ export class CardDashboard {
       right.appendChild(btn);
     });
 
+    // 🔊 Audio button → glass popover with all sound controls
+    const audioBtn = document.createElement("button");
+    audioBtn.className = "af-view-btn";
+    audioBtn.title = "Audio settings";
+    audioBtn.textContent = "🔊";
+    right.appendChild(audioBtn);
+
+    const popover = this._buildAudioPopover();
+    document.body.appendChild(popover);
+
+    audioBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const open = popover.classList.toggle("open");
+      if (open) {
+        const r = audioBtn.getBoundingClientRect();
+        popover.style.top  = `${r.bottom + 6}px`;
+        popover.style.right = `${window.innerWidth - r.right}px`;
+      }
+    });
+    document.addEventListener("click", (e) => {
+      if (!popover.contains(e.target as Node)) popover.classList.remove("open");
+    });
+
     // const btn3d = document.createElement("button");
     // btn3d.className = "af-view-btn";
     // btn3d.style.marginLeft = "8px";
@@ -1818,8 +1939,9 @@ export class CardDashboard {
     body.className = "af-body";
 
     const iobar = this._buildIobar();
+    const bottomNav = this._buildBottomNav();
 
-    root.append(header, body, iobar);
+    root.append(header, body, bottomNav, iobar);
     return root;
   }
 
@@ -2503,5 +2625,189 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
     section.appendChild(actions);
 
     return section;
+  }
+
+  // ── Private: Bottom nav (mobile) ─────────────────────────────────────────
+
+  private _buildBottomNav(): HTMLElement {
+    const nav = document.createElement("nav");
+    nav.className = "af-bottom-nav";
+
+    const primary: { key: View; icon: string; label: string }[] = [
+      { key: "overview", icon: "◫", label: "Overview" },
+      { key: "feed",     icon: "≡", label: "Feed"     },
+      { key: "chat",     icon: "💬", label: "Chat"     },
+      { key: "ha",       icon: "🏠", label: "Devices"  },
+    ];
+
+    primary.forEach(({ key, icon, label }) => {
+      const btn = document.createElement("button");
+      btn.className = `af-view-btn af-bottom-tab${key === this.view ? " active" : ""}`;
+      btn.dataset["view"] = key;
+      btn.innerHTML = `<span class="af-bottom-tab-icon">${icon}</span><span class="af-bottom-tab-label">${label}</span>`;
+      btn.addEventListener("click", () => {
+        sheet.classList.remove("open");
+        this._setView(key);
+      });
+      nav.appendChild(btn);
+    });
+
+    // ⋯ More → slide-up sheet for Graph + Settings
+    const moreBtn = document.createElement("button");
+    moreBtn.className = "af-bottom-tab af-bottom-more-btn";
+    moreBtn.innerHTML = `<span class="af-bottom-tab-icon">⋯</span><span class="af-bottom-tab-label">More</span>`;
+
+    const sheet = document.createElement("div");
+    sheet.className = "af-bottom-sheet";
+
+    const secondary: { key: View; icon: string; label: string }[] = [
+      { key: "fuseki",   icon: "⬡", label: "Graph"    },
+      { key: "settings", icon: "⚙", label: "Settings" },
+    ];
+    secondary.forEach(({ key, icon, label }) => {
+      const btn = document.createElement("button");
+      btn.className = `af-view-btn af-bottom-tab af-bottom-sheet-btn${key === this.view ? " active" : ""}`;
+      btn.dataset["view"] = key;
+      btn.innerHTML = `<span class="af-bottom-tab-icon">${icon}</span><span class="af-bottom-tab-label">${label}</span>`;
+      btn.addEventListener("click", () => {
+        sheet.classList.remove("open");
+        moreBtn.classList.remove("active");
+        this._setView(key);
+      });
+      sheet.appendChild(btn);
+    });
+
+    moreBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      sheet.classList.toggle("open");
+      moreBtn.classList.toggle("active", sheet.classList.contains("open"));
+    });
+    document.addEventListener("click", () => {
+      sheet.classList.remove("open");
+      moreBtn.classList.remove("active");
+    });
+
+    nav.appendChild(moreBtn);
+    nav.appendChild(sheet);
+
+    return nav;
+  }
+
+  // ── Private: Audio popover ────────────────────────────────────────────────
+
+  private _buildAudioPopover(): HTMLElement {
+    const pop = document.createElement("div");
+    pop.className = "af-audio-popover glass";
+
+    // ── Row: Beep + TTS toggles ───────────────────────────────────────────
+    const toggleRow = document.createElement("div");
+    toggleRow.className = "af-audio-row";
+
+    const beepBtn = document.createElement("button");
+    beepBtn.className = `af-audio-toggle${tts.beepEnabled ? " on" : ""}`;
+    beepBtn.textContent = `🔔 Beep`;
+    beepBtn.title = "Notification beep";
+    beepBtn.addEventListener("click", () => {
+      const on = tts.toggleBeep();
+      beepBtn.classList.toggle("on", on);
+    });
+
+    const ttsBtn = document.createElement("button");
+    ttsBtn.className = `af-audio-toggle${tts.ttsEnabled ? " on" : ""}`;
+    ttsBtn.textContent = `🗣 TTS`;
+    ttsBtn.title = "Read replies aloud";
+    ttsBtn.addEventListener("click", () => {
+      const on = tts.toggleTTS();
+      ttsBtn.classList.toggle("on", on);
+      voiceRow.style.display = on ? "" : "none";
+    });
+
+    toggleRow.append(beepBtn, ttsBtn);
+    pop.appendChild(toggleRow);
+
+    // ── Row: Voice select ─────────────────────────────────────────────────
+    const voiceRow = document.createElement("div");
+    voiceRow.className = "af-audio-row";
+    voiceRow.style.display = tts.ttsEnabled ? "" : "none";
+
+    const voiceSel = document.createElement("select");
+    voiceSel.className = "af-audio-select";
+    voiceSel.title = "TTS voice";
+
+    const placeholderOpt = document.createElement("option");
+    placeholderOpt.value = "";
+    placeholderOpt.textContent = "— loading voices… —";
+    voiceSel.appendChild(placeholderOpt);
+
+    const populateVoices = (): void => {
+      const voices = tts.voices;
+      if (!voices.length) return;
+      while (voiceSel.options.length > 1) voiceSel.remove(1);
+      voices.forEach(v => {
+        const o = document.createElement("option");
+        o.value = v.name;
+        o.textContent = v.name.replace(/^Microsoft\s+/, "").replace(/\s+Online.*$/i, "");
+        voiceSel.appendChild(o);
+      });
+      const saved = tts.selectedVoice;
+      if (saved) voiceSel.value = saved;
+    };
+
+    populateVoices();
+    document.addEventListener("tts-voices-loaded", () => populateVoices());
+    voiceSel.addEventListener("change", () => tts.setVoice(voiceSel.value));
+
+    voiceRow.appendChild(voiceSel);
+    pop.appendChild(voiceRow);
+
+    // ── Divider ───────────────────────────────────────────────────────────
+    const divider = document.createElement("div");
+    divider.className = "af-audio-divider";
+    pop.appendChild(divider);
+
+    // ── Row: Ambient track ────────────────────────────────────────────────
+    const trackLabel = document.createElement("div");
+    trackLabel.className = "af-audio-label";
+    trackLabel.textContent = "Ambient";
+    pop.appendChild(trackLabel);
+
+    const trackRow = document.createElement("div");
+    trackRow.className = "af-audio-tracks";
+
+    AMBIENT_TRACKS.forEach(({ id, label }) => {
+      const btn = document.createElement("button");
+      btn.className = `af-audio-track-btn${ambient.track === id ? " on" : ""}`;
+      btn.textContent = label;
+      btn.addEventListener("click", () => {
+        trackRow.querySelectorAll(".af-audio-track-btn").forEach(b => b.classList.remove("on"));
+        btn.classList.add("on");
+        ambient.setTrack(id);
+        volRow.style.display = id === "none" ? "none" : "";
+      });
+      trackRow.appendChild(btn);
+    });
+
+    pop.appendChild(trackRow);
+
+    // ── Row: Volume slider ────────────────────────────────────────────────
+    const volRow = document.createElement("div");
+    volRow.className = "af-audio-row af-audio-vol-row";
+    volRow.style.display = ambient.track === "none" ? "none" : "";
+
+    const volIcon = document.createElement("span");
+    volIcon.textContent = "🔉";
+    volIcon.style.fontSize = "14px";
+
+    const volSlider = document.createElement("input");
+    volSlider.type = "range";
+    volSlider.className = "af-audio-slider";
+    volSlider.min = "0"; volSlider.max = "1"; volSlider.step = "0.05";
+    volSlider.value = String(ambient.volume);
+    volSlider.addEventListener("input", () => ambient.setVolume(parseFloat(volSlider.value)));
+
+    volRow.append(volIcon, volSlider);
+    pop.appendChild(volRow);
+
+    return pop;
   }
 }

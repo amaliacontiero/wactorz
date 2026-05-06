@@ -38,14 +38,40 @@ export type StatePatchAgent = {
   agent_type?: string;
 };
 
+/** Snapshot-level totals computed by the backend (includes historical/deleted agents). */
+export type SnapshotStats = {
+  totalCostUsd?: number;
+  totalMessages?: number;
+};
+
 /**
  * Called whenever the server broadcasts a state patch over the WebSocket.
  * `deletedId` is set when the server explicitly deletes an agent.
+ * `stats` carries backend-computed totals that include deleted agents.
  */
 export type StatePatchHandler = (
   agents: StatePatchAgent[],
   deletedId?: string,
+  stats?: SnapshotStats,
 ) => void;
+
+/** One MQTT-derived event entry from the server's in-memory log_feed. */
+export interface LogFeedItem {
+  type: string;
+  agent_id?: string;
+  name?: string;
+  agentName?: string;
+  message?: string;
+  text?: string;
+  timestamp?: number;
+  status?: Record<string, unknown>;
+  severity?: string;
+  agentType?: string;
+  agent_type?: string;
+  command?: string;
+}
+
+export type LogFeedHandler = (items: LogFeedItem[]) => void;
 
 export class WSChatClient {
   private ws: WebSocket | null = null;
@@ -55,7 +81,9 @@ export class WSChatClient {
   private _onStreamEnd: StreamEndHandler | null = null;
   private _onMode: ModeHandler | null = null;
   private _onStatePatch: StatePatchHandler | null = null;
+  private _onLogFeed: LogFeedHandler | null = null;
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private _reconnectDelay = 1_000;
   private _url = "";
   private _closed = false;
 
@@ -92,9 +120,15 @@ export class WSChatClient {
     this._onStatePatch = fn;
   }
 
+  /** Server broadcast new MQTT-derived log_feed entries inside a state patch. */
+  onLogFeed(fn: LogFeedHandler): void {
+    this._onLogFeed = fn;
+  }
+
   connect(url: string): void {
     this._url = url;
     this._closed = false;
+    this._reconnectDelay = 1_000;
     this._open();
   }
 
@@ -143,6 +177,7 @@ export class WSChatClient {
 
     this.ws.addEventListener("open", () => {
       console.info("[WSChat] connected →", this._url);
+      this._reconnectDelay = 1_000;
     });
 
     this.ws.addEventListener("message", (ev: MessageEvent) => {
@@ -165,19 +200,24 @@ export class WSChatClient {
       // Server explicitly deleted an agent — remove it and apply rest of patch
       if (data["type"] === "delete_agent") {
         const patch = data["state"] as
-          | { agents?: StatePatchAgent[] }
+          | { agents?: StatePatchAgent[]; total_cost_usd?: number; total_messages?: number; log_feed?: LogFeedItem[] }
           | undefined;
-        this._onStatePatch?.(
-          patch?.agents ?? [],
-          String(data["agent_id"] ?? ""),
-        );
+        const stats: SnapshotStats = {};
+        if (patch?.total_cost_usd !== undefined) stats.totalCostUsd = patch.total_cost_usd;
+        if (patch?.total_messages !== undefined) stats.totalMessages = patch.total_messages;
+        this._onStatePatch?.(patch?.agents ?? [], String(data["agent_id"] ?? ""), stats);
+        if (patch?.log_feed?.length) this._onLogFeed?.(patch.log_feed);
         return;
       }
 
       // Any message with a "state" field is a state patch broadcast
       if (data["state"]) {
-        const patch = data["state"] as { agents?: StatePatchAgent[] };
-        this._onStatePatch?.(patch.agents ?? []);
+        const patch = data["state"] as { agents?: StatePatchAgent[]; total_cost_usd?: number; total_messages?: number; log_feed?: LogFeedItem[] };
+        const stats: SnapshotStats = {};
+        if (patch.total_cost_usd !== undefined) stats.totalCostUsd = patch.total_cost_usd;
+        if (patch.total_messages !== undefined) stats.totalMessages = patch.total_messages;
+        this._onStatePatch?.(patch.agents ?? [], undefined, stats);
+        if (patch.log_feed?.length) this._onLogFeed?.(patch.log_feed);
         // don't return — message may also carry chat/stream content
       }
 
@@ -205,9 +245,11 @@ export class WSChatClient {
 
   private _scheduleReconnect(): void {
     if (this._closed || this._reconnectTimer !== null) return;
+    const delay = this._reconnectDelay;
+    this._reconnectDelay = Math.min(this._reconnectDelay * 2, 30_000);
     this._reconnectTimer = setTimeout(() => {
       this._reconnectTimer = null;
       this._open();
-    }, 3000);
+    }, delay);
   }
 }

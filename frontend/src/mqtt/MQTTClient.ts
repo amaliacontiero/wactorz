@@ -87,11 +87,15 @@ export class MQTTClient {
 
     this.client.on("connect", () => {
       console.info("[MQTT] Connected to", this.brokerUrl);
-      this.client?.subscribe(["agents/#", "nodes/#", "system/#"], { qos: 1 });
+      this.client?.subscribe("#", { qos: 1 });
       this.emit("connected", undefined);
     });
 
     this.client.on("disconnect", () => {
+      this.emit("disconnected", undefined);
+    });
+
+    this.client.on("close", () => {
       this.emit("disconnected", undefined);
     });
 
@@ -183,7 +187,7 @@ export class MQTTClient {
     }
     // agents/{id}/alert
     if (/^agents\/.+\/alert$/.test(topic)) {
-      this.emit("alert", payload as AlertPayload);
+      this.emit("alert", normaliseAlert(payload));
       return;
     }
     // agents/{id}/chat
@@ -193,7 +197,7 @@ export class MQTTClient {
     }
     // agents/{id}/spawn  (real backend + mock both use this topic)
     if (/^agents\/.+\/spawn$/.test(topic)) {
-      this.emit("spawn", payload as SpawnPayload);
+      this.emit("spawn", normaliseSpawn(payload));
       return;
     }
 
@@ -205,7 +209,7 @@ export class MQTTClient {
 
     // system/spawn  (legacy / alternate)
     if (topic === "system/spawn") {
-      this.emit("spawn", payload as SpawnPayload);
+      this.emit("spawn", normaliseSpawn(payload));
       return;
     }
 
@@ -310,7 +314,7 @@ type RawObj = Record<string, unknown>;
 
 /** Convert a raw epoch value to milliseconds.
  *  Python's time.time() returns seconds (< 1e10); JS Date.now() returns ms. */
-function toMs(raw: unknown): number {
+export function toMs(raw: unknown): number {
   const n = Number(raw);
   if (!Number.isFinite(n) || n <= 0) return Date.now();
   return n < 1e10 ? n * 1000 : n;
@@ -325,17 +329,17 @@ function str(v: unknown, fallback = ""): string {
  * Format: 20260325T151725.0000Z-{name}[-{6hex}]
  * Falls back to first 8 chars for non-WID strings.
  */
-function nameFromId(raw: string): string {
+export function nameFromId(raw: string): string {
   const m = raw.match(/Z-(.+?)(?:-[0-9a-f]{6})?$/i);
   return m?.[1] ?? raw;
 }
 
-function resolveAgentName(name: string, id: string): string {
+export function resolveAgentName(name: string, id: string): string {
   const isTimestampOnly = !name || /^\d+$/.test(name);
   return isTimestampOnly ? nameFromId(id) : nameFromId(name);
 }
 
-function normaliseHeartbeat(p: unknown): HeartbeatPayload {
+export function normaliseHeartbeat(p: unknown): HeartbeatPayload {
   const o = (p ?? {}) as RawObj;
   const agentId = str(o["agentId"] ?? o["actor_id"] ?? o["agent_id"]);
   const agentName = resolveAgentName(str(o["agentName"] ?? o["name"]), agentId);
@@ -351,7 +355,7 @@ function normaliseHeartbeat(p: unknown): HeartbeatPayload {
   };
 }
 
-function normaliseChat(p: unknown): ChatMessage {
+export function normaliseChat(p: unknown): ChatMessage {
   const o = (p ?? {}) as RawObj;
   const timestampMs = toMs(
     o["timestampMs"] ?? o["timestamp_ms"] ?? o["timestamp"],
@@ -366,7 +370,7 @@ function normaliseChat(p: unknown): ChatMessage {
   };
 }
 
-function normaliseStatus(p: unknown): StatusPayload {
+export function normaliseStatus(p: unknown): StatusPayload {
   const o = (p ?? {}) as RawObj;
   const agentId = str(o["agentId"] ?? o["actor_id"] ?? o["agent_id"]);
   const agentName = resolveAgentName(str(o["agentName"] ?? o["name"]), agentId);
@@ -374,5 +378,29 @@ function normaliseStatus(p: unknown): StatusPayload {
     ...(o as unknown as StatusPayload),
     agentId,
     agentName,
+  };
+}
+
+export function normaliseSpawn(p: unknown): SpawnPayload {
+  const o = (p ?? {}) as RawObj;
+  const agentId = str(o["agentId"] ?? o["actor_id"] ?? o["agent_id"]);
+  const agentName = resolveAgentName(str(o["agentName"] ?? o["name"]), agentId);
+  return {
+    ...(o as unknown as SpawnPayload),
+    agentId,
+    agentName,
+    timestampMs: toMs(o["timestampMs"] ?? o["timestamp_ms"] ?? o["timestamp"]),
+  };
+}
+
+export function normaliseAlert(p: unknown): AlertPayload {
+  const o = (p ?? {}) as RawObj;
+  const agentId = str(o["agentId"] ?? o["actor_id"] ?? o["agent_id"]);
+  const agentName = resolveAgentName(str(o["agentName"] ?? o["name"]), agentId);
+  return {
+    ...(o as unknown as AlertPayload),
+    agentId,
+    agentName,
+    timestampMs: toMs(o["timestampMs"] ?? o["timestamp_ms"] ?? o["timestamp"]),
   };
 }

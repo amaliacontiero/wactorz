@@ -132,6 +132,10 @@ pub struct Args {
     #[arg(long, default_value = "static/app", env = "STATIC_DIR")]
     pub static_dir: String,
 
+    /// Root data directory for actor SQLite DBs and the global chat log
+    #[arg(long, default_value = "state", env = "DATA_DIR")]
+    pub data_dir: String,
+
     /// MQTT output topic for the HA state-bridge agent
     #[arg(long, default_value = "ha/state", env = "HA_STATE_BRIDGE_OUTPUT_TOPIC")]
     pub ha_state_bridge_topic: String,
@@ -651,6 +655,7 @@ async fn main() -> Result<()> {
         mqtt_ws_port: args.mqtt_ws_port,
         llm_provider: args.llm_provider.clone(),
         llm_model: args.llm_model.clone(),
+        data_dir: args.data_dir.clone(),
     };
     // Merge WsBridge (/ws + /mqtt) onto the same port as REST so the frontend
     // can reach all endpoints via window.location.host — same as Python's
@@ -662,9 +667,13 @@ async fn main() -> Result<()> {
         args.mqtt_host,
         args.mqtt_ws_port,
     );
+    ws_bridge.spawn_monitor_task();
+    let monitor_arc = ws_bridge.monitor_arc();
+    let ws_router = ws_bridge.router();
     tokio::spawn(async move {
         let server = RestServer::new(system_for_rest, rest_addr, runtime_cfg, static_dir)
-            .with_ws(ws_bridge.router());
+            .with_ws(ws_router)
+            .with_monitor(monitor_arc);
         if let Err(e) = server.serve().await {
             tracing::error!("REST+WS error: {e}");
         }

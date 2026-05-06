@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["ActorCommand","AlertSeverity","MessageType"],"struct":["Message"]};

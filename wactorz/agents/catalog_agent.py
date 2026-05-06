@@ -117,101 +117,101 @@ def _build_catalog() -> dict:
             "code":          code,
         }
 
-    # ── ha-actuator-agent ─────────────────────────────────────────────────────
-    code = _load_recipe("ha_actuator_agent.py")
-    if code:
-        catalog["ha-actuator-agent"] = {
-            "name":         "ha-actuator-agent",
-            "type":         "dynamic",
-            "description":  "Subscribes to an MQTT topic and calls a Home Assistant service when triggered.",
-            "capabilities": ["home_automation", "ha_actuator", "mqtt_subscriber"],
-            "install":      ["aiomqtt"],
-            "input_schema": {
-                "mqtt_topic":  "str  — topic to subscribe to",
-                "ha_domain":   "str  — HA domain, e.g. light",
-                "ha_service":  "str  — HA service, e.g. turn_on",
-                "entity_id":   "str  — HA entity ID",
-            },
-            "output_schema": {"actuations": "int"},
-            "poll_interval": 3600,
-            "code":          code,
-        }
+    # # ── ha-actuator-agent ─────────────────────────────────────────────────────
+    # code = _load_recipe("home_assistant_actuator_agent.py")
+    # if code:
+    #     catalog["homeassistant-actuator-agent"] = {
+    #         "name":         "ha-actuator-agent",
+    #         "type":         "dynamic",
+    #         "description":  "Subscribes to an MQTT topic and calls a Home Assistant service when triggered.",
+    #         "capabilities": ["home_automation", "ha_actuator", "mqtt_subscriber"],
+    #         "install":      ["aiomqtt"],
+    #         "input_schema": {
+    #             "mqtt_topic":  "str  — topic to subscribe to",
+    #             "ha_domain":   "str  — HA domain, e.g. light",
+    #             "ha_service":  "str  — HA service, e.g. turn_on",
+    #             "entity_id":   "str  — HA entity ID",
+    #         },
+    #         "output_schema": {"actuations": "int"},
+    #         "poll_interval": 3600,
+    #         "code":          code,
+    #     }
 
-    # ── discord-notify-agent ──────────────────────────────────────────────────
-    code = _load_recipe("discord_notify_agent.py")
-    if code:
-        catalog["discord-notify-agent"] = {
-            "name":         "discord-notify-agent",
-            "type":         "dynamic",
-            "description":  "Subscribes to MQTT events and posts notifications to a Discord webhook.",
-            "capabilities": ["discord", "notifications", "mqtt_subscriber", "webhook", "alerting"],
-            "install":      ["aiohttp", "aiomqtt"],
-            "input_schema": {
-                "mqtt_topic":    "str — MQTT topic to subscribe to",
-                "message_tpl":   "str — message template, use {data} for payload",
-                "trigger_key":   "str — optional: only trigger when this key exists",
-                "trigger_value": "str — optional: only trigger when trigger_key equals this",
-                "cooldown_s":    "int — seconds between notifications, default 10",
-                "webhook_url":   "str — Discord webhook URL (overrides persisted value)",
-            },
-            "output_schema": {"sent": "int — number of notifications sent"},
-            "poll_interval": 3600,
-            "code":          code,
-        }
+    # # ── discord-notify-agent ──────────────────────────────────────────────────
+    # code = _load_recipe("discord_notify_agent.py")
+    # if code:
+    #     catalog["discord-notify-agent"] = {
+    #         "name":         "discord-notify-agent",
+    #         "type":         "dynamic",
+    #         "description":  "Subscribes to MQTT events and posts notifications to a Discord webhook.",
+    #         "capabilities": ["discord", "notifications", "mqtt_subscriber", "webhook", "alerting"],
+    #         "install":      ["aiohttp", "aiomqtt"],
+    #         "input_schema": {
+    #             "mqtt_topic":    "str — MQTT topic to subscribe to",
+    #             "message_tpl":   "str — message template, use {data} for payload",
+    #             "trigger_key":   "str — optional: only trigger when this key exists",
+    #             "trigger_value": "str — optional: only trigger when trigger_key equals this",
+    #             "cooldown_s":    "int — seconds between notifications, default 10",
+    #             "webhook_url":   "str — Discord webhook URL (overrides persisted value)",
+    #         },
+    #         "output_schema": {"sent": "int — number of notifications sent"},
+    #         "poll_interval": 3600,
+    #         "code":          code,
+    #     }
 
-    # ── sinergym-collector ────────────────────────────────────────────────────
-    code = _load_recipe("sinergym_collector_agent.py")
-    if code:
-        catalog["sinergym-collector"] = {
-            "name":         "sinergym-collector",
-            "type":         "dynamic",
-            "description":  "Collects Sinergym episode data via MQTT for RL/Bayesian training. Listens on sinergym/env/{env_id}/observation and persists (obs, action, reward) tuples.",
-            "capabilities": ["sinergym", "data_collection", "rl_training", "energy_optimization", "building_simulation"],
-            "install":      ["aiomqtt", "numpy"],
-            "input_schema": {
-                "env_id":          "str  — Sinergym env ID, e.g. Eplus-5zone-hot-continuous-v1",
-                "obs_topic":       "str  — MQTT topic for observations",
-                "target_episodes": "int  — episodes to collect before triggering optimizer, default 10",
-                "chunk_size":      "int  — persist every N episodes, default 5",
-                "optimizer_name":  "str  — optimizer agent to notify on completion, default sinergym-optimizer",
-            },
-            "output_schema": {
-                "episodes_collected": "int",
-                "total_steps":        "int",
-                "data_key":           "str — episode_{N} recall keys",
-            },
-            "poll_interval": 3600,
-            "code":          code,
-        }
-        logger.info("[catalog] Loaded sinergym-collector recipe")
+    # # ── sinergym-collector ────────────────────────────────────────────────────
+    # code = _load_recipe("sinergym_collector_agent.py")
+    # if code:
+    #     catalog["sinergym-collector"] = {
+    #         "name":         "sinergym-collector",
+    #         "type":         "dynamic",
+    #         "description":  "Collects Sinergym episode data via MQTT for RL/Bayesian training. Listens on sinergym/env/{env_id}/observation and persists (obs, action, reward) tuples.",
+    #         "capabilities": ["sinergym", "data_collection", "rl_training", "energy_optimization", "building_simulation"],
+    #         "install":      ["aiomqtt", "numpy"],
+    #         "input_schema": {
+    #             "env_id":          "str  — Sinergym env ID, e.g. Eplus-5zone-hot-continuous-v1",
+    #             "obs_topic":       "str  — MQTT topic for observations",
+    #             "target_episodes": "int  — episodes to collect before triggering optimizer, default 10",
+    #             "chunk_size":      "int  — persist every N episodes, default 5",
+    #             "optimizer_name":  "str  — optimizer agent to notify on completion, default sinergym-optimizer",
+    #         },
+    #         "output_schema": {
+    #             "episodes_collected": "int",
+    #             "total_steps":        "int",
+    #             "data_key":           "str — episode_{N} recall keys",
+    #         },
+    #         "poll_interval": 3600,
+    #         "code":          code,
+    #     }
+    #     logger.info("[catalog] Loaded sinergym-collector recipe")
 
-    # ── sinergym-optimizer ────────────────────────────────────────────────────
-    code = _load_recipe("sinergym_optimizer_agent.py")
-    if code:
-        catalog["sinergym-optimizer"] = {
-            "name":         "sinergym-optimizer",
-            "type":         "dynamic",
-            "description":  "Energy optimization agent for Sinergym: trains RL (PPO) or Bayesian (GP) policy from collected episodes, then publishes actions to sinergym/env/{env_id}/action.",
-            "capabilities": ["sinergym", "rl", "bayesian_optimization", "energy_optimization", "policy_training", "building_control"],
-            "install":      ["stable-baselines3", "scikit-learn", "numpy", "torch", "aiomqtt", "gymnasium"],
-            "input_schema": {
-                "env_id":          "str  — Sinergym env ID, e.g. Eplus-5zone-hot-continuous-v1",
-                "strategy":        "str  — rl | bayesian | rulebased | combined, default rl",
-                "collector_name":  "str  — collector agent name, default sinergym-collector",
-                "obs_dim":         "int  — observation vector length, default 35",
-                "action_dim":      "int  — action vector length, default 2",
-                "training_steps":  "int  — RL training timesteps, default 50000",
-                "deploy_on_train": "bool — start publishing actions after training, default true",
-            },
-            "output_schema": {
-                "mean_reward": "float",
-                "strategy":    "str",
-                "phase":       "str — idle | training | deploying",
-            },
-            "poll_interval": 3600,
-            "code":          code,
-        }
-        logger.info("[catalog] Loaded sinergym-optimizer recipe")
+    # # ── sinergym-optimizer ────────────────────────────────────────────────────
+    # code = _load_recipe("sinergym_optimizer_agent.py")
+    # if code:
+    #     catalog["sinergym-optimizer"] = {
+    #         "name":         "sinergym-optimizer",
+    #         "type":         "dynamic",
+    #         "description":  "Energy optimization agent for Sinergym: trains RL (PPO) or Bayesian (GP) policy from collected episodes, then publishes actions to sinergym/env/{env_id}/action.",
+    #         "capabilities": ["sinergym", "rl", "bayesian_optimization", "energy_optimization", "policy_training", "building_control"],
+    #         "install":      ["stable-baselines3", "scikit-learn", "numpy", "torch", "aiomqtt", "gymnasium"],
+    #         "input_schema": {
+    #             "env_id":          "str  — Sinergym env ID, e.g. Eplus-5zone-hot-continuous-v1",
+    #             "strategy":        "str  — rl | bayesian | rulebased | combined, default rl",
+    #             "collector_name":  "str  — collector agent name, default sinergym-collector",
+    #             "obs_dim":         "int  — observation vector length, default 35",
+    #             "action_dim":      "int  — action vector length, default 2",
+    #             "training_steps":  "int  — RL training timesteps, default 50000",
+    #             "deploy_on_train": "bool — start publishing actions after training, default true",
+    #         },
+    #         "output_schema": {
+    #             "mean_reward": "float",
+    #             "strategy":    "str",
+    #             "phase":       "str — idle | training | deploying",
+    #         },
+    #         "poll_interval": 3600,
+    #         "code":          code,
+    #     }
+    #     logger.info("[catalog] Loaded sinergym-optimizer recipe")
 
     # ── ADD NEW RECIPES HERE ──────────────────────────────────────────────────
     # code = _load_recipe("my_new_agent.py")

@@ -39,6 +39,13 @@ export LLM_MODEL=$(get_config_safe 'llm_model' 'claude-sonnet-4-6')
 export LLM_API_KEY=$(get_config_safe 'llm_api_key' '')
 export OLLAMA_URL=$(get_config_safe 'ollama_url' 'http://localhost:11434')
 
+# Map generic LLM_API_KEY to provider-specific env vars expected by the Python app
+case "$LLM_PROVIDER" in
+    nim)    export NIM_API_KEY="$LLM_API_KEY" ;;
+    openai) export OPENAI_API_KEY="$LLM_API_KEY" ;;
+    anthropic) export ANTHROPIC_API_KEY="$LLM_API_KEY" ;;
+esac
+
 # MQTT Config (CRITICAL: ensure never empty)
 export MQTT_HOST=$(get_config_safe 'mqtt_host' 'core-mosquitto')
 export MQTT_PORT=$(get_config_safe 'mqtt_port' '1883')
@@ -73,6 +80,20 @@ export FUSEKI_PASSWORD=$(get_config_safe 'fuseki_password' 'admin')
 export DISCORD_BOT_TOKEN=$(get_config_safe 'discord_bot_token' '')
 export TELEGRAM_BOT_TOKEN=$(get_config_safe 'telegram_bot_token' '')
 export TELEGRAM_ALLOWED_USER_ID=$(get_config_safe 'telegram_allowed_user_id' '0')
+
+OTEL_ENDPOINT=$(get_config_safe 'otel_endpoint' '')
+if [ -n "$OTEL_ENDPOINT" ]; then
+    export OTEL_EXPORTER_OTLP_ENDPOINT="$OTEL_ENDPOINT"
+    export OTEL_SERVICE_NAME=$(get_config_safe 'otel_service_name' 'wactorz')
+fi
+
+INFLUX_URL=$(get_config_safe 'influx_url' '')
+if [ -n "$INFLUX_URL" ]; then
+    export INFLUX_URL="$INFLUX_URL"
+    export INFLUX_TOKEN=$(get_config_safe 'influx_token' '')
+    export INFLUX_ORG=$(get_config_safe 'influx_org' 'wactorz')
+    export INFLUX_BUCKET=$(get_config_safe 'influx_bucket' 'wactorz')
+fi
 
 # Embedded services
 MOSQUITTO_EMBEDDED=$(get_config_safe 'mosquitto_embedded' 'false')

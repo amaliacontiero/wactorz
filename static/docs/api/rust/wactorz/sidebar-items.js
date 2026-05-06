@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["main","normalize_fuseki_endpoint"],"struct":["Args"]};

@@ -9,6 +9,7 @@ import time
 from typing import Any, Optional
 
 from ..core.actor import Actor, Message, MessageType
+from ..core.persistence import get_db
 
 logger = logging.getLogger(__name__)
 
@@ -512,6 +513,21 @@ class LLMAgent(Actor):
         self._conversation_history = clean[-self.max_history:]
         self._history_summary = self.recall("history_summary", "")
 
+        # Restore lifetime cost so heartbeats carry accurate totals after restart
+        saved_cost = self.recall("_final_cost", {})
+        if isinstance(saved_cost, dict):
+            self.total_input_tokens  += saved_cost.get("input_tokens", 0)
+            self.total_output_tokens += saved_cost.get("output_tokens", 0)
+            self.total_cost_usd      += saved_cost.get("cost_usd", 0.0)
+
+        # Migration: if _messages_processed key doesn't exist yet, seed from
+        # conversation_history so the overview counter isn't always 0 on first
+        # start after upgrading. messages_processed was set from SQLite in
+        # actor.start() — if it's still 0 here, the key was absent.
+        if self.metrics.messages_processed == 0 and self._conversation_history:
+            user_turns = sum(1 for m in self._conversation_history if m.get("role") == "user")
+            self.metrics.messages_processed = user_turns
+
         # Publish capability manifest so main's topic registry knows this agent exists
         description = (
             getattr(self, "DESCRIPTION", None)
@@ -677,7 +693,8 @@ class LLMAgent(Actor):
             return "[No LLM configured]"
 
         self.metrics.messages_processed += 1
-        self._conversation_history.append({"role": "user", "content": user_message, "ts": time.time()})
+        ts_user = time.time()
+        self._conversation_history.append({"role": "user", "content": user_message, "ts": ts_user})
 
         safe_history = [
             {"role": m["role"], "content": str(m["content"])}
@@ -690,14 +707,17 @@ class LLMAgent(Actor):
             messages=safe_history,
             system=self.system_prompt,
         )
-        self._conversation_history.append({"role": "assistant", "content": response, "ts": time.time()})
+        ts_reply = time.time()
+        self._conversation_history.append({"role": "assistant", "content": response, "ts": ts_reply})
         await self._maybe_summarize()
         self.persist("conversation_history", self._conversation_history)
+        self._log_chat_turn(user_message, response, ts_user=ts_user, ts_reply=ts_reply)
 
         # Accumulate token usage and cost
         self.total_input_tokens  += usage.get("input_tokens", 0)
         self.total_output_tokens += usage.get("output_tokens", 0)
         self.total_cost_usd      += usage.get("cost_usd", 0.0)
+        self._persist_cost()
 
         await self._mqtt_publish(
             f"agents/{self.actor_id}/metrics",
@@ -736,15 +756,25 @@ class LLMAgent(Actor):
             and m.get("role") in ("user", "assistant")
             and m.get("content") is not None
         ]
-        async for chunk in self.llm.stream(
-            messages=safe_history,
-            system=self.system_prompt,
-        ):
-            if isinstance(chunk, dict):
-                usage = chunk
-            else:
-                full_text.append(chunk)
-                yield chunk
+        try:
+            async for chunk in self.llm.stream(
+                messages=safe_history,
+                system=self.system_prompt,
+            ):
+                if isinstance(chunk, dict):
+                    usage = chunk
+                else:
+                    full_text.append(chunk)
+                    yield chunk
+        except BaseException:
+            # Interrupted mid-stream (Ctrl+C, task cancellation, network error).
+            # Persist whatever chunks arrived so neither the user message nor
+            # the partial response are lost on restart.
+            if full_text:
+                partial = "".join(full_text)
+                self._conversation_history.append({"role": "assistant", "content": partial})
+                self.persist("conversation_history", self._conversation_history)
+            raise
 
         response = "".join(full_text)
         self._conversation_history.append({"role": "assistant", "content": response, "ts": time.time()})
@@ -754,6 +784,7 @@ class LLMAgent(Actor):
         self.total_input_tokens  += usage.get("input_tokens", 0)
         self.total_output_tokens += usage.get("output_tokens", 0)
         self.total_cost_usd      += usage.get("cost_usd", 0.0)
+        self._persist_cost()
 
         await self._mqtt_publish(
             f"agents/{self.actor_id}/metrics",
@@ -762,6 +793,32 @@ class LLMAgent(Actor):
 
         # Yield final usage dict so caller can log it
         yield usage
+
+    def _log_chat_turn(self, user_msg: str, reply: str,
+                       ts_user: float, ts_reply: float) -> None:
+        """Write both halves of a turn to SQLite chat_log and InfluxDB (if enabled)."""
+        db = get_db()
+        if db is not None:
+            try:
+                db.log_chat(self.name, "user",      user_msg, ts=ts_user,  session_id=self.actor_id)
+                db.log_chat(self.name, "assistant",  reply,   ts=ts_reply, session_id=self.actor_id)
+            except Exception as exc:
+                logger.debug("[%s] chat_log SQLite write failed: %s", self.name, exc)
+        try:
+            from ..monitoring.influx import write_chat as _influx_chat
+            _influx_chat(self.name, "user",      user_msg, ts=ts_user)
+            _influx_chat(self.name, "assistant",  reply,   ts=ts_reply)
+        except Exception as exc:
+            logger.debug("[%s] chat_log InfluxDB write failed: %s", self.name, exc)
+
+    def _persist_cost(self):
+        """Write lifetime cost to durable SQLite storage after each exchange."""
+        self.persist("_final_cost", {
+            "input_tokens":  self.total_input_tokens,
+            "output_tokens": self.total_output_tokens,
+            "cost_usd":      round(self.total_cost_usd, 6),
+            "name":          self.name,
+        })
 
     def _build_metrics(self) -> dict:
         m = super()._build_metrics()

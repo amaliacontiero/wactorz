@@ -130,7 +130,7 @@ def get_args():
 	return args
 
 
-async def _start_web_ui(port: int, mqtt_broker: str, mqtt_port: int, actor_registry=None) -> None:
+async def _start_web_ui(port: int, mqtt_broker: str, mqtt_port: int, actor_registry=None, persistence_db=None) -> None:
     """Start the monitor web server as a quiet background asyncio task."""
     import logging as _log
     import wactorz.monitor_server as _ms
@@ -143,6 +143,8 @@ async def _start_web_ui(port: int, mqtt_broker: str, mqtt_port: int, actor_regis
     # Wire the registry in so chat is routed directly — no IOAgent needed
     if actor_registry is not None:
         _ms.registry = actor_registry
+    if persistence_db is not None:
+        _ms.db = persistence_db
 
     for _name in ("wactorz.monitor_server", "aiohttp.access", "aiohttp.server"):
         _log.getLogger(_name).setLevel(_log.WARNING)
@@ -196,7 +198,7 @@ async def build_system(args: argparse.Namespace):
         nim_model = args.nim_model or CONFIG.llm_model
         provider = NIMProvider(
             model=nim_model,
-            api_key=CONFIG.nim_api_key or CONFIG.nvidia_api_key,
+            api_key=CONFIG.nim_api_key or CONFIG.nvidia_api_key or CONFIG.llm_api_key,
         )
     elif llm == "gemini":
         gemini_model = args.gemini_model or CONFIG.llm_model or "gemini-2.5-flash"
@@ -335,15 +337,20 @@ async def build_system(args: argparse.Namespace):
     main_actor = system.registry.find_by_name("main")
 
     logger.info("Wactorz system started. Supervision tree active.")
-    return system, main_actor
+    return system, main_actor, _db
 
 
 async def app():
     args = get_args()
     if args.reload:
         _start_reloader()
-    
-    system, main_actor = await build_system(args)
+
+    system, main_actor, _db = await build_system(args)
+
+    from wactorz.monitoring.otel   import setup_otel, shutdown_otel
+    from wactorz.monitoring.influx import setup_influx, shutdown_influx
+    setup_otel(lambda: system.registry)
+    setup_influx()
 
     if not args.no_monitor:
         await _start_web_ui(
@@ -351,6 +358,7 @@ async def app():
             mqtt_broker=args.mqtt_broker or CONFIG.mqtt_host,
             mqtt_port=args.mqtt_port or CONFIG.mqtt_port,
             actor_registry=system.registry,
+            persistence_db=_db,
         )
 
     from wactorz.interfaces.chat_interfaces import (
@@ -395,6 +403,8 @@ async def app():
     except Exception as exc:
         logger.error(f"System error: {exc}", exc_info=True)
     finally:
+        shutdown_otel()
+        shutdown_influx()
         await system.stop_all()
 
 def main():

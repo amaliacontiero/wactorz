@@ -5,12 +5,12 @@
   height="32"
   fill="none"
   xmlns="http://www.w3.org/2000/svg"
-  aria-label="Wactoz"
+  aria-label="Wactorz"
   role="img"
 >
   <style>
     /*
-     * Wactoz — connect-the-dots W icon
+     * Wactorz — connect-the-dots W icon
      * Five crossroads nodes appear numbered, then lines draw between
      * them to trace the W letterform, hold with glow, fade, loop.
      * All selectors scoped to svg.wz-icon.

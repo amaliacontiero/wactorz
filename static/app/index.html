@@ -41,7 +41,8 @@
     <!-- ── Favicon ──────────────────────────────────────────────────────────── -->
     <link rel="icon"             href="./favicon.svg" type="image/svg+xml" />
     <link rel="icon"             href="./icon.ico" />
-    <link rel="apple-touch-icon" href="./favicon.svg" />
+    <link rel="apple-touch-icon" href="./icon.png" />
+    <link rel="icon" href="./icon.png" type="image/png" sizes="512x512" />
     <link rel="manifest"         href="./site.webmanifest" />
     <style>
       /* ── Reset ──────────────────────────────────────────────────────────── */
@@ -84,6 +85,10 @@
         min-width: 200px;
         z-index: 100;
         pointer-events: none;
+        max-height: calc(100vh - 32px);
+        overflow-y: auto;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(99,102,241,0.3) transparent;
       }
       #hud .hud-title {
         font-family: 'JetBrains Mono', 'Fira Code', monospace;
@@ -203,6 +208,16 @@
         transition: color 0.2s; flex-shrink: 0;
       }
       .close-btn:hover { color: #a8b8d8; }
+      /* Back button — only shown on mobile via @media override */
+      .af-chat-back-btn {
+        display: none;
+        background: none; border: none; cursor: pointer;
+        color: #5a70a0; font-size: 13px; font-weight: 600;
+        padding: 4px 8px; border-radius: 6px;
+        align-items: center; gap: 4px;
+        transition: color 0.2s; flex-shrink: 0;
+      }
+      .af-chat-back-btn:hover { color: #93c5fd; }
 
       /* ── Chat sidebar (agent list) ────────────────────────────────────────── */
       #chat-panel { flex-direction: row; }
@@ -414,7 +429,8 @@
         border-left: 2px solid transparent;
         font-size: 12px; transition: background 0.1s;
       }
-      .af-feed-item:hover { background: rgba(255,255,255,0.04); }
+      .af-feed-item { cursor: default; }
+      .af-feed-item:hover { background: rgba(255,255,255,0.06); }
       .af-feed-heartbeat { border-left-color: #22d3a0; }
       .af-feed-spawn     { border-left-color: #60a5fa; }
       .af-feed-alert     { border-left-color: #f87171; }
@@ -613,6 +629,90 @@
       }
       .af-view-btn:hover { background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.85); }
       .af-view-btn.active { background: rgba(37,99,235,0.2); border-color: rgba(37,99,235,0.5); color: #93c5fd; }
+
+      /* ── Audio popover ──────────────────────────────────────────────────── */
+      .af-audio-popover {
+        position: fixed; z-index: 300;
+        display: none; flex-direction: column; gap: 10px;
+        padding: 14px 16px; min-width: 230px;
+        border-radius: 14px;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.55);
+      }
+      .af-audio-popover.open { display: flex; }
+      .af-audio-row { display: flex; align-items: center; gap: 8px; }
+      .af-audio-vol-row { gap: 10px; }
+      .af-audio-toggle {
+        flex: 1; padding: 6px 8px; border-radius: 8px; font-size: 12px; font-weight: 500;
+        border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.04);
+        color: rgba(255,255,255,0.5); cursor: pointer; transition: all 0.15s;
+      }
+      .af-audio-toggle.on {
+        background: rgba(37,99,235,0.22); border-color: rgba(37,99,235,0.5); color: #93c5fd;
+      }
+      .af-audio-toggle:hover:not(.on) { background: rgba(255,255,255,0.07); color: rgba(255,255,255,0.8); }
+      .af-audio-select {
+        width: 100%; padding: 5px 8px; border-radius: 8px; font-size: 12px;
+        border: 1px solid rgba(255,255,255,0.12); background: rgba(10,14,30,0.9);
+        color: #e0e8ff; cursor: pointer; appearance: auto;
+      }
+      .af-audio-select:focus { outline: none; border-color: rgba(37,99,235,0.5); }
+      .af-audio-divider {
+        height: 1px; background: rgba(255,255,255,0.08); margin: 2px 0;
+      }
+      .af-audio-label {
+        font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+        color: rgba(255,255,255,0.35); margin-bottom: -4px;
+      }
+      .af-audio-tracks { display: flex; flex-wrap: wrap; gap: 5px; }
+      .af-audio-track-btn {
+        padding: 5px 9px; border-radius: 8px; font-size: 12px;
+        border: 1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.04);
+        color: rgba(255,255,255,0.5); cursor: pointer; transition: all 0.15s; white-space: nowrap;
+      }
+      .af-audio-track-btn.on {
+        background: rgba(52,211,153,0.18); border-color: rgba(52,211,153,0.45); color: #34d399;
+      }
+      .af-audio-track-btn:hover:not(.on) { background: rgba(255,255,255,0.07); color: rgba(255,255,255,0.8); }
+      .af-audio-slider {
+        flex: 1; accent-color: #6366f1; cursor: pointer;
+        height: 4px; border-radius: 4px;
+      }
+
+      /* ── Bottom nav (mobile only — hidden on desktop) ───────────────────── */
+      .af-bottom-nav {
+        display: none; /* shown via @media below */
+        flex-shrink: 0; position: relative;
+        background: rgba(4,8,20,0.97);
+        border-top: 1px solid rgba(37,99,235,0.2);
+        padding-bottom: env(safe-area-inset-bottom, 0px);
+      }
+      .af-bottom-tab {
+        flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 3px; padding: 8px 4px; min-height: 52px;
+        background: none; border: none; cursor: pointer;
+        color: rgba(255,255,255,0.45); transition: color 0.15s;
+        font-family: inherit;
+      }
+      .af-bottom-tab.active { color: #93c5fd; }
+      .af-bottom-tab:active { opacity: 0.7; }
+      .af-bottom-tab-icon  { font-size: 18px; line-height: 1; }
+      .af-bottom-tab-label { font-size: 10px; letter-spacing: 0.02em; }
+      .af-bottom-sheet {
+        display: none; flex-direction: column; gap: 2px;
+        position: absolute; bottom: 100%; right: 0;
+        min-width: 140px; padding: 8px;
+        background: rgba(8,14,30,0.97);
+        border: 1px solid rgba(37,99,235,0.2);
+        border-radius: 12px 12px 0 0;
+        backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      }
+      .af-bottom-sheet-btn {
+        flex: unset; flex-direction: row; justify-content: flex-start;
+        gap: 10px; padding: 10px 14px; border-radius: 8px; width: 100%;
+        font-size: 13px;
+      }
+      .af-bottom-sheet-btn .af-bottom-tab-label { font-size: 13px; }
+      .af-bottom-sheet-btn:hover { background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.9); }
 
       .af-body { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
 
@@ -969,7 +1069,7 @@
         color: #7aabdf; border-color: rgba(122,171,223,0.4);
         background: rgba(122,171,223,0.1);
       }
-      .hud-sound-row { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
+      .hud-sound-row { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; pointer-events: auto; }
       #btn-settings {
         display: none; width: 100%; margin-top: 6px;
         font-size: 11px; color: #6366f1; cursor: pointer;
@@ -985,6 +1085,15 @@
       }
       .hud-sound-btn:hover { color: #7aabdf; border-color: rgba(122,171,223,0.4); background: rgba(122,171,223,0.1); }
       .hud-sound-btn.active { color: #a5c8f0; border-color: rgba(122,171,223,0.5); background: rgba(122,171,223,0.15); }
+      #tts-voice-select {
+        pointer-events: auto;
+        width: 100%; margin-top: 4px; font-size: 11px;
+        color: #a5b4fc; background: rgba(74,111,168,0.08);
+        border: 1px solid rgba(74,111,168,0.25); border-radius: 6px;
+        padding: 3px 6px; cursor: pointer; outline: none;
+      }
+      #tts-voice-select:focus { border-color: rgba(122,171,223,0.5); }
+      #tts-voice-select option { background: #1a2340; color: #c8d8ff; }
 
       /* ── Papadeath (grave) theme button ─────────────────────────────────── */
       #theme-switcher #btn-grave.active {
@@ -1210,8 +1319,44 @@
         /* Activity feed: full width */
         #activity-feed { width: 100%; border-left: none; border-bottom-left-radius: 0; }
 
-        /* Chat panel: full screen on mobile */
-        #chat-panel { width: 100%; left: 0; border-left: none; border-radius: 0; }
+        /* ── CardDashboard header: logo + conn + 🔊 only ── */
+        .af-header { padding: 6px 10px; gap: 6px; }
+        .af-header-center { display: none; }
+        /* Hide all nav view buttons from header on mobile — bottom nav takes over */
+        .af-header-right .af-view-btn[data-view] { display: none; }
+        /* Keep 🔊 audio button visible */
+        .af-header-right .af-view-btn:not([data-view]) { display: inline-flex; }
+
+        /* ── Bottom nav ─────────────────────────────────────────────────────── */
+        .af-bottom-nav { display: flex; }
+        .af-bottom-sheet { display: none; }
+        .af-bottom-sheet.open { display: flex; }
+
+        /* ── Chat view (CardDashboard) — sidebar/pane toggle ── */
+        .af-chat { flex-direction: column; }
+        .af-chat-sidebar {
+          width: 100%; border-right: none;
+          border-bottom: 1px solid rgba(255,255,255,0.07);
+          /* show sidebar by default; pane hidden */
+        }
+        .af-chat-pane { display: none; flex: 1; min-height: 0; }
+        /* when agent is selected on mobile, flip visibility */
+        .af-chat.agent-selected .af-chat-sidebar { display: none; }
+        .af-chat.agent-selected .af-chat-pane    { display: flex; flex-direction: column; }
+        /* back button: visible only on mobile */
+        .af-chat-back-btn { display: inline-flex !important; }
+
+        /* ── Chat panel (sliding panel) — same sidebar/pane toggle ── */
+        #chat-panel { width: 100%; left: 0; border-left: none; border-radius: 0; flex-direction: column !important; }
+        #chat-panel .af-chat-sidebar {
+          width: 100%; border-right: none;
+          border-bottom: 1px solid rgba(255,255,255,0.07);
+          flex-shrink: 0; max-height: 45vh;
+        }
+        #chat-panel .af-chat-pane { display: none; flex: 1; min-height: 0; }
+        #chat-panel.agent-selected .af-chat-sidebar { display: none; }
+        #chat-panel.agent-selected .af-chat-pane    { display: flex; }
+        #chat-panel .af-chat-back-btn { display: inline-flex !important; }
 
         /* Social dashboard: clear of IO bar + safe area */
         .sd-root { bottom: max(64px, calc(58px + env(safe-area-inset-bottom, 6px))); }
@@ -1731,10 +1876,10 @@
         .fin-metric-val { font-size: 15px; }
       }
     </style>
-    <script type="module" crossorigin src="./assets/index-BNqZvaAY.js"></script>
+    <script type="module" crossorigin src="./assets/index-CP1rGB8-.js"></script>
     <link rel="modulepreload" crossorigin href="./assets/rolldown-runtime-lhHHWwHU.js">
-    <link rel="modulepreload" crossorigin href="./assets/babylon-core-DMXg9r-F.js">
-    <link rel="modulepreload" crossorigin href="./assets/vendor-Ont4bZT0.js">
+    <link rel="modulepreload" crossorigin href="./assets/babylon-core-wJ5bR-LE.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-DuCOOrkg.js">
   </head>
   <body>
     <!-- 3D canvas -->
@@ -1751,10 +1896,6 @@
         <a href="/fuseki/" target="_blank" rel="noopener" class="hud-link">⬡ Fuseki</a>
         <a id="ha-link" href="#" target="_blank" rel="noopener" class="hud-link">⌂ Home Assistant</a>
       </nav>
-      <div class="hud-sound-row">
-        <button id="btn-beep" class="hud-sound-btn active" title="Toggle notification sound">🔔 Sound</button>
-        <button id="btn-tts"  class="hud-sound-btn"       title="Toggle text-to-speech">🗣 TTS</button>
-      </div>
       <button id="btn-settings" title="App settings">⚙ Settings</button>
     </div>
 
@@ -1786,6 +1927,7 @@
       </div>
       <div class="af-chat-pane">
         <div class="af-chat-pane-header">
+          <button class="af-chat-back-btn" id="panel-back" title="Back to agents">‹ Back</button>
           <div class="af-chat-pane-title" id="panel-agent-name">— select an agent —</div>
           <span class="af-chat-pane-state" id="panel-agent-status"></span>
           <button class="close-btn" id="panel-close" title="Close">✕</button>
@@ -1810,5 +1952,15 @@
       <button id="send-btn" title="Send">▶</button>
     </div>
 
+    <script>
+      if ("serviceWorker" in navigator) {
+        window.addEventListener("load", () => {
+          navigator.serviceWorker.register("./sw.js").then(
+            r  => console.debug("[sw] registered, scope:", r.scope),
+            e  => console.warn("[sw] not registered (needs HTTPS or localhost):", e.message),
+          );
+        });
+      }
+    </script>
   </body>
 </html>

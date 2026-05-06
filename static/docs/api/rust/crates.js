@@ -1,2 +1,0 @@
-window.ALL_CRATES = ["app_lib","backend_parity","wactorz","wactorz_agents","wactorz_core","wactorz_desktop","wactorz_interfaces","wactorz_mqtt"];
-//{"start":21,"fragment_lengths":[9,17,10,17,15,18,21,15]}

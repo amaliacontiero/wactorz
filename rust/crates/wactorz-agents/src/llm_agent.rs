@@ -15,7 +15,7 @@ use std::error::Error as StdError;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use wactorz_core::{Actor, ActorConfig, ActorMetrics, ActorState, EventPublisher, Message};
+use wactorz_core::{Actor, ActorConfig, ActorMetrics, ActorPersistence, ActorState, EventPublisher, Message};
 
 /// Supported LLM provider backends.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -122,6 +122,8 @@ pub struct LlmAgent {
     pub(crate) publisher: Option<EventPublisher>,
     /// Consecutive API errors since last success — WIK monitors this via MQTT.
     pub(crate) consecutive_errors: u32,
+    /// Optional durable KV store — enables cost and history persistence across restarts.
+    pub(crate) persistence: Option<ActorPersistence>,
 }
 
 impl LlmAgent {
@@ -168,6 +170,7 @@ impl LlmAgent {
             history: Vec::new(),
             publisher: None,
             consecutive_errors: 0,
+            persistence: None,
         }
     }
 
@@ -175,6 +178,31 @@ impl LlmAgent {
     pub fn with_publisher(mut self, p: EventPublisher) -> Self {
         self.publisher = Some(p);
         self
+    }
+
+    /// Attach a persistence store so cost and history survive restarts.
+    pub fn with_persistence(mut self, db: ActorPersistence) -> Self {
+        self.persistence = Some(db);
+        self
+    }
+
+    fn persist_cost(&self) {
+        let Some(db) = &self.persistence else { return };
+        let snap = self.metrics.snapshot();
+        let _ = db.set(
+            "_final_cost",
+            &serde_json::json!({
+                "input_tokens":  snap.llm_input_tokens,
+                "output_tokens": snap.llm_output_tokens,
+                "cost_usd":      (snap.llm_cost_usd * 1_000_000.0).round() / 1_000_000.0,
+                "name":          self.config.name,
+            }),
+        );
+    }
+
+    fn persist_history(&self) {
+        let Some(db) = &self.persistence else { return };
+        let _ = db.set("conversation_history", &serde_json::json!(self.history));
     }
 
     fn provider_api_key(config: &LlmConfig) -> Option<String> {
@@ -599,6 +627,49 @@ impl Actor for LlmAgent {
         self.config.protected
     }
 
+    async fn on_start(&mut self) -> Result<()> {
+        let Some(db) = &self.persistence else { return Ok(()) };
+
+        // Restore cumulative LLM cost counters.
+        if let Some(saved) = db.get("_final_cost") {
+            let input  = saved.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            let output = saved.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            let cost   = saved.get("cost_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let cost_nano = (cost * 1_000_000_000.0) as u64;
+            if input > 0 || output > 0 || cost_nano > 0 {
+                self.metrics.record_llm_usage(input, output, cost_nano);
+                tracing::info!(
+                    "[{}] Restored LLM cost: ${cost:.6} ({input} in / {output} out tokens)",
+                    self.config.name
+                );
+            }
+        }
+
+        // Restore conversation history.
+        if let Some(serde_json::Value::Array(arr)) = db.get("conversation_history") {
+            let restored: Vec<ChatMessage> = arr
+                .iter()
+                .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                .collect();
+            if !restored.is_empty() {
+                tracing::info!(
+                    "[{}] Restored {} conversation turns",
+                    self.config.name,
+                    restored.len()
+                );
+                self.history = restored;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn on_stop(&mut self) -> Result<()> {
+        self.persist_cost();
+        self.persist_history();
+        Ok(())
+    }
+
     async fn handle_message(&mut self, message: Message) -> Result<()> {
         use wactorz_core::message::MessageType;
 
@@ -666,6 +737,8 @@ impl Actor for LlmAgent {
                     role: "assistant".into(),
                     content: reply_text.clone(),
                 });
+                self.persist_cost();
+                self.persist_history();
                 if let Some(sender_id) = message.from {
                     tracing::debug!(
                         "[{}] generated reply ({} chars)",

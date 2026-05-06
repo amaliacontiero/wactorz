@@ -2,11 +2,17 @@
 
 Actor-model multi-agent AI framework. Spawn, coordinate, and monitor AI agents that can read and control your Home Assistant.
 
-## Setup
+> **Requires Home Assistant OS or Supervised.**
+> The Supervisor (which runs addons) is not available on Home Assistant Container or Core installs.
+> If you are running Home Assistant in Docker, use the [Docker deployment](https://waldiez.github.io/wactorz/deployment/) instead.
 
-1. **Install the addon** and start it.
-2. Open the Web UI (port 8000) from the addon page.
-3. Configure your LLM key under **Options** (see below).
+## Installation
+
+1. In Home Assistant go to **Settings → Add-ons → Add-on Store**.
+2. Click **⋮ (menu) → Repositories** and add `https://github.com/waldiez/wactorz`, then click **Add**.
+3. Find **Wactorz** in the store and click **Install**.
+4. Start the addon and open the Web UI from the addon page.
+5. Configure your LLM key under **Options** (see below).
 
 ## Options
 
@@ -23,7 +29,7 @@ Actor-model multi-agent AI framework. Spawn, coordinate, and monitor AI agents t
 | `mosquitto_embedded` | `false` | Start a bundled Mosquitto broker inside the addon (no external addon needed) |
 | `ha_url` | `http://homeassistant.local:8123` | Home Assistant base URL seen from inside the addon container |
 | `ha_token` | *(blank)* | Long-lived access token (HA → Profile → Security → Long-Lived Access Tokens) |
-| `fuseki_url` | `http://localhost:3030` | Apache Jena Fuseki SPARQL endpoint (optional) |
+| `fuseki_url` | `http://localhost:3030` | Apache Jena Fuseki SPARQL endpoint (leave at default when `fuseki_embedded: true`) |
 | `fuseki_dataset` | `wactorz` | Fuseki dataset name |
 | `fuseki_user` | `admin` | Fuseki username |
 | `fuseki_password` | `admin` | Fuseki password |
@@ -34,11 +40,26 @@ Actor-model multi-agent AI framework. Spawn, coordinate, and monitor AI agents t
 
 ## MQTT
 
-If you have the **Mosquitto** addon installed, set `mqtt_host` to `core-mosquitto` and leave the port as `1883`. No additional broker configuration is needed.
+**Option A — use the official Mosquitto addon:**
+Install the [Mosquitto broker addon](https://github.com/home-assistant/addons/tree/master/mosquitto), leave `mqtt_host` as `core-mosquitto` and `mqtt_port` as `1883`.
+
+**Option B — embedded broker (no extra addon):**
+Set `mosquitto_embedded: true`. Wactorz starts its own Mosquitto instance inside the container. Change `mqtt_host` to `localhost`. MQTT data is persisted to `/share/mosquitto`.
+
+## Embedded services
+
+Setting `mosquitto_embedded` or `fuseki_embedded` to `true` bundles those services inside the Wactorz container — no separate addons required.
+
+| Option | Port | Data path |
+|---|---|---|
+| `mosquitto_embedded: true` | `1883` TCP (exposed as addon port) | `/share/mosquitto` |
+| `fuseki_embedded: true` | `3030` (exposed as addon port) | `/share/fuseki` |
+
+> Fuseki auth credentials are regenerated from `fuseki_user` / `fuseki_password` on every boot, so credential changes take effect automatically.
 
 ## Home Assistant integration
 
-Set `ha_url` to `http://homeassistant:8123` (the default) and generate a long-lived access token in HA → Profile → Security → Long-Lived Access Tokens, then paste it into `ha_token`.
+Set `ha_url` to `http://homeassistant.local:8123` (the default) and generate a long-lived access token in HA → Profile → Security → Long-Lived Access Tokens, then paste it into `ha_token`.
 
 ## Support
 

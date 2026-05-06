@@ -236,3 +236,25 @@ rest_command:
 ```
 
 Set `HOMEASSISTANT_URL` and `HOMEASSISTANT_TOKEN` in `.env`.
+
+---
+
+## Connecting to an existing Home Assistant instance
+
+If you already have Home Assistant running (in Docker or elsewhere), point Wactorz at it via `.env`:
+
+```bash
+# .env
+HA_URL=http://192.168.1.x:8123   # or http://homeassistant.local:8123
+HA_TOKEN=eyJ...                  # Long-lived access token from HA → Profile → Security
+```
+
+Then start only the Wactorz stack (no embedded HA):
+
+```bash
+docker compose --profile python up -d
+```
+
+The `full` profile (`docker compose --profile full up -d`) starts a fresh Home Assistant container alongside Wactorz on the same Docker network — useful for a clean dev environment, not for connecting to an existing production HA.
+
+> **Home Assistant OS / Supervised users** — use the [Wactorz HA addon](https://github.com/waldiez/wactorz/tree/main/ha-addon) instead. It runs inside the Supervisor and connects to your existing HA instance automatically.

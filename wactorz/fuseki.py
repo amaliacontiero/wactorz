@@ -598,6 +598,61 @@ class FusekiClient:
                 body = await resp.text()
                 log.warning("SPARQL Update → %s: %s", resp.status, body[:300])
 
+    async def compact(self) -> bool:
+        """
+        Trigger TDB2 journal compaction for this dataset.
+        Rewrites the on-disk store, reclaiming space from accumulated transaction
+        journals. Should be called periodically (e.g., every few hours) when the
+        dataset receives high write volume.
+        Returns True on success.
+        """
+        url = f"{self._base}/$/compact/{self._ds}?deleteOld=true"
+        try:
+            async with self._session.post(url, auth=self._auth) as resp:
+                if resp.status in (200, 201, 204):
+                    log.info("Fuseki compact(%s) complete", self._ds)
+                    return True
+                body = await resp.text()
+                log.warning("Fuseki compact → %s: %s", resp.status, body[:200])
+                return False
+        except Exception as exc:
+            log.warning("Fuseki compact failed: %s", exc)
+            return False
+
+    async def trim_history_graph(
+        self, graph: str, retain_days: int = 30
+    ) -> None:
+        """
+        Delete observations from *graph* older than *retain_days* days.
+        Prevents unbounded growth of the HA state-change history graph.
+        """
+        import datetime
+        cutoff = (
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(days=retain_days)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        query = f"""
+PREFIX sosa: <http://www.w3.org/ns/sosa/>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+
+DELETE {{
+  GRAPH <{graph}> {{
+    ?obs ?p ?o .
+  }}
+}}
+WHERE {{
+  GRAPH <{graph}> {{
+    ?obs a sosa:Observation ;
+         sosa:resultTime ?ts .
+    ?obs ?p ?o .
+    FILTER(?ts < "{cutoff}"^^xsd:dateTime)
+  }}
+}}
+"""
+        await self.sparql_update(query)
+        log.info("Trimmed history graph <%s> — deleted observations before %s", graph, cutoff)
+
     async def replace_agent_in_graph(
         self, graph: str, actor_id: str, ttl: str
     ) -> None:
@@ -709,7 +764,9 @@ INSERT {{
   }}
 }}
 WHERE {{
+  GRAPH <{graph}> {{
 {optional_block}
+  }}
 }}
 """
         await self.sparql_update(query)
@@ -779,6 +836,10 @@ class HAFusekiBridge:
     def _want(self, entity_id: str) -> bool:
         return entity_id.split(".")[0] in self._domains
 
+    # Trim GRAPH_HISTORY once per day; keep last 30 days of observations
+    _TRIM_INTERVAL = 24 * 3600
+    _HISTORY_RETAIN_DAYS = 30
+
     async def run(self) -> None:
         connector = aiohttp.TCPConnector(ssl=False, force_close=True)
         async with aiohttp.ClientSession(connector=connector) as http:
@@ -787,10 +848,20 @@ class HAFusekiBridge:
             )
             ws_url = self._ws_url()
             log.info("Connecting to HA: %s", ws_url)
+            last_trim = time.time()
 
             async with HAWebSocketClient(ws_url, self._ha_token) as ha:
                 log.info("Authenticated. Loading initial states …")
                 await self._seed(ha, fuseki)
+
+                # Trim history on startup so stale data doesn't accumulate
+                # across restarts even when the process runs for short periods.
+                try:
+                    await fuseki.trim_history_graph(
+                        GRAPH_HISTORY, self._HISTORY_RETAIN_DAYS
+                    )
+                except Exception as exc:
+                    log.warning("History trim on startup failed: %s", exc)
 
                 sub_id = await ha.subscribe_events("state_changed")
                 log.info("Subscribed (id=%d). Listening for state_changed …", sub_id)
@@ -801,6 +872,17 @@ class HAFusekiBridge:
                         await self._on_event(msg, fuseki)
                     except Exception as exc:
                         log.exception("Event handling error: %s", exc)
+
+                    # Daily retention trim
+                    now = time.time()
+                    if now - last_trim >= self._TRIM_INTERVAL:
+                        last_trim = now
+                        try:
+                            await fuseki.trim_history_graph(
+                                GRAPH_HISTORY, self._HISTORY_RETAIN_DAYS
+                            )
+                        except Exception as exc:
+                            log.warning("Periodic history trim failed: %s", exc)
 
     # ── Seed on startup ───────────────────────────────────────────────────────
 
@@ -1082,12 +1164,17 @@ class MetricsBridge:
             aiohttp.BasicAuth(fuseki_user, fuseki_password) if fuseki_user else None
         )
 
+    # Compact every 6 hours to reclaim TDB2 journal space
+    _COMPACT_INTERVAL = 6 * 3600
+
     async def run(self) -> None:
         connector = aiohttp.TCPConnector(ssl=False, force_close=True)
         async with aiohttp.ClientSession(connector=connector) as http:
             fuseki = FusekiClient(
                 self._fuseki_url, self._fuseki_dataset, http, self._fuseki_auth
             )
+            last_compact = time.time()
+
             async with aiomqtt.Client(self._mqtt_broker, self._mqtt_port) as client:
                 await client.subscribe("agents/+/metrics")
                 log.info(
@@ -1105,6 +1192,15 @@ class MetricsBridge:
                         log.debug("Metrics upserted: %s", actor_id)
                     except Exception as exc:
                         log.exception("MetricsBridge handling error: %s", exc)
+
+                    # Periodic compaction — reclaims TDB2 journal space
+                    now = time.time()
+                    if now - last_compact >= self._COMPACT_INTERVAL:
+                        last_compact = now
+                        try:
+                            await fuseki.compact()
+                        except Exception as exc:
+                            log.warning("Periodic compact failed: %s", exc)
 
 
 # ── CLI entrypoint ────────────────────────────────────────────────────────────

@@ -26,6 +26,12 @@ from typing import Optional
 from ..core.actor import Actor, Message, MessageType
 from .llm_agent import LLMProvider
 
+try:
+    from .sparql_context import build_sparql_context as _build_sparql_context
+    _SPARQL_AVAILABLE = True
+except ImportError:
+    _SPARQL_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 _SKIP_AGENTS    = {"main", "monitor", "installer", "home-assistant-agent", "home-assistant-hardware", "home-assistant-automation", "anomaly-detector", "code-agent"}
@@ -45,6 +51,8 @@ class PlannerAgent(Actor):
         reply_to_id:    str = "",
         reply_task_id:  str = "",
         auto_terminate: bool = True,
+        plan_only:      bool = False,
+        approved_plan:  Optional[dict] = None,
         **kwargs,
     ):
         kwargs.setdefault("name", "planner")
@@ -54,8 +62,33 @@ class PlannerAgent(Actor):
         self._reply_to_id     = reply_to_id
         self._reply_task_id   = reply_task_id
         self._auto_terminate  = auto_terminate
+        # Dry-run support:
+        #   plan_only=True       → produce a plan, return it as JSON, do NOT spawn.
+        #   approved_plan=<dict> → skip planning, execute the supplied plan directly.
+        # These are mutually exclusive in practice but we don't enforce it — if both
+        # are set, plan_only wins (returning the supplied plan unchanged).
+        self._plan_only       = plan_only
+        self._approved_plan   = approved_plan
         self._result_futures: dict[str, asyncio.Future] = {}
         self._spawned_by_planner: list[str] = []   # agents we created this run
+        # Per-agent spawn outcome: name → {"ok": bool, "error": str|None}
+        # Sent back to main in the RESULT payload so it knows what actually happened.
+        self._spawn_results: dict[str, dict] = {}
+
+        # Fuseki endpoint for SPARQL world-model enrichment (optional).
+        # SPARQL queries enrich the planner's prompt with durable channel schemas
+        # and relevant Home Assistant state from the knowledge graph. If the
+        # config import or the endpoint is unreachable, planning continues
+        # without it — _build_sparql_context handles failures gracefully.
+        try:
+            from ..config import CONFIG
+            self._fuseki_url: str = (
+                getattr(CONFIG, "fuseki_url", None)
+                or getattr(CONFIG, "fuseki_endpoint", None)
+                or "http://localhost:3030/wactorz/sparql"
+            )
+        except Exception:
+            self._fuseki_url = "http://localhost:3030/wactorz/sparql"
 
     def _current_task_description(self) -> str:
         return self._task[:60] if self._task else "waiting for task"
@@ -102,7 +135,11 @@ class PlannerAgent(Actor):
         """Run the plan and report the result back to main (used when task set at spawn time)."""
         result = await self._run_plan(task)
         if self._reply_to_id:
-            reply = {"result": result, "text": result}
+            reply = {
+                "result":        result,
+                "text":          result,
+                "spawn_results": self._spawn_results,   # per-agent outcome dict
+            }
             if self._reply_task_id:
                 reply["_task_id"] = self._reply_task_id
             if self._spawned_by_planner:
@@ -152,11 +189,11 @@ class PlannerAgent(Actor):
 
         patterns = [
             r"\bif\b.*\bthen\b",
-            r"\bif\b.*\b(send|notify|alert|turn|open|close|post|message)\b",
-            r"\bwhen\b.*\b(detect|open|turn|send|notify|alert|is|becomes|goes|changes)\b",
+            r"\bif\b.*\b(send|notify|alert|turn|open|close|post|message|say|tell|warn|log|print|publish|emit)\b",
+            r"\bwhen\b.*\b(detect|open|turn|send|notify|alert|is|becomes|goes|changes|say|warn|log)\b",
             r"\bwhenever\b",
-            r"\bmonitor\b", r"\bwatch\b",
-            r"\balert me\b", r"\bnotify me\b",
+            r"\bmonitor\b", r"\bwatch\b", r"\bcheck\b.*\b(every|continuously|periodically|if|when)\b",
+            r"\balert me\b", r"\bnotify me\b", r"\btell me\b.*\bif\b",
             r"\bsend me\b.*\b(when|if|discord|message|notification)\b",
             r"\bsend me a\b",
             r"\bautomatically\b",
@@ -168,16 +205,26 @@ class PlannerAgent(Actor):
             # camera/detect + action = pipeline
             r"\b(camera|detect|yolo|webcam)\b.*\b(turn|open|send|notify|alert)\b",
             r"\b(person|motion|object)\b.*\bdetect.*\b(turn|open|light|send)\b",
-            # ── Spawn / continuous agent requests ──
-            # "spawn an agent to...", "create an agent that...", "I want an agent to..."
-            r"\b(spawn|create|make|start|run|launch|deploy)\b.*\bagent\b",
-            r"\b(i\s+want|i\s+need)\b.*\bagent\b.*\b(to|that|which)\b",
+            # ── Spawn / continuous agent / app requests ──
+            # "spawn an agent to...", "create an agent that...", "I want an agent to...",
+            # "spawn an app that...", "build a service that...", etc.
+            # NB: matches "agent" OR "app" OR "bot" OR "service" OR "monitor" OR "rule"
+            r"\b(spawn|create|make|start|run|launch|deploy|build|set\s+up)\b.*\b(agent|app|bot|service|monitor|rule|pipeline|listener|handler|watcher)\b",
+            r"\b(i\s+want|i\s+need|i'd\s+like)\b.*\b(agent|app|bot|service|rule|something)\b.*\b(to|that|which)\b",
             # Periodic / continuous language
             r"\bevery\s+\d+\s*(sec|min|hour|s\b|m\b|h\b)",
             r"\bcontinuously\b", r"\bconstantly\b", r"\bperiodically\b",
             r"\bkeep\s+(running|publishing|logging|sending|checking)\b",
             r"\b(subscribe|listen)\s+(to|for|on)\b",
             r"\blog\s+(the|every|each|all)\b",
+            # ── Clock-time triggers (5pm, 7am, 17:00, every weekday, etc.) ──
+            # These should always be pipelines because they need a ScheduledAgent.
+            r"\bat\s+\d{1,2}(:\d{2})?\s*(am|pm)?\b",   # 'at 5pm', 'at 09:30', 'at 7 am'
+            r"\b(every|each)\s+(mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+            r"\b(every|each)\s+(weekday|weekend|day|morning|evening|night|afternoon|hour|minute)\b",
+            r"\bdaily\b.*\b(at|on|when)\b", r"\bweekly\b", r"\bnightly\b",
+            r"\btomorrow\b.*\b(at|morning|evening|night)\b",
+            r"\bremind\s+me\b", r"\bschedule\b.*\b(to|for|every|at)\b",
         ]
         return any(re.search(p, lowered) for p in patterns)
 
@@ -199,10 +246,29 @@ class PlannerAgent(Actor):
         except Exception:
             pass
 
+        # ── Approved-plan execution: skip planning entirely ────────────────
+        # Set when main is calling us back to execute a previously-approved
+        # proposal. Route directly to the pipeline executor since approved
+        # plans are by definition pipeline plans (they were generated in
+        # plan_only mode through _run_pipeline).
+        if self._approved_plan:
+            return await self._run_pipeline(task, workers)
+
         # Detect pipeline vs one-shot
         is_pipeline = PlannerAgent._is_pipeline_request(task)
         if is_pipeline:
             await self._log("Pipeline request detected — spawning persistent agents...")
+            return await self._run_pipeline(task, workers)
+
+        # ── Dry-run guard for one-shot path ────────────────────────────────
+        # The one-shot path can still produce persistent agents via
+        # _ensure_agents (it spawns missing ones declared by _decompose).
+        # If main asked for plan_only, we MUST honor it here too — otherwise
+        # any task that doesn't trip the pipeline heuristic silently spawns,
+        # bypassing approval. Force the pipeline path so we get the same
+        # approval flow regardless of which heuristic branch was taken.
+        if self._plan_only:
+            await self._log("plan_only=True on one-shot path — routing through pipeline planner for approval flow")
             return await self._run_pipeline(task, workers)
 
         # ── 1. Check cache ─────────────────────────────────────────────────
@@ -246,21 +312,30 @@ class PlannerAgent(Actor):
         """
         Builds and spawns persistent reactive agents for if/when/wherever rules.
 
-        Flow:
-          0. Topic resolution — resolve vague data references to concrete MQTT topics
-             using TopicRegistry + HA entity search. Enriches the task with specifics.
-          1. _decompose_pipeline queries HomeAssistantAgent for real entity IDs
-          2. LLM produces spawn configs (ha_actuator for HA actions, dynamic for everything else)
-          3. Each agent is spawned and registered in main's spawn registry
-          4. Rule is saved so it can be listed/deleted later
-          5. Summary returned to the user
-
-        Multiple rules in one request are fully supported.
+        Two modes governed by constructor flags (set by main):
+          - plan_only=True: build the plan, return it as a JSON string, do NOT spawn.
+            Used for dry-run / approval flow. Main parses the JSON and shows a
+            summary to the user.
+          - approved_plan=<dict>: skip planning, execute the supplied plan directly.
+            Used after the user approves a previously-generated plan.
+          - default (neither set): plan AND execute in one go (original behavior,
+            used by explicit-prefix paths like 'pipeline:' that bypass dry-run).
         """
-        # ── Step 0: Topic resolution ───────────────────────────────────────
-        # Before planning, resolve vague data references ("temperature", "motion",
-        # "energy") to concrete MQTT topics or HA entities. This lets the user
-        # say "react to temperature" without knowing the exact topic name.
+        # ── Mode A: execute pre-approved plan, skip planning ───────────────
+        if self._approved_plan:
+            plan = self._approved_plan.get("plan") or self._approved_plan.get("agents") or []
+            if not plan:
+                return "Approved plan was empty — nothing to spawn."
+            await self._log(f"Executing pre-approved plan ({len(plan)} agent(s))")
+            # Mode A doesn't run topic resolution — pass through any note that
+            # was carried in the approved envelope (set during plan_only build).
+            note = self._approved_plan.get("resolution_note", "")
+            return await self._execute_pipeline_plan(plan, task, resolution_note=note)
+
+        # ── Build the plan (always — needed for both plan_only and full run) ──
+        # Step 0: Topic resolution. Resolve vague references ("temperature",
+        # "motion") to concrete MQTT topics or HA entities so the user can say
+        # "react to temperature" without knowing the exact topic name.
         task, resolution_note = await self._resolve_data_references(task)
         if resolution_note:
             await self._log(f"Topic resolution: {resolution_note}")
@@ -276,9 +351,36 @@ class PlannerAgent(Actor):
             await self._log(f"Pipeline not feasible: {error}")
             return f"Cannot set up this pipeline:\n\n{error}"
 
+        # ── Mode B: plan_only — return the plan, don't spawn ───────────────
+        if self._plan_only:
+            await self._log(f"plan_only=True — returning plan ({len(plan)} agent(s)) for approval")
+            # Serialize the plan back to JSON so main can store it intact.
+            # Wrap in a dict with a marker so main can distinguish a plan
+            # from a normal answer string.
+            envelope = {
+                "_plan_proposal": True,
+                "task":           task,
+                "resolution_note": resolution_note or "",
+                "plan":           plan,
+            }
+            return json.dumps(envelope)
+
+        # ── Mode C: original behavior — plan AND execute ───────────────────
         await self._log(f"Pipeline plan: {len(plan)} agent(s)")
+        return await self._execute_pipeline_plan(plan, task, resolution_note=resolution_note)
+
+    async def _execute_pipeline_plan(self, plan: list[dict], task: str, resolution_note: str = "") -> str:
+        """
+        Spawn each agent in the plan, register with main, build the final summary.
+        Extracted from _run_pipeline so dry-run can reuse the same execution path
+        after a user approval.
+
+        resolution_note: optional preamble describing what topic/entity the planner
+        resolved the user's vague reference to. Empty for pre-approved plans where
+        the resolution step was skipped (note is carried in the envelope instead).
+        """
         spawned: list[str] = []
-        wired: list[str] = []
+        wired:   list[str] = []
         rule_agents: list[str] = []
 
         for step in plan:
@@ -294,10 +396,12 @@ class PlannerAgent(Actor):
                 await self._log(f"'{name}' already running — skipping")
                 wired.append(f"**{name}** (already active)")
                 rule_agents.append(name)
+                self._spawn_results[name] = {"ok": True, "status": "already_running"}
                 continue
 
             if not spawn_cfg:
                 await self._log(f"Step '{name}' has no spawn_config — skipping")
+                self._spawn_results[name] = {"ok": False, "status": "no_config", "error": "missing spawn_config"}
                 continue
 
             spawn_cfg = dict(spawn_cfg)
@@ -310,12 +414,14 @@ class PlannerAgent(Actor):
             except Exception as e:
                 await self._log(f"Spawn failed for '{name}': {e}")
                 wired.append(f"**{name}** — spawn failed: {e}")
+                self._spawn_results[name] = {"ok": False, "status": "spawn_failed", "error": str(e)}
                 continue
 
             if actor:
                 self._spawned_by_planner.append(name)
                 spawned.append(name)
                 rule_agents.append(name)
+                self._spawn_results[name] = {"ok": True, "status": "spawned"}
 
                 # Register in main's spawn registry for auto-restore on restart
                 if self._registry:
@@ -335,6 +441,7 @@ class PlannerAgent(Actor):
                 await asyncio.sleep(0.3)
             else:
                 wired.append(f"**{name}** — failed to spawn")
+                self._spawn_results[name] = {"ok": False, "status": "spawn_returned_none"}
 
         # Persist this rule into main's pipeline rules registry
         if rule_agents:
@@ -725,7 +832,15 @@ class PlannerAgent(Actor):
                     entities_list = result.get("entities", [])
                     if entities_list:
                         lines = []
-                        for e in entities_list[:200]:
+                        # NB: do NOT truncate. Truncating silently dropped entities
+                        # past index 200 (e.g. WiZ lights coming after dozens of
+                        # sensor.* entries), causing feasibility checks to falsely
+                        # claim "no light entity available" when the user's lamp
+                        # was sitting in slots 200-305. If the entity list ever
+                        # grows large enough to be a context-budget problem
+                        # (4000+ entities), filter intelligently here — never
+                        # blind-truncate.
+                        for e in entities_list:
                             eid = e.get("entity_id", "")
                             ename = e.get("name", "")
                             plat = e.get("platform", "")
@@ -738,7 +853,10 @@ class PlannerAgent(Actor):
                                 lines.append("  " + "  ".join(parts))
                         ha_entities_text = "\n".join(lines)
                         ha_available = True
-                        logger.info(f"[{self.name}] Got {len(entities_list)} HA entities via home-assistant-agent")
+                        logger.info(
+                            f"[{self.name}] Got {len(entities_list)} HA entities via home-assistant-agent "
+                            f"(formatted {len(lines)} lines for prompt)"
+                        )
         except Exception as e:
             logger.warning(f"[{self.name}] Could not query home-assistant-agent: {e}")
 
@@ -752,7 +870,8 @@ class PlannerAgent(Actor):
                 if ha_url and ha_token:
                     devices = await fetch_devices_entities_with_location(ha_url, ha_token, include_states=True)
                     lines = []
-                    for device in devices[:150]:
+                    # Same rationale as above — don't truncate. Iterate ALL devices.
+                    for device in devices:
                         area = device.get("area", "")
                         for entity in device.get("entities", []):
                             eid = entity.get("entity_id", "")
@@ -853,21 +972,60 @@ class PlannerAgent(Actor):
                 "use a placeholder 'WEBHOOK_URL_REQUIRED' and set description to explain the user must run:\n"
                 "  /webhook discord <url>"
             )
-        _local_kw = ("camera", "webcam", "laptop", "detect", "yolo", "person",
-                     "object detection", "cv2", "opencv",
-                     "discord", "telegram", "slack", "notify", "notification", "message")
-        _skip_feasibility = any(kw in task.lower() for kw in _local_kw)
+        # Skip feasibility ONLY when the requested action is clearly NOT an HA
+        # service call. Original list included "message" and "notify" which
+        # caused requests like "when X happens log a warning message" to bypass
+        # the feasibility check entirely — sometimes useful, but it also masked
+        # real HA-target bugs (the entity-truncation bug above wasn't visible
+        # because most "log/notify" requests appeared to work despite a broken
+        # entity list).
+        #
+        # Keep it tight: skip only for camera/vision pipelines (need cv2,
+        # don't touch HA), explicit external-webhook integrations
+        # (Discord/Slack/Telegram URLs — also don't touch HA), and pure-
+        # observability tasks where no HA service call is implied.
+        _non_ha_kw = (
+            "camera", "webcam", "laptop camera", "yolo", "cv2", "opencv",
+            "discord", "telegram", "slack", "webhook",
+        )
+        # HA service-call verbs — if the task contains one of these, feasibility
+        # MUST run, because the LLM will try to emit an ha_actuator and we need
+        # to confirm a real entity exists.
+        _ha_action_verbs = (
+            "turn on", "turn off", "open", "close", "lock", "unlock",
+            "set temperature", "set brightness", "set color", "play", "pause",
+            "start", "stop", "activate", "trigger ",
+            "switch on", "switch off",
+        )
+        task_lower = task.lower()
+        has_ha_verb = any(v in task_lower for v in _ha_action_verbs)
+        has_skip_kw = any(kw in task_lower for kw in _non_ha_kw)
+        # Skip feasibility if non-HA keyword present AND no HA verb is present.
+        # If both present (e.g. "send Discord AND turn off the lamp"), feasibility
+        # still runs to validate the lamp.
+        _skip_feasibility = has_skip_kw and not has_ha_verb
 
         if ha_available and ha_entities_text and not _skip_feasibility:
             feas_prompt = (
-                "Check if this reactive automation can be fulfilled with available HA entities.\n\n"
+                "You are checking whether a reactive HA automation can be built with the available entities.\n\n"
                 f"USER REQUEST: {task}\n\n"
                 f"AVAILABLE HA ENTITIES:\n{ha_section}\n\n"
                 'Return JSON only:\n'
                 '{"feasible": true/false, "reason": "<one sentence if not feasible>", "relevant_entities": ["entity_id", ...]}\n\n'
-                "Rules:\n"
-                "- feasible=true only if ALL required entity types exist\n"
-                "- Camera/webcam/Discord/notification requests: always feasible=true"
+                "Rules — be PERMISSIVE, default to feasible=true:\n"
+                "- Match by FUZZY SUBSTRING. 'lamp' matches 'light.wiz_rgbw_*' or "
+                "any entity_id/name containing 'lamp', 'light', or 'lamp'-like words.\n"
+                "- 'door' matches binary_sensor.*_door, sensor.*_door, etc.\n"
+                "- 'occupancy'/'motion'/'presence' match any binary_sensor with those words.\n"
+                "- 'temperature' matches sensor.*_temperature.\n"
+                "- 'my <X>' / 'the <X>' just means the user's <X> — if ANY entity plausibly matches, feasible=true.\n"
+                "- feasible=false ONLY when there is genuinely NO entity whose entity_id, name, or "
+                "platform plausibly matches the requested target. If unsure, return feasible=true.\n"
+                "- relevant_entities should list the matching entity_ids you'd use.\n"
+                "- Camera/webcam/Discord/notification requests: always feasible=true.\n"
+                "- Pure logging / observability tasks (no HA target): always feasible=true. "
+                "Examples: 'log a heartbeat every hour', 'write a warning when X', 'print uptime'.\n"
+                "- Time-based triggers without HA action (just logging or publishing): always feasible=true."
             )
             try:
                 feas_resp, _ = await self.llm.complete(
@@ -892,6 +1050,21 @@ class PlannerAgent(Actor):
                 logger.warning(f"[{self.name}] Feasibility check error (continuing): {e}")
 
         # ── 3. Decompose into spawn configs ────────────────────────────────
+        # SPARQL enrichment: fetch durable channel schemas + relevant HA state
+        # from the Fuseki knowledge graph. Optional — degrades gracefully if
+        # the endpoint is unreachable, the import isn't available, or the
+        # query times out (3s ceiling).
+        _sparql_pipeline_ctx = ""
+        if _SPARQL_AVAILABLE:
+            try:
+                _sparql_pipeline_ctx = await _build_sparql_context(
+                    task=task,
+                    fuseki_url=self._fuseki_url,
+                    timeout=3.0,
+                )
+            except Exception as _e:
+                logger.debug(f"[{self.name}] SPARQL pipeline context skipped: {_e}")
+
         # Build the prompt as a list of parts to avoid f-string escape issues
         prompt_parts = [
             "You are designing reactive automation pipelines for a multi-agent IoT system.",
@@ -926,7 +1099,31 @@ class PlannerAgent(Actor):
             '    "detection_filter": {"<top-level-key>": <value>} or null',
             '    "cooldown_seconds": <number>',
             "",
-            'TYPE 2 — "dynamic"',
+            'TYPE 2 — "scheduled"',
+            "  Purpose: fire an event at a SPECIFIC time or interval. THE ONLY correct way",
+            "  to express any time-based trigger (5pm, every weekday, every 30 minutes).",
+            "  No code. No polling loop. The framework wakes precisely at fire time.",
+            "  CRITICAL — when to use scheduled vs dynamic:",
+            "    'at 5pm', 'every day at 7am', 'every Monday', 'every 30 minutes',",
+            "    'tomorrow at 9am', 'every hour' → ALWAYS use type=scheduled.",
+            "    NEVER write a dynamic agent that polls datetime.now() in a loop.",
+            "    NEVER write a dynamic agent with `while True: asyncio.sleep(60)` to check time.",
+            "  Schedule spec — dict with one of these shapes:",
+            "    Daily:    {\"type\": \"daily\",    \"at\": \"17:00\"}",
+            "    Weekly:   {\"type\": \"weekly\",   \"at\": \"07:30\", \"days\": [\"mon\",\"tue\",\"wed\",\"thu\",\"fri\"]}",
+            "    Interval: {\"type\": \"interval\", \"seconds\": 1800}",
+            "    Once:     {\"type\": \"once\",     \"at\": \"2026-12-25T09:00:00\"}",
+            "  spawn_config schema:",
+            '    "type": "scheduled"',
+            '    "description": "<what this fires>"',
+            '    "schedule": <one of the dicts above>',
+            '    "publish_topic": "schedule/<name>/fired"   (optional — defaults to this anyway)',
+            "  When the schedule fires, payload published is:",
+            '    {"fired_at": "<ISO-8601 UTC>", "schedule_type": "<type>", "agent": "<name>", "manual": false}',
+            "  Pair with a downstream consumer (ha_actuator or dynamic agent) that subscribes",
+            "  to the publish_topic and performs the actual action. See PATTERN 5 below.",
+            "",
+            'TYPE 3 — "dynamic"',
             "  Purpose: any logic that needs code — state filtering, webcam, timers, HTTP webhooks, Discord, etc.",
             "  Define these async functions (all optional except at least one must exist):",
             "    async def setup(agent)   — runs once on start, good for subscriptions and init",
@@ -1022,12 +1219,27 @@ class PlannerAgent(Actor):
             "    setup(agent): use agent.subscribe() on custom/detections/<slug>",
             "      When detected=True: POST notification via httpx",
             "",
-            "PATTERN 5 — Timer/schedule triggers HA action:",
-            "  Agent 1 (dynamic, name: '<slug>-timer'):",
-            "    process(agent): check current time (import datetime), if matches schedule:",
-            "      await agent.publish('custom/triggers/<slug>', {'triggered': True})",
-            "    poll_interval: 60",
-            "  Agent 2 (ha_actuator): subscribes to custom/triggers/<slug>",
+            "PATTERN 5 — Time-based trigger (clock time, recurring, or once):",
+            "  ALWAYS use type=scheduled for ANY clock-time trigger. Two-agent pattern:",
+            "  Agent 1 (scheduled, name: '<slug>-trigger'):",
+            "    schedule: {\"type\": \"daily\", \"at\": \"17:00\"} (or weekly/interval/once)",
+            "    publish_topic: 'schedule/<slug>-trigger/fired'  (or omit for default)",
+            "  Agent 2 (ha_actuator OR dynamic, name: '<slug>-action'):",
+            "    Subscribes to 'schedule/<slug>-trigger/fired'",
+            "    For HA actions: type=ha_actuator, mqtt_topics=['schedule/<slug>-trigger/fired'],",
+            "      detection_filter null (no filtering needed — every fire is a trigger),",
+            "      actions=[the HA service call].",
+            "    For notifications/custom code: type=dynamic, setup() subscribes via agent.subscribe(),",
+            "      callback does the work (POST to webhook, log, etc.)",
+            "  EXAMPLES of correct user-request → schedule mapping:",
+            '    "turn on lights at 5pm"          → {"type": "daily", "at": "17:00"}',
+            '    "every weekday at 7am"           → {"type": "weekly", "at": "07:00", "days": ["mon","tue","wed","thu","fri"]}',
+            '    "every Saturday morning"         → {"type": "weekly", "at": "08:00", "days": ["sat"]}',
+            '    "every 30 minutes"               → {"type": "interval", "seconds": 1800}',
+            '    "every hour"                     → {"type": "interval", "seconds": 3600}',
+            '    "tomorrow at 9am, remind me"     → {"type": "once", "at": "<tomorrow>T09:00:00"}',
+            "  CRITICAL: NEVER express a clock time as a dynamic agent that polls datetime.now().",
+            "  NEVER use 'while True: sleep(60)' to wait for a time. Always use type=scheduled.",
             "",
             "PATTERN 6 — MQTT sensor data + condition → HA action (e.g. 'if temp > 20 turn off lamp'):",
             "  This combines multiple data sources and triggers an HA action. NEVER use httpx for HA!",
@@ -1115,6 +1327,13 @@ class PlannerAgent(Actor):
                     "",
                 ]
                 if topic_samples_section else []
+            ),
+            *(  # SPARQL: durable channel schemas + relevant HA states from Fuseki
+                (lambda ctx: [
+                    "═══ FUSEKI KNOWLEDGE GRAPH (durable schemas + HA state) ═══",
+                    ctx,
+                    "",
+                ] if ctx else [])(_sparql_pipeline_ctx)
             ),
             "═══ HOME ASSISTANT ENTITIES ═══",
             ha_section,
@@ -1357,7 +1576,17 @@ class PlannerAgent(Actor):
 
         workers = []
         for actor in self._registry.all_actors():
+            # Skip housekeeping agents, the running planner itself, AND any
+            # OTHER planner instances. Pipeline-mode planners stay alive as
+            # supervisors of their spawned children (see line 356, where
+            # _auto_terminate is set False for pipelines), so they accumulate
+            # in the registry across user requests. Without this filter, a
+            # new planner would see the old ones as candidate "workers" —
+            # noise that bloats the worker list passed to the LLM and risks
+            # the LLM trying to delegate to a sibling planner.
             if actor.name in _SKIP_AGENTS or actor.name == self.name:
+                continue
+            if actor.name.startswith("planner-"):
                 continue
             # Prefer manifest data (richer), fall back to live actor attrs
             manifest = manifest_map.get(actor.name, {})
@@ -1431,12 +1660,24 @@ class PlannerAgent(Actor):
         except Exception:
             pass
 
+        # ── SPARQL world-model enrichment (durable channel schemas + HA state) ──
+        sparql_ctx = ""
+        if _SPARQL_AVAILABLE:
+            try:
+                sparql_ctx = await _build_sparql_context(
+                    task=task,
+                    fuseki_url=self._fuseki_url,
+                    timeout=3.0,
+                )
+            except Exception as _e:
+                logger.debug(f"[{self.name}] SPARQL context skipped: {_e}")
+
         prompt = f"""You are a task planner for a multi-agent system.
 Break the task into steps. Each step is handled by one agent.
 
 AVAILABLE AGENTS (with input/output contracts):
 {workers_desc}
-{topic_schema_ctx}
+{topic_schema_ctx}{sparql_ctx}
 TASK: {task}
 
 OUTPUT RULES:
@@ -1646,6 +1887,37 @@ Example:
             await self._register_with_main(config)
             return actor
 
+        if agent_type == "scheduled":
+            from .scheduled_agent import ScheduledAgent
+            schedule_spec = config.get("schedule")
+            if not isinstance(schedule_spec, dict):
+                logger.warning(f"[{self.name}] Cannot spawn '{name}': missing 'schedule' dict")
+                return None
+            # Read user's timezone from main's facts (single source of truth)
+            user_tz = None
+            if self._registry:
+                main = self._registry.find_by_name("main")
+                if main and hasattr(main, "get_user_facts"):
+                    try:
+                        user_tz = main.get_user_facts().get("pref_timezone")
+                    except Exception:
+                        pass
+            try:
+                actor = await self.spawn(
+                    ScheduledAgent,
+                    name=name,
+                    schedule=schedule_spec,
+                    timezone=user_tz,
+                    publish_topic=config.get("publish_topic") or f"schedule/{name}/fired",
+                    description=config.get("description", ""),
+                    persistence_dir=str(self._persistence_dir.parent),
+                )
+            except ValueError as e:
+                logger.error(f"[{self.name}] Invalid schedule for '{name}': {e}")
+                return None
+            await self._register_with_main(config)
+            return actor
+
         if agent_type == "llm":
             from .llm_agent import LLMAgent
             actor = await self.spawn(
@@ -1664,6 +1936,18 @@ Example:
             if not code:
                 logger.warning(f"[{self.name}] Dynamic spawn config has no code for '{name}'")
                 return None
+
+            # Install required packages before spawning. Without this, agents
+            # that depend on cv2, numpy, ultralytics, etc. crash on first
+            # process() call with ModuleNotFoundError, and the self-repair
+            # loop kicks in to "fix" code that was actually fine — just
+            # missing dependencies. Mirrors MainActor._spawn_dynamic_agent.
+            packages = config.get("install", [])
+            if isinstance(packages, str):
+                packages = [p.strip() for p in packages.replace(",", " ").split() if p.strip()]
+            if packages:
+                await self._ensure_packages_installed(packages, agent_name=name)
+
             from .dynamic_agent import DynamicAgent
             actor = await self.spawn(
                 DynamicAgent,
@@ -1881,6 +2165,78 @@ Example:
             return f"[LLM error: {e}]"
 
     # ── Helpers ────────────────────────────────────────────────────────────
+
+    async def _ensure_packages_installed(self, packages: list[str], agent_name: str = "?"):
+        """
+        Check which packages from `packages` are not currently importable, and
+        delegate the install to the 'installer' agent. Blocks until install is
+        complete (or times out). Mirrors MainActor._install_packages so the
+        planner-spawn path is symmetric with the user-typed-spawn path.
+
+        Without this, dynamic agents that need third-party packages (cv2,
+        numpy, ultralytics, etc.) crash immediately on import inside their
+        process() loop. The self-repair loop then "fixes" the code by
+        replacing the import with a print statement, leaving a useless agent.
+        """
+        if not packages or not self._registry:
+            return
+
+        # Fast path: skip packages already importable in this process. The
+        # import name often differs from the pip name (e.g. 'opencv-python'
+        # imports as 'cv2'), so this is a heuristic — installs of pre-installed
+        # packages are cheap no-ops anyway.
+        import importlib
+        needed = []
+        for pkg in packages:
+            import_name = pkg.replace("-", "_").split("[")[0]
+            try:
+                importlib.import_module(import_name)
+            except ImportError:
+                needed.append(pkg)
+        if not needed:
+            await self._log(f"All packages for '{agent_name}' already available: {packages}")
+            return
+
+        installer = self._registry.find_by_name("installer")
+        if not installer:
+            logger.warning(
+                f"[{self.name}] installer agent not found — cannot install {needed} "
+                f"for '{agent_name}'. Agent will likely crash on import."
+            )
+            return
+
+        await self._log(f"Installing {needed} for '{agent_name}' via installer...")
+        import uuid
+        task_id = f"install_{uuid.uuid4().hex[:8]}"
+        future = asyncio.get_event_loop().create_future()
+        self._result_futures[task_id] = future
+        try:
+            await self.send(installer.actor_id, MessageType.TASK, {
+                "action": "install",
+                "packages": needed,
+                "task": task_id,
+                "_task_id": task_id,
+                "reply_to": self.actor_id,
+            })
+            try:
+                # 120s matches main's timeout — long enough for typical pip
+                # installs, short enough that a hung installer doesn't stall
+                # the entire pipeline indefinitely.
+                result = await asyncio.wait_for(future, timeout=120.0)
+                msg = result.get("message", str(result))
+                logger.info(f"[{self.name}] Install result for '{agent_name}': {msg}")
+                if result.get("failed"):
+                    logger.warning(
+                        f"[{self.name}] Failed to install: {result['failed']} "
+                        f"— '{agent_name}' may not work correctly"
+                    )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"[{self.name}] Install timed out for {needed} — proceeding anyway, "
+                    f"'{agent_name}' may crash on import"
+                )
+        finally:
+            self._result_futures.pop(task_id, None)
 
     async def _deferred_stop(self):
         await asyncio.sleep(2.0)

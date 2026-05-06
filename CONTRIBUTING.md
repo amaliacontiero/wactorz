@@ -17,11 +17,15 @@ git clone https://github.com/waldiez/wactorz
 cd wactorz
 
 # Python (editable install with all extras)
-pip install -e ".[all]"
-pip install mkdocs-material mkdocstrings[python]
+pip install -e ".[all,docs]"
 
 # Frontend
 cd frontend && bun install && bun run build && cd ..
+
+# Docs (optional — only needed if you change docs/ source files)
+# make docs-build    → regenerates static/docs/ (guide + reference pages)
+# API reference docs (JS/Python/Rust) are not committed; they are built
+# by CI and published to https://waldiez.github.io/wactorz/api/
 
 # Rust (optional)
 cd rust && cargo build && cd ..
