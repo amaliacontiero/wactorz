@@ -10,6 +10,7 @@ Handles all HA operations in a single agent:
   - list_areas            : enumerate Home Assistant areas
   - list_devices          : enumerate Home Assistant devices
   - list_entities         : enumerate Home Assistant entities
+  - get_entities_state    : fetch current states for explicit entity IDs
 
 
 Intent is classified with a cheap single-word LLM call, then the
@@ -37,6 +38,7 @@ from ..core.integrations.home_assistant.ha_helper import (
     get_automations,
     get_devices,
     get_entities,
+    get_states,
     get_simplified_ha_data,
     update_automation,
 )
@@ -553,6 +555,9 @@ class HomeAssistantAgent(LLMAgent):
         if action == "list_entities":
             return await self._list_entities()
 
+        if action == "get_entities_state":
+            return await self._handle_entities_state_request(text)
+
         if action == "list_automations":
             automations = await self._get_automations_brief()
             return self._list_automations(automations)
@@ -606,9 +611,13 @@ class HomeAssistantAgent(LLMAgent):
             "unknown",
         }
 
+        heuristic = self._classify_action_heuristic(text)
+        if heuristic == "get_entities_state":
+            return heuristic
+
         if self.llm is None:
             logger.warning("[%s] No LLM provider configured; skipping action classification LLM call.", self.name)
-            return self._classify_action_heuristic(text)
+            return heuristic
 
         try:
             response, usage = await self.llm.complete(
@@ -623,7 +632,7 @@ class HomeAssistantAgent(LLMAgent):
         except Exception as exc:
             logger.warning("[%s] Action classification LLM call failed: %s", self.name, exc)
 
-        return self._classify_action_heuristic(text)
+        return heuristic
 
     @staticmethod
     def _classify_action_heuristic(text: str) -> str:
@@ -634,6 +643,8 @@ class HomeAssistantAgent(LLMAgent):
             return "list_devices"
         if any(w in lower for w in ("list entities", "show entities", "show me entities", "what entities")):
             return "list_entities"
+        if "get_entities_state" in lower:
+            return "get_entities_state"
         if any(w in lower for w in ("list automations", "show automations", "show all automations", "what automations", "what are my automations")):
             return "list_automations"
         if any(w in lower for w in ("delete", "remove automation", "disable automation")):
@@ -660,6 +671,17 @@ class HomeAssistantAgent(LLMAgent):
         return "unknown"
 
     @staticmethod
+    def _extract_entity_ids(text: str) -> list[str]:
+        seen: set[str] = set()
+        entity_ids: list[str] = []
+        for match in re.finditer(r"\b[a-z_][a-z0-9_]*\.[a-z0-9_]+\b", text.lower()):
+            entity_id = match.group(0)
+            if entity_id not in seen:
+                seen.add(entity_id)
+                entity_ids.append(entity_id)
+        return entity_ids
+
+    @staticmethod
     def _unsupported_action_response(text: str) -> dict[str, Any]:
         return {
             "task": text,
@@ -667,6 +689,43 @@ class HomeAssistantAgent(LLMAgent):
                 "I can help with Home Assistant hardware recommendations and automations: "
                 "create, edit, delete, list automations, list areas, list devices, and list entities."
             ),
+        }
+
+    async def _handle_entities_state_request(self, text: str) -> dict[str, Any]:
+        entity_ids = self._extract_entity_ids(text)
+        if not entity_ids:
+            return {
+                "task": text,
+                "result": "Please include one or more explicit Home Assistant entity IDs, like sensor.kitchen_temperature.",
+                "error": "explicit_entity_id_required",
+            }
+        if not self.ha_url or not self.ha_token:
+            return {
+                "task": text,
+                "result": "HA_URL or HA_TOKEN not configured.",
+                "error": "HA_URL or HA_TOKEN not configured.",
+            }
+
+        try:
+            states = await get_states(self.ha_url, self.ha_token)
+        except Exception as exc:
+            return {"task": text, "result": f"Home Assistant state query failed: {exc}", "error": str(exc)}
+
+        states_by_id = {s.get("entity_id"): s for s in states or [] if isinstance(s, dict)}
+        found = {eid: states_by_id[eid] for eid in entity_ids if eid in states_by_id}
+        missing = [eid for eid in entity_ids if eid not in found]
+
+        for entity_id, state_obj in found.items():
+            await self._mqtt_publish(entity_id, {"new_state": {"state": state_obj.get("state")}})
+
+        parts = [f"{entity_id}: {state.get('state', 'unknown')}" for entity_id, state in found.items()]
+        if missing:
+            parts.append("Missing: " + ", ".join(missing))
+
+        return {
+            "task": text,
+            "result": "; ".join(parts) if parts else "No requested entity states were found.",
+            "data": {"states": found, "missing": missing},
         }
 
     async def _handle_other_request(self, text: str) -> dict[str, Any]:

@@ -56,11 +56,123 @@ class HomeAssistantAgentOtherFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await agent._classify_action("how is my home doing?"), "other")
 
     async def test_thermometer_existence_and_state_are_other(self):
-        """Thermometer lookup/state questions need HA data, so they route to `other`."""
+        """Normal thermometer lookup/state questions route to the regular HA `other` flow."""
         agent = self._agent()
 
         self.assertEqual(agent._classify_action_heuristic("do I have any thermometers?"), "other")
         self.assertEqual(agent._classify_action_heuristic("what is the state of my thermometer?"), "other")
+
+    async def test_classify_action_get_entities_state_is_literal_heuristic_only(self):
+        """Only the literal trigger routes to the deterministic entity-state action."""
+        agent = self._agent(_ClassifyingLLM("other"))
+
+        self.assertEqual(
+            await agent._classify_action("get_entities_state sensor.kitchen_temp"),
+            "get_entities_state",
+        )
+        self.assertEqual(await agent._classify_action("state of sensor.kitchen_temp"), "other")
+
+    async def test_entity_state_request_publishes_single_explicit_entity(self):
+        """A single explicit entity state is returned and published to its entity ID topic."""
+        agent = self._agent()
+        agent._mqtt_publish = AsyncMock()
+
+        with patch(
+            "wactorz.agents.home_assistant_agent.get_states",
+            new=AsyncMock(return_value=[
+                {"entity_id": "sensor.kitchen_temp", "state": "21"},
+                {"entity_id": "light.kitchen", "state": "off"},
+            ]),
+        ) as get_states:
+            result = await agent._process("get_entities_state sensor.kitchen_temp")
+
+        get_states.assert_awaited_once_with(agent.ha_url, agent.ha_token)
+        agent._mqtt_publish.assert_awaited_once_with(
+            "sensor.kitchen_temp",
+            {"new_state": {"state": "21"}},
+        )
+        self.assertIn("sensor.kitchen_temp: 21", result["result"])
+        self.assertEqual(result["data"]["missing"], [])
+
+    async def test_entity_state_request_publishes_multiple_explicit_entities(self):
+        """Multiple explicit entities publish one MQTT message per found state."""
+        agent = self._agent()
+        agent._mqtt_publish = AsyncMock()
+
+        with patch(
+            "wactorz.agents.home_assistant_agent.get_states",
+            new=AsyncMock(return_value=[
+                {"entity_id": "sensor.kitchen_temp", "state": "21"},
+                {"entity_id": "light.kitchen", "state": "on"},
+            ]),
+        ):
+            result = await agent._handle_entities_state_request(
+                "get_entities_state sensor.kitchen_temp and light.kitchen"
+            )
+
+        self.assertEqual(agent._mqtt_publish.await_count, 2)
+        agent._mqtt_publish.assert_any_await(
+            "sensor.kitchen_temp",
+            {"new_state": {"state": "21"}},
+        )
+        agent._mqtt_publish.assert_any_await(
+            "light.kitchen",
+            {"new_state": {"state": "on"}},
+        )
+        self.assertIn("sensor.kitchen_temp: 21", result["result"])
+        self.assertIn("light.kitchen: on", result["result"])
+
+    async def test_entity_state_request_reports_missing_without_publish(self):
+        """Missing explicit entities are reported and not published."""
+        agent = self._agent()
+        agent._mqtt_publish = AsyncMock()
+
+        with patch(
+            "wactorz.agents.home_assistant_agent.get_states",
+            new=AsyncMock(return_value=[{"entity_id": "sensor.kitchen_temp", "state": "21"}]),
+        ):
+            result = await agent._handle_entities_state_request(
+                "get_entities_state sensor.kitchen_temp and light.missing"
+            )
+
+        agent._mqtt_publish.assert_awaited_once_with(
+            "sensor.kitchen_temp",
+            {"new_state": {"state": "21"}},
+        )
+        self.assertEqual(result["data"]["missing"], ["light.missing"])
+        self.assertIn("Missing: light.missing", result["result"])
+
+    async def test_entity_state_request_without_explicit_id_returns_error(self):
+        """State requests without literal entity IDs do not query HA or publish MQTT."""
+        agent = self._agent()
+        agent._mqtt_publish = AsyncMock()
+
+        with patch(
+            "wactorz.agents.home_assistant_agent.get_states",
+            new=AsyncMock(return_value=[]),
+        ) as get_states:
+            result = await agent._handle_entities_state_request("get_entities_state my thermometer")
+
+        self.assertEqual(result["error"], "explicit_entity_id_required")
+        self.assertIn("explicit Home Assistant entity IDs", result["result"])
+        get_states.assert_not_awaited()
+        agent._mqtt_publish.assert_not_awaited()
+
+    async def test_entity_state_request_missing_ha_config_returns_config_error(self):
+        """Explicit entity requests stop before querying or publishing when HA config is missing."""
+        agent = self._agent()
+        agent.ha_url = ""
+        agent._mqtt_publish = AsyncMock()
+
+        with patch(
+            "wactorz.agents.home_assistant_agent.get_states",
+            new=AsyncMock(return_value=[]),
+        ) as get_states:
+            result = await agent._handle_entities_state_request("get_entities_state sensor.kitchen_temp")
+
+        self.assertEqual(result["error"], "HA_URL or HA_TOKEN not configured.")
+        get_states.assert_not_awaited()
+        agent._mqtt_publish.assert_not_awaited()
 
     async def test_classify_action_unknown_means_not_ha(self):
         """Non-HA requests remain `unknown` and must not fetch Home Assistant data."""
