@@ -303,6 +303,8 @@ async def _route_chat(content: str, reply_fn, stream_fn=None, stream_end_fn=None
     stream_fn(chunk)      — send one streaming chunk (optional; falls back to reply_fn)
     stream_end_fn()       — signal that streaming is done (optional)
     """
+    logger.warning(f"[io-gateway DEBUG] _route_chat called: content={content!r}")
+
     _chunk_fn = stream_fn or reply_fn
     _end_fn   = stream_end_fn or (lambda: None)
 
@@ -313,11 +315,22 @@ async def _route_chat(content: str, reply_fn, stream_fn=None, stream_end_fn=None
         return
 
     target_name, text = _parse_mention(content)
+    logger.warning(f"[io-gateway DEBUG] parsed: target_name={target_name!r} text={text[:60]!r} registry_set={registry is not None}")
+
     target = registry.find_by_name(target_name) if registry else None
+    logger.warning(f"[io-gateway DEBUG] find_by_name({target_name!r}) -> {target!r}")
+
     if target is None:
         await reply_fn(f"Agent @{target_name} not found.")
         return
 
+    logger.warning(
+        f"[io-gateway DEBUG] target={target.name!r} "
+        f"has_process_stream={hasattr(target, 'process_user_input_stream')} "
+        f"has_chat_stream={hasattr(target, 'chat_stream')} "
+        f"has_process_user_input={hasattr(target, 'process_user_input')} "
+        f"has_chat={hasattr(target, 'chat')}"
+    )
     logger.info(f"[io-gateway] → {target.name}: {text[:60]!r}")
 
     gen_fn = (
@@ -336,6 +349,74 @@ async def _route_chat(content: str, reply_fn, stream_fn=None, stream_end_fn=None
         result = await target.process_user_input(text)
         await reply_fn(str(result))
         await _end_fn()
+    else:
+        # Agents that only speak via handle_task/TASK+RESULT message passing:
+        # - catalog-agent (no LLM)
+        # - dynamic agents (sinergym-collector, sinergym-optimizer, etc.)
+        # - manual-agent (fallback if chat() not present)
+        #
+        # Strategy: call handle_message() directly and intercept the reply by
+        # temporarily monkey-patching target.send() to capture the RESULT
+        # payload instead of trying to route it to a non-existent actor ID.
+        from wactorz.core.actor import Message, MessageType
+
+        # manual-agent: prefer its native chat() — it handles plain text well
+        if hasattr(target, "chat") and not hasattr(target, "_fn_handle_task"):
+            try:
+                result = await target.chat(text)
+                await reply_fn(str(result))
+            except Exception as exc:
+                logger.error(f"[io-gateway] chat() on {target.name} failed: {exc}", exc_info=True)
+                await reply_fn(f"[error] {target.name}: {exc}")
+            await _end_fn()
+            return
+
+        # All other message-passing agents: intercept send() to capture RESULT
+        reply_queue  = asyncio.Queue()
+        original_send = target.send  # save so we can restore
+
+        async def _capture_send(recipient_id, msg_type, payload=None, **kw):
+            if msg_type == MessageType.RESULT:
+                await reply_queue.put(payload)
+            else:
+                await original_send(recipient_id, msg_type, payload, **kw)
+
+        target.send = _capture_send
+        try:
+            msg = Message(
+                type=MessageType.TASK,
+                sender_id="io-gateway",
+                reply_to="io-gateway",
+                payload={"text": text},
+            )
+            await target.handle_message(msg)
+
+            payload = await asyncio.wait_for(reply_queue.get(), timeout=150.0)
+
+            if isinstance(payload, dict):
+                text_out = (
+                    payload.get("reply") or payload.get("message")
+                    or payload.get("text") or payload.get("content")
+                    or payload.get("result") or str(payload)
+                )
+                if "agents" in payload and isinstance(payload["agents"], list):
+                    lines = [payload.get("message", "Available agents:")]
+                    for a in payload["agents"]:
+                        lines.append(f"  • {a['name']}: {a.get('description', '')}")
+                    text_out = "\n".join(lines)
+            else:
+                text_out = str(payload)
+
+            await reply_fn(text_out)
+
+        except asyncio.TimeoutError:
+            await reply_fn(f"[error] @{target_name} did not reply within 150s.")
+        except Exception as exc:
+            logger.error(f"[io-gateway] task dispatch to {target.name} failed: {exc}", exc_info=True)
+            await reply_fn(f"[error] {target.name}: {exc}")
+        finally:
+            target.send = original_send   # always restore
+            await _end_fn()
 
 
 # ── MQTT chat handler (legacy / IOAgent-less fallback) ─────────────────────
@@ -458,6 +539,7 @@ async def ws_handler(request):
 
                     elif msg_type == "chat":
                         content = (data.get("content") or "").strip()
+                        logger.warning(f"[io-gateway DEBUG] ws chat msg received: content={content!r} registry_set={registry is not None}")
                         if content and registry is not None:
                             # Persist the user's turn first so chat_log has the
                             # request even if the assistant reply errors out.

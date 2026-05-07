@@ -117,26 +117,7 @@ def _build_catalog() -> dict:
             "code":          code,
         }
 
-    # # ── ha-actuator-agent ─────────────────────────────────────────────────────
-    # code = _load_recipe("home_assistant_actuator_agent.py")
-    # if code:
-    #     catalog["homeassistant-actuator-agent"] = {
-    #         "name":         "ha-actuator-agent",
-    #         "type":         "dynamic",
-    #         "description":  "Subscribes to an MQTT topic and calls a Home Assistant service when triggered.",
-    #         "capabilities": ["home_automation", "ha_actuator", "mqtt_subscriber"],
-    #         "install":      ["aiomqtt"],
-    #         "input_schema": {
-    #             "mqtt_topic":  "str  — topic to subscribe to",
-    #             "ha_domain":   "str  — HA domain, e.g. light",
-    #             "ha_service":  "str  — HA service, e.g. turn_on",
-    #             "entity_id":   "str  — HA entity ID",
-    #         },
-    #         "output_schema": {"actuations": "int"},
-    #         "poll_interval": 3600,
-    #         "code":          code,
-    #     }
-
+   
     # # ── discord-notify-agent ──────────────────────────────────────────────────
     # code = _load_recipe("discord_notify_agent.py")
     # if code:
@@ -159,65 +140,65 @@ def _build_catalog() -> dict:
     #         "code":          code,
     #     }
 
-    # # ── sinergym-collector ────────────────────────────────────────────────────
-    # code = _load_recipe("sinergym_collector_agent.py")
-    # if code:
-    #     catalog["sinergym-collector"] = {
-    #         "name":         "sinergym-collector",
-    #         "type":         "dynamic",
-    #         "description":  "Collects Sinergym episode data via MQTT for RL/Bayesian training. Listens on sinergym/env/{env_id}/observation and persists (obs, action, reward) tuples.",
-    #         "capabilities": ["sinergym", "data_collection", "rl_training", "energy_optimization", "building_simulation"],
-    #         "install":      ["aiomqtt", "numpy"],
-    #         "input_schema": {
-    #             "env_id":          "str  — Sinergym env ID, e.g. Eplus-5zone-hot-continuous-v1",
-    #             "obs_topic":       "str  — MQTT topic for observations",
-    #             "target_episodes": "int  — episodes to collect before triggering optimizer, default 10",
-    #             "chunk_size":      "int  — persist every N episodes, default 5",
-    #             "optimizer_name":  "str  — optimizer agent to notify on completion, default sinergym-optimizer",
-    #         },
-    #         "output_schema": {
-    #             "episodes_collected": "int",
-    #             "total_steps":        "int",
-    #             "data_key":           "str — episode_{N} recall keys",
-    #         },
-    #         "poll_interval": 3600,
-    #         "code":          code,
-    #     }
-    #     logger.info("[catalog] Loaded sinergym-collector recipe")
+    # ── sinergym-collector ────────────────────────────────────────────────────
+    code = _load_recipe("sinergym_collector_agent.py")
+    if code:
+        catalog["sinergym-collector"] = {
+            "name":         "sinergym-collector",
+            "type":         "dynamic",
+            "description":  "Collects Sinergym episode data via MQTT for RL/Bayesian training. Listens on sinergym/env/{env_id}/observation and persists (obs, action, reward) tuples.",
+            "capabilities": ["sinergym", "data_collection", "rl_training", "energy_optimization", "building_simulation"],
+            "install":      ["aiomqtt", "numpy"],
+            "input_schema": {
+                "env_id":          "str  — Sinergym env ID, e.g. Eplus-5zone-hot-continuous-v1",
+                "obs_topic":       "str  — MQTT topic for observations",
+                "target_episodes": "int  — episodes to collect before triggering optimizer, default 10",
+                "chunk_size":      "int  — persist every N episodes, default 5",
+                "optimizer_name":  "str  — optimizer agent to notify on completion, default sinergym-optimizer",
+            },
+            "output_schema": {
+                "episodes_collected": "int",
+                "total_steps":        "int",
+                "data_key":           "str — episode_{N} recall keys",
+            },
+            "poll_interval": 3600,
+            "code":          code,
+        }
+        logger.info("[catalog] Loaded sinergym-collector recipe")
 
-    # # ── sinergym-optimizer ────────────────────────────────────────────────────
-    # code = _load_recipe("sinergym_optimizer_agent.py")
-    # if code:
-    #     catalog["sinergym-optimizer"] = {
-    #         "name":         "sinergym-optimizer",
-    #         "type":         "dynamic",
-    #         "description":  "Energy optimization agent for Sinergym: trains RL (PPO) or Bayesian (GP) policy from collected episodes, then publishes actions to sinergym/env/{env_id}/action.",
-    #         "capabilities": ["sinergym", "rl", "bayesian_optimization", "energy_optimization", "policy_training", "building_control"],
-    #         "install":      ["stable-baselines3", "scikit-learn", "numpy", "torch", "aiomqtt", "gymnasium"],
-    #         "input_schema": {
-    #             "env_id":          "str  — Sinergym env ID, e.g. Eplus-5zone-hot-continuous-v1",
-    #             "strategy":        "str  — rl | bayesian | rulebased | combined, default rl",
-    #             "collector_name":  "str  — collector agent name, default sinergym-collector",
-    #             "obs_dim":         "int  — observation vector length, default 35",
-    #             "action_dim":      "int  — action vector length, default 2",
-    #             "training_steps":  "int  — RL training timesteps, default 50000",
-    #             "deploy_on_train": "bool — start publishing actions after training, default true",
-    #         },
-    #         "output_schema": {
-    #             "mean_reward": "float",
-    #             "strategy":    "str",
-    #             "phase":       "str — idle | training | deploying",
-    #         },
-    #         "poll_interval": 3600,
-    #         "code":          code,
-    #     }
-    #     logger.info("[catalog] Loaded sinergym-optimizer recipe")
+    # ── sinergym-optimizer ────────────────────────────────────────────────────
+    code = _load_recipe("sinergym_optimizer_agent.py")
+    if code:
+        catalog["sinergym-optimizer"] = {
+            "name":         "sinergym-optimizer",
+            "type":         "dynamic",
+            "description":  "Energy optimization agent for Sinergym: trains RL (PPO) or Bayesian (GP) policy from collected episodes, then publishes actions to sinergym/env/{env_id}/action.",
+            "capabilities": ["sinergym", "rl", "bayesian_optimization", "energy_optimization", "policy_training", "building_control"],
+            "install":      ["stable-baselines3", "scikit-learn", "numpy", "torch", "aiomqtt", "gymnasium"],
+            "input_schema": {
+                "env_id":          "str  — Sinergym env ID, e.g. Eplus-5zone-hot-continuous-v1",
+                "strategy":        "str  — rl | bayesian | rulebased | combined, default rl",
+                "collector_name":  "str  — collector agent name, default sinergym-collector",
+                "obs_dim":         "int  — observation vector length, default 35",
+                "action_dim":      "int  — action vector length, default 2",
+                "training_steps":  "int  — RL training timesteps, default 50000",
+                "deploy_on_train": "bool — start publishing actions after training, default true",
+            },
+            "output_schema": {
+                "mean_reward": "float",
+                "strategy":    "str",
+                "phase":       "str — idle | training | deploying",
+            },
+            "poll_interval": 3600,
+            "code":          code,
+        }
+        logger.info("[catalog] Loaded sinergym-optimizer recipe")
 
     # ── ADD NEW RECIPES HERE ──────────────────────────────────────────────────
     # code = _load_recipe("my_new_agent.py")
     # if code:
     #     catalog["my-new-agent"] = { ...spawn config..., "code": code }
-    # ─────────────────────────────────────────────────────────────────────────
+    # # ─────────────────────────────────────────────────────────────────────────
 
     # ── anomaly-detector ───────────────────────────────────────────────────
     code = _load_recipe("anomaly_detector_agent.py")
@@ -429,27 +410,64 @@ class CatalogAgent(Actor):
 
             install = recipe.get("install", [])
             if install:
-                installer = self._registry.find_by_name("installer") if self._registry else None
-                if installer:
-                    logger.info(f"[{self.name}] Installing deps for '{name}': {install}")
-                    import uuid as _uuid
-                    task_id = f"cat_install_{_uuid.uuid4().hex[:8]}"
-                    future  = asyncio.get_running_loop().create_future()
-                    main = self._registry.find_by_name("main") if self._registry else None
-                    if main:
-                        main._result_futures[task_id] = future
-                    await self.send(installer.actor_id, MessageType.TASK, {
-                        "action":   "install",
-                        "packages": install,
-                        "task":     task_id,
-                        "_task_id": task_id,
-                    })
+                # Fast-path: check which packages are already importable.
+                # Avoids a 120s installer wait when deps were installed in a
+                # previous session — same logic as main._spawn_dynamic_agent.
+                import importlib as _importlib
+                # Map pip package names to their actual import names where they differ.
+                _IMPORT_NAME_MAP = {
+                    "scikit-learn":      "sklearn",
+                    "stable-baselines3": "stable_baselines3",
+                    "pillow":            "PIL",
+                    "pyyaml":            "yaml",
+                    "pymupdf":           "fitz",
+                    "beautifulsoup4":    "bs4",
+                    "python-dateutil":   "dateutil",
+                    "typing-extensions": "typing_extensions",
+                    "opencv-python":     "cv2",
+                    "scikit-image":      "skimage",
+                }
+                needed = []
+                for pkg in install:
+                    pip_name    = pkg.split("[")[0].lower()
+                    import_name = _IMPORT_NAME_MAP.get(pip_name) or pip_name.replace("-", "_")
                     try:
-                        await asyncio.wait_for(future, timeout=120.0)
-                    except asyncio.TimeoutError:
-                        logger.warning(f"[{self.name}] Install timeout for '{name}' — proceeding anyway")
+                        _importlib.import_module(import_name)
+                    except ImportError:
+                        needed.append(pkg)
+
+                if needed:
+                    installer = self._registry.find_by_name("installer") if self._registry else None
+                    if installer:
+                        logger.info(f"[{self.name}] Installing missing deps for '{name}': {needed}")
+                        import uuid as _uuid
+                        task_id = f"cat_install_{_uuid.uuid4().hex[:8]}"
+                        future  = asyncio.get_running_loop().create_future()
+                        main = self._registry.find_by_name("main") if self._registry else None
+                        if main:
+                            main._result_futures[task_id] = future
+                        # Send with reply_to=main.actor_id so the installer's RESULT goes
+                        # directly to main where the future is registered.
+                        install_msg = Message(
+                            type      = MessageType.TASK,
+                            sender_id = self.actor_id,
+                            reply_to  = main.actor_id if main else self.actor_id,
+                            payload   = {
+                                "action":   "install",
+                                "packages": needed,
+                                "task":     task_id,
+                                "_task_id": task_id,
+                            },
+                        )
+                        await installer.receive(install_msg)
+                        try:
+                            await asyncio.wait_for(future, timeout=120.0)
+                        except asyncio.TimeoutError:
+                            logger.warning(f"[{self.name}] Install timeout for '{name}' — proceeding anyway")
+                    else:
+                        logger.warning(f"[{self.name}] installer not found — skipping dep install for '{name}'")
                 else:
-                    logger.warning(f"[{self.name}] installer not found — skipping dep install for '{name}'")
+                    logger.info(f"[{self.name}] All deps for '{name}' already installed — skipping installer")
 
             main = self._registry.find_by_name("main")
             llm_provider    = getattr(main, "llm", None) if main else None
