@@ -14,12 +14,14 @@ from ..core.persistence import get_db
 logger = logging.getLogger(__name__)
 
 
-# Pricing per 1M tokens (input, output) in USD — update as needed
-PRICING = {
+# Fallback pricing per 1M tokens (input, output) in USD.
+# Used when the dynamic fetch fails or the model isn't in the LiteLLM catalogue.
+# Supports prefix matching so "gpt-5" covers "gpt-5-mini", etc.
+_FALLBACK_PRICING: dict[str, tuple[float, float]] = {
     # Anthropic
-    "claude-opus-4-6":        (15.00, 75.00),
+    "claude-opus-4-6":        ( 5.00, 25.00),
     "claude-sonnet-4-6":      ( 3.00, 15.00),
-    "claude-haiku-4-5":       ( 0.80,  4.00),
+    "claude-haiku-4-5":       ( 1.00,  5.00),
     # OpenAI
     "gpt-5.4-pro":            (30.00, 180.00),
     "gpt-5.4-mini":           ( 0.75,   4.50),
@@ -47,30 +49,86 @@ PRICING = {
     # Ollama — local, no cost
     "ollama":                 ( 0.00,  0.00),
     # NVIDIA NIM — free tier: 1000 req/month per model
-    # Most models are free; paid ones listed below
     "nvidia/llama-3.1-nemotron-70b": ( 0.35,  0.40),
     "meta/llama-3.1-405b":           ( 3.45,  3.45),
     "mistralai/mistral-large":       ( 2.00,  6.00),
-    # All other NIM models: $0 (free tier)
     "nim/":                          ( 0.00,  0.00),
-    # Google Gemini — prices per 1M tokens (input, output), standard context ≤200K tokens
-    # Updated March 2026 — https://ai.google.dev/gemini-api/docs/pricing
+    # Google Gemini
     "gemini-2.5-flash-lite":         ( 0.10,  0.40),
     "gemini-2.0-flash":              ( 0.10,  0.40),
     "gemini-2.5-flash":              ( 0.30,  2.50),
     "gemini-3-flash":                ( 0.50,  3.00),
     "gemini-2.5-pro":                ( 1.25, 10.00),
     "gemini-3.1-pro":                ( 2.00, 12.00),
-    # All other gemini models: approximate flash pricing
     "gemini-":                       ( 0.30,  2.50),
 }
 
+_LITELLM_PRICING_URL = (
+    "https://raw.githubusercontent.com/BerriAI/litellm/main"
+    "/model_prices_and_context_window.json"
+)
+_PRICING_TTL = 86400.0  # 24 hours
+
+# Populated by _refresh_pricing(); maps exact model name → ($/1M input, $/1M output)
+_dynamic_pricing: dict[str, tuple[float, float]] = {}
+_dynamic_pricing_ts: float = 0.0
+
+
+async def _refresh_pricing() -> None:
+    """Fetch latest model prices from LiteLLM's catalogue and cache them for 24 h."""
+    global _dynamic_pricing, _dynamic_pricing_ts
+    if time.time() - _dynamic_pricing_ts < _PRICING_TTL and _dynamic_pricing:
+        return
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                _LITELLM_PRICING_URL,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                data = await resp.json(content_type=None)
+        pricing: dict[str, tuple[float, float]] = {}
+        for model, info in data.items():
+            if not isinstance(info, dict):
+                continue
+            inp = info.get("input_cost_per_token")
+            out = info.get("output_cost_per_token")
+            if inp is not None and out is not None:
+                # Store as $/1M tokens to match _FALLBACK_PRICING units
+                pricing[model] = (float(inp) * 1_000_000, float(out) * 1_000_000)
+        _dynamic_pricing = pricing
+        _dynamic_pricing_ts = time.time()
+        logger.info("[pricing] Fetched %d model prices from LiteLLM", len(pricing))
+    except Exception as exc:
+        logger.warning("[pricing] Failed to fetch dynamic pricing: %s — using fallback", exc)
+
+
 def _calc_cost(model: str, input_tokens: int, output_tokens: int) -> float:
-    key = next((k for k in PRICING if model.startswith(k)), None)
+    # Exact match against live catalogue
+    if model in _dynamic_pricing:
+        price_in, price_out = _dynamic_pricing[model]
+        return (input_tokens * price_in + output_tokens * price_out) / 1_000_000
+    # Prefix match against local fallback table
+    key = next((k for k in _FALLBACK_PRICING if model.startswith(k)), None)
     if not key:
         return 0.0
-    price_in, price_out = PRICING[key]
+    price_in, price_out = _FALLBACK_PRICING[key]
     return (input_tokens * price_in + output_tokens * price_out) / 1_000_000
+
+
+def pricing_info(model: str) -> dict[str, object]:
+    """Return pricing source and rates for a model — useful for debugging."""
+    if model in _dynamic_pricing:
+        inp, out = _dynamic_pricing[model]
+        age = time.time() - _dynamic_pricing_ts
+        return {"source": "live", "input_per_1m": inp, "output_per_1m": out,
+                "cache_age_s": round(age)}
+    key = next((k for k in _FALLBACK_PRICING if model.startswith(k)), None)
+    if key:
+        inp, out = _FALLBACK_PRICING[key]
+        return {"source": "fallback", "input_per_1m": inp, "output_per_1m": out,
+                "matched_prefix": key}
+    return {"source": "unknown", "input_per_1m": 0.0, "output_per_1m": 0.0}
 
 
 class LLMProvider:
@@ -493,6 +551,7 @@ class LLMAgent(Actor):
         return self._current_task
 
     async def on_start(self):
+        _ = asyncio.create_task(_refresh_pricing())
         # Restore conversation history and rolling summary from persistence
         saved = self.recall("conversation_history", [])
         clean = []
