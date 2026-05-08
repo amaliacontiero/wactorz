@@ -19,9 +19,9 @@ logger = logging.getLogger(__name__)
 # Supports prefix matching so "gpt-5" covers "gpt-5-mini", etc.
 _FALLBACK_PRICING: dict[str, tuple[float, float]] = {
     # Anthropic
-    "claude-opus-4-6":        (15.00, 75.00),
+    "claude-opus-4-6":        ( 5.00, 25.00),
     "claude-sonnet-4-6":      ( 3.00, 15.00),
-    "claude-haiku-4-5":       ( 0.80,  4.00),
+    "claude-haiku-4-5":       ( 1.00,  5.00),
     # OpenAI
     "gpt-5.4-pro":            (30.00, 180.00),
     "gpt-5.4-mini":           ( 0.75,   4.50),
