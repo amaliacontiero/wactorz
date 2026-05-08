@@ -73,14 +73,17 @@ class HomeAssistantAgentOtherFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await agent._classify_action("state of sensor.kitchen_temp"), "other")
 
     async def test_entity_state_request_publishes_single_explicit_entity(self):
-        """A single explicit entity state is returned and published to its entity ID topic."""
+        """A single explicit entity state is fetched and published to homeassistant/state_changes/<entity_id>
+        with a full state-change payload so dynamic agents can filter on entity_id."""
         agent = self._agent()
         agent._mqtt_publish = AsyncMock()
+
+        state_obj = {"entity_id": "sensor.kitchen_temp", "state": "21"}
 
         with patch(
             "wactorz.agents.home_assistant_agent.get_states",
             new=AsyncMock(return_value=[
-                {"entity_id": "sensor.kitchen_temp", "state": "21"},
+                state_obj,
                 {"entity_id": "light.kitchen", "state": "off"},
             ]),
         ) as get_states:
@@ -88,8 +91,13 @@ class HomeAssistantAgentOtherFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         get_states.assert_awaited_once_with(agent.ha_url, agent.ha_token)
         agent._mqtt_publish.assert_awaited_once_with(
-            "sensor.kitchen_temp",
-            {"new_state": {"state": "21"}},
+            "homeassistant/state_changes/sensor.kitchen_temp",
+            {
+                "event_type": "state_changed",
+                "entity_id": "sensor.kitchen_temp",
+                "new_state": state_obj,
+                "old_state": None,
+            },
         )
         self.assertIn("sensor.kitchen_temp: 21", result["result"])
         self.assertEqual(result["data"]["missing"], [])
@@ -99,12 +107,12 @@ class HomeAssistantAgentOtherFeatureTest(unittest.IsolatedAsyncioTestCase):
         agent = self._agent()
         agent._mqtt_publish = AsyncMock()
 
+        state_obj_temp = {"entity_id": "sensor.kitchen_temp", "state": "21"}
+        state_obj_light = {"entity_id": "light.kitchen", "state": "on"}
+
         with patch(
             "wactorz.agents.home_assistant_agent.get_states",
-            new=AsyncMock(return_value=[
-                {"entity_id": "sensor.kitchen_temp", "state": "21"},
-                {"entity_id": "light.kitchen", "state": "on"},
-            ]),
+            new=AsyncMock(return_value=[state_obj_temp, state_obj_light]),
         ):
             result = await agent._handle_entities_state_request(
                 "get_entities_state sensor.kitchen_temp and light.kitchen"
@@ -112,12 +120,22 @@ class HomeAssistantAgentOtherFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(agent._mqtt_publish.await_count, 2)
         agent._mqtt_publish.assert_any_await(
-            "sensor.kitchen_temp",
-            {"new_state": {"state": "21"}},
+            "homeassistant/state_changes/sensor.kitchen_temp",
+            {
+                "event_type": "state_changed",
+                "entity_id": "sensor.kitchen_temp",
+                "new_state": state_obj_temp,
+                "old_state": None,
+            },
         )
         agent._mqtt_publish.assert_any_await(
-            "light.kitchen",
-            {"new_state": {"state": "on"}},
+            "homeassistant/state_changes/light.kitchen",
+            {
+                "event_type": "state_changed",
+                "entity_id": "light.kitchen",
+                "new_state": state_obj_light,
+                "old_state": None,
+            },
         )
         self.assertIn("sensor.kitchen_temp: 21", result["result"])
         self.assertIn("light.kitchen: on", result["result"])
@@ -127,17 +145,25 @@ class HomeAssistantAgentOtherFeatureTest(unittest.IsolatedAsyncioTestCase):
         agent = self._agent()
         agent._mqtt_publish = AsyncMock()
 
+        state_obj = {"entity_id": "sensor.kitchen_temp", "state": "21"}
+
         with patch(
             "wactorz.agents.home_assistant_agent.get_states",
-            new=AsyncMock(return_value=[{"entity_id": "sensor.kitchen_temp", "state": "21"}]),
+            new=AsyncMock(return_value=[state_obj]),
         ):
             result = await agent._handle_entities_state_request(
                 "get_entities_state sensor.kitchen_temp and light.missing"
             )
 
+        # Only the found entity is published — missing ones are silently skipped.
         agent._mqtt_publish.assert_awaited_once_with(
-            "sensor.kitchen_temp",
-            {"new_state": {"state": "21"}},
+            "homeassistant/state_changes/sensor.kitchen_temp",
+            {
+                "event_type": "state_changed",
+                "entity_id": "sensor.kitchen_temp",
+                "new_state": state_obj,
+                "old_state": None,
+            },
         )
         self.assertEqual(result["data"]["missing"], ["light.missing"])
         self.assertIn("Missing: light.missing", result["result"])

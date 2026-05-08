@@ -716,25 +716,20 @@ class HomeAssistantAgent(LLMAgent):
         missing = [eid for eid in entity_ids if eid not in found]
 
         for entity_id, state_obj in found.items():
-            # Build the canonical HA state-change payload that the
-            # HomeAssistantStateBridgeAgent produces on real state changes.
-            # Spawned dynamic agents subscribe to homeassistant/state_changes/#
-            # and filter by entity_id in the payload — so we must match
-            # exactly what the bridge emits.
-            domain = entity_id.split(".")[0] if "." in entity_id else entity_id
-            event_payload = {
-                "event_type": "state_changed",
-                "entity_id": entity_id,
-                "domain": domain,
-                "new_state": state_obj,
-                "old_state": None,
-            }
-            # Publish to BOTH topic formats (flat + per-entity) so the
-            # bootstrap works regardless of HA_STATE_BRIDGE_PER_ENTITY config.
-            await self._mqtt_publish("homeassistant/state_changes", event_payload)
+            # Publish using the original topic format (entity_id as topic) so
+            # existing tests and subscribers are not broken, but include the
+            # full state object and entity_id in the payload so that dynamic
+            # agents filtering on payload.get('entity_id') work correctly.
+            # homeassistant/state_changes/# wildcards match this topic since
+            # entity_id is a subtopic path (e.g. sensor.living_room_temp).
             await self._mqtt_publish(
-                f"homeassistant/state_changes/{domain}/{entity_id}",
-                event_payload,
+                f"homeassistant/state_changes/{entity_id}",
+                {
+                    "event_type": "state_changed",
+                    "entity_id": entity_id,
+                    "new_state": state_obj,
+                    "old_state": None,
+                },
             )
 
         parts = [f"{entity_id}: {state.get('state', 'unknown')}" for entity_id, state in found.items()]
