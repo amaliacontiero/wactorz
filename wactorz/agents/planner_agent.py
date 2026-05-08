@@ -443,6 +443,14 @@ class PlannerAgent(Actor):
                 wired.append(f"**{name}** — failed to spawn")
                 self._spawn_results[name] = {"ok": False, "status": "spawn_returned_none"}
 
+        # ── Bootstrap current HA state for freshly-spawned agents ────────────
+        # Agents wait for MQTT changes, but if the entity is already in the
+        # target state before they spawned, they'd never receive a trigger.
+        # Ask home-assistant-agent to re-publish the current state over MQTT
+        # so agents can evaluate it immediately.
+        if spawned:
+            asyncio.create_task(self._bootstrap_ha_entity_states(task, plan))
+
         # Persist this rule into main's pipeline rules registry
         if rule_agents:
             import hashlib as _hl
@@ -2235,6 +2243,107 @@ Example:
                     f"[{self.name}] Install timed out for {needed} — proceeding anyway, "
                     f"'{agent_name}' may crash on import"
                 )
+        finally:
+            self._result_futures.pop(task_id, None)
+
+    async def _bootstrap_ha_entity_states(self, task: str, plan: list[dict] | None = None) -> None:
+        """
+        After pipeline agents are spawned they sit idle until the next MQTT
+        change arrives.  If the relevant HA entity is *already* in the desired
+        state (e.g. lights are already on) that change never comes, so the
+        agents never fire.
+
+        Fix: directly fetch current HA states and publish them to
+        homeassistant/state_changes/# so freshly-spawned agents get an
+        immediate bootstrap event without waiting for a real state change.
+
+        Entity IDs are extracted from (in order of reliability):
+          1. spawn_config["code"]        — generated agent code always contains
+                                           the literal entity_id string
+          2. spawn_config["actions"]     — ha_actuator explicit entity_id fields
+          3. spawn_config["mqtt_topics"] — per-entity topic path segments
+          4. The enriched task string    — [HA entity: sensor.xxx] annotations
+        """
+        import re
+        import uuid
+
+        HA_DOMAINS = {
+            "sensor", "binary_sensor", "light", "switch", "climate", "cover",
+            "media_player", "input_boolean", "input_number", "input_select",
+            "automation", "script", "scene", "group", "person", "zone",
+            "device_tracker", "alarm_control_panel", "camera", "fan",
+            "vacuum", "lock", "humidifier", "water_heater", "number",
+            "select", "button", "update", "event",
+        }
+        HA_ENTITY_RE = re.compile(r"\b([a-z_][a-z0-9_]*\.[a-z0-9_]+)\b")
+
+        seen: set[str] = set()
+        entity_ids: list[str] = []
+
+        def _add(eid: str) -> None:
+            eid = eid.strip().lower()
+            if eid and eid not in seen and eid.split(".")[0] in HA_DOMAINS:
+                seen.add(eid)
+                entity_ids.append(eid)
+
+        for step in (plan or []):
+            cfg = step.get("spawn_config") or {}
+
+            # Source 1: generated agent code — the LLM embeds the real entity_id
+            # as a string literal, e.g.: payload.get('entity_id') == 'sensor.ewelink_...'
+            for m in HA_ENTITY_RE.finditer(cfg.get("code", "")):
+                _add(m.group(1))
+
+            # Source 2: ha_actuator actions
+            for action in cfg.get("actions") or []:
+                _add(action.get("entity_id", ""))
+
+            # Source 3: per-entity mqtt_topics
+            for topic in cfg.get("mqtt_topics") or []:
+                m = re.search(r"homeassistant/state_changes/[^/]+/([^/#]+)", topic)
+                if m:
+                    _add(m.group(1))
+
+        # Source 4: enriched task string
+        for m in HA_ENTITY_RE.finditer(task.lower()):
+            _add(m.group(1))
+
+        await self._log(f"Bootstrap — entity IDs found: {entity_ids}")
+
+        if not entity_ids:
+            await self._log("Bootstrap: no HA entity IDs found — skipping")
+            return
+
+        if not self._registry:
+            return
+
+        ha_actor = self._registry.find_by_name("home-assistant-agent")
+        if not ha_actor:
+            await self._log("Bootstrap skipped — home-assistant-agent not running")
+            return
+
+        # Wait for spawned agents to complete setup() and subscribe before
+        # the bootstrap MQTT messages land.
+        await asyncio.sleep(1.5)
+
+        entity_list = " ".join(entity_ids)
+        await self._log(f"Bootstrap — sending get_entities_state to HA agent for: {entity_ids}")
+
+        task_id = str(uuid.uuid4())[:8]
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._result_futures[task_id] = future
+        try:
+            await self.send(ha_actor.actor_id, MessageType.TASK, {
+                "text": f"get_entities_state {entity_list}",
+                "_task_id": task_id,
+                "_reply_to": self.actor_id,
+            })
+            result = await asyncio.wait_for(future, timeout=15.0)
+            await self._log(f"Bootstrap — HA agent responded: {result.get('result', '')[:120]}")
+        except asyncio.TimeoutError:
+            await self._log("Bootstrap — HA agent timed out")
+        except Exception as exc:
+            await self._log(f"Bootstrap — error: {exc}")
         finally:
             self._result_futures.pop(task_id, None)
 
