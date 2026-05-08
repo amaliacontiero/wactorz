@@ -7,10 +7,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Version
 
 ## [Unreleased]
 
-### Added
-
-- **Dynamic LLM pricing** — `LLMAgent` now fetches live model prices from the [LiteLLM model catalogue](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) on startup and caches them for 24 hours. Falls back to a hardcoded table if the fetch fails or the model is not found. `pricing_info(model)` helper added for debugging (reports source, rates, and cache age).
-
 ---
 
 ## [0.3.0] — 2026-04-27
