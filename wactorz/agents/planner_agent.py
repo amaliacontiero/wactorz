@@ -75,6 +75,11 @@ class PlannerAgent(Actor):
         # Sent back to main in the RESULT payload so it knows what actually happened.
         self._spawn_results: dict[str, dict] = {}
 
+        # Cost tracking — accumulated across all llm.complete() calls this session
+        self.total_input_tokens:  int   = 0
+        self.total_output_tokens: int   = 0
+        self.total_cost_usd:      float = 0.0
+
         # Fuseki endpoint for SPARQL world-model enrichment (optional).
         # SPARQL queries enrich the planner's prompt with durable channel schemas
         # and relevant Home Assistant state from the knowledge graph. If the
@@ -99,6 +104,37 @@ class PlannerAgent(Actor):
         await self._log(f"Planner ready. Task: {self._task[:80]}")
         if self._task:
             asyncio.create_task(self._report_plan(self._task))
+
+    async def on_stop(self):
+        """Persist final cost metrics so lifetime spend survives agent termination."""
+        if self.total_cost_usd > 0:
+            self.persist("_final_cost", {
+                "input_tokens":  self.total_input_tokens,
+                "output_tokens": self.total_output_tokens,
+                "cost_usd":      round(self.total_cost_usd, 6),
+                "name":          self.name,
+                "stopped_at":    time.time(),
+            })
+        try:
+            await self._mqtt_publish(
+                f"agents/{self.actor_id}/metrics",
+                self._build_metrics(),
+            )
+        except Exception:
+            pass
+
+    def _build_metrics(self) -> dict:
+        m = super()._build_metrics()
+        m["input_tokens"]  = self.total_input_tokens
+        m["output_tokens"] = self.total_output_tokens
+        m["cost_usd"]      = round(self.total_cost_usd, 6)
+        return m
+
+    def _accrue_usage(self, usage: dict) -> None:
+        """Accumulate token/cost usage returned by any llm.complete() call."""
+        self.total_input_tokens  += usage.get("input_tokens", 0)
+        self.total_output_tokens += usage.get("output_tokens", 0)
+        self.total_cost_usd      += usage.get("cost_usd", 0.0)
 
     # ── Message handling ───────────────────────────────────────────────────
 
@@ -1036,11 +1072,12 @@ class PlannerAgent(Actor):
                 "- Time-based triggers without HA action (just logging or publishing): always feasible=true."
             )
             try:
-                feas_resp, _ = await self.llm.complete(
+                feas_resp, _usage = await self.llm.complete(
                     messages=[{"role": "user", "content": feas_prompt}],
                     system="Output only valid JSON. No markdown.",
                     max_tokens=400,
                 )
+                self._accrue_usage(_usage)
                 clean = feas_resp.strip()
                 for fence in ("```json", "```"):
                     if clean.startswith(fence):
@@ -1359,11 +1396,12 @@ class PlannerAgent(Actor):
         prompt = "\n".join(prompt_parts)
 
         try:
-            response, _ = await self.llm.complete(
+            response, _usage = await self.llm.complete(
                 messages=[{"role": "user", "content": prompt}],
                 system="You are a JSON-only pipeline architect. Output only a valid JSON array. No markdown, no explanation.",
                 max_tokens=4000,
             )
+            self._accrue_usage(_usage)
             clean = response.strip()
             if clean.startswith("```"):
                 clean = "\n".join(clean.split("\n")[1:])
@@ -1775,11 +1813,12 @@ Example:
 ]"""
 
         try:
-            response, _ = await self.llm.complete(
+            response, _usage = await self.llm.complete(
                 messages=[{"role": "user", "content": prompt}],
                 system="You are a JSON-only task planner. Output only valid JSON arrays, nothing else.",
                 max_tokens=1500,
             )
+            self._accrue_usage(_usage)
             clean = response.strip()
             # Strip markdown fences
             if clean.startswith("```"):
@@ -2149,11 +2188,12 @@ Example:
             "Do not mention agent names, step numbers, or internal system details."
         )
         try:
-            response, _ = await self.llm.complete(
+            response, _usage = await self.llm.complete(
                 messages=[{"role": "user", "content": prompt}],
                 system="You synthesize multi-agent results into clean, user-facing answers.",
                 max_tokens=2048,
             )
+            self._accrue_usage(_usage)
             return response
         except Exception as e:
             logger.error(f"[{self.name}] Synthesis failed: {e}")
@@ -2163,11 +2203,12 @@ Example:
         if not self.llm:
             return f"[No LLM available: {task}]"
         try:
-            response, _ = await self.llm.complete(
+            response, _usage = await self.llm.complete(
                 messages=[{"role": "user", "content": task}],
                 system="You are a helpful assistant.",
                 max_tokens=2048,
             )
+            self._accrue_usage(_usage)
             return response
         except Exception as e:
             return f"[LLM error: {e}]"

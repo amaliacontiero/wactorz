@@ -1369,11 +1369,14 @@ class MainActor(LLMAgent):
         logger.info(f"[{self.name}] Facts extraction running on: {user_message[:80]!r}")
         exchange = f"USER: {user_message[:600]}\nASSISTANT: {assistant_response[:600]}"
         try:
-            raw, _ = await self.llm.complete(
+            raw, _usage = await self.llm.complete(
                 messages=[{"role": "user", "content": exchange}],
                 system=self._FACTS_EXTRACT_PROMPT,
                 max_tokens=300,
             )
+            self.total_input_tokens  += _usage.get("input_tokens", 0)
+            self.total_output_tokens += _usage.get("output_tokens", 0)
+            self.total_cost_usd      += _usage.get("cost_usd", 0.0)
             import json as _json
             clean = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
             if not clean:
@@ -1573,7 +1576,7 @@ class MainActor(LLMAgent):
         if self.llm is None:
             return "OTHER"
         try:
-            decision, _ = await asyncio.wait_for(
+            decision, _usage = await asyncio.wait_for(
                 self.llm.complete(
                     messages=[{"role": "user", "content": text}],
                     system=self.INTENT_CLASSIFIER_PROMPT,
@@ -1582,6 +1585,9 @@ class MainActor(LLMAgent):
                 ),
                 timeout=60.0,
             )
+            self.total_input_tokens  += _usage.get("input_tokens", 0)
+            self.total_output_tokens += _usage.get("output_tokens", 0)
+            self.total_cost_usd      += _usage.get("cost_usd", 0.0)
             token = (decision or "").strip().upper().split()[0] if decision else "OTHER"
             if token in ("HA", "PIPELINE", "OTHER", "ACTUATE"):
                 return token
