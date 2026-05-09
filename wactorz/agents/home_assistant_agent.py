@@ -10,6 +10,7 @@ Handles all HA operations in a single agent:
   - list_areas            : enumerate Home Assistant areas
   - list_devices          : enumerate Home Assistant devices
   - list_entities         : enumerate Home Assistant entities
+  - get_entities_state    : fetch current states for explicit entity IDs
 
 
 Intent is classified with a cheap single-word LLM call, then the
@@ -33,11 +34,12 @@ from ..core.actor import Message, MessageType
 from ..core.integrations.home_assistant.ha_helper import (
     create_automation_via_rest,
     delete_automation,
-    fetch_devices_entities_with_location,
     get_areas,
     get_automations,
     get_devices,
     get_entities,
+    get_states,
+    get_simplified_ha_data,
     update_automation,
 )
 from .llm_agent import LLMAgent, LLMProvider
@@ -59,6 +61,7 @@ list_automations
 list_areas
 list_devices
 list_entities
+other
 unknown
 
 Guidelines:
@@ -66,16 +69,40 @@ Guidelines:
 - create_automation   → user wants to create/add/build/make a new automation, even if they also mention choosing between existing sensors, lights, or devices
 - delete_automation   → user wants to delete/remove/disable an existing automation
 - edit_automation     → user wants to update/change/rename/modify an existing automation
-- list_automations    → user wants to see/list/show existing automations
-- list_areas          → user wants to see/list/show areas
-- list_devices        → user wants to see/list/show devices
-- list_entities       → user wants to see/list/show entities
-- unknown             → request is unclear or not one of the supported Home Assistant operations
+- list_automations    → user explicitly asks to list/show/enumerate existing automations
+- list_areas          → user explicitly asks to list/show/enumerate areas
+- list_devices        → user explicitly asks to list/show/enumerate devices as an inventory
+- list_entities       → user explicitly asks to list/show/enumerate entities or entity IDs as an inventory
+- other               → Home Assistant related, but not one of the supported operations above
+- unknown             → request is unclear or not Home Assistant related
 
 Decision rule:
 - If the user asks you to create/build/add/set up an automation, classify as create_automation.
 - Use recommend_hardware only when the user is asking about hardware feasibility or hardware choices and is not asking you to actually create the automation.
+- Use other for Home Assistant status/context questions that need current HA data.
+- Use other for existence, count, lookup, or state questions about specific HA devices, sensors, entities, rooms, or device types.
+- "Do I have any thermometers?" is other, not list_devices.
+- "What is the state of my thermometer?" is other, not list_entities.
+- Use unknown for non-Home-Assistant requests.
 """
+
+HA_OTHER_PROMPT = """You answer Home Assistant questions using tool data.
+
+You may call get_simplified_ha_data when you need current Home Assistant floors, areas, devices, entities, or states.
+Answer the user's request directly and concisely.
+Do not invent Home Assistant entities, states, rooms, devices, or automations.
+If the available data cannot answer the request, say what is missing.
+"""
+
+HA_OTHER_TOOL = {
+    "name": "get_simplified_ha_data",
+    "description": "Fetch compact Home Assistant floors, areas, devices, entities, and current entity states.",
+    "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+}
 
 HARDWARE_SELECTION_PROMPT = """You are a Home Assistant hardware selection specialist.
 
@@ -153,25 +180,105 @@ Task:
 
 Input:
 - user_request: natural language request
-- device_discovery: Home Assistant connection and discovered devices
+- device_discovery: Home Assistant connection and discovered devices/entities
+- device_discovery.connected: boolean
+- device_discovery.floors: list of objects with this schema:
+    {
+        "floor_id": string,
+        "name": string
+    }
+- device_discovery.areas: list of objects with this schema:
+    {
+        "area_id": string,
+        "name": string
+    }
 - device_discovery.devices: list of objects with this schema:
     {
-        "device_id": string,
+        "id": string,
         "name": string,
-        "manufacturer": string,
-        "model": string,
-        "area": string,
-        "entities": [
-            {
-                "entity_id": string,
-                "unique_id": string,
-                "platform": string,
-                "area": string,
-                "original_name": string,
-                "name": string
-            }
-        ]
+        "area_id": string | null,
+        "manufacturer": string | null,
+        "model": string | null,
+        "disabled_by": string | null
     }
+- device_discovery.entities: list of objects with this schema:
+    {
+        "entity_id": string,
+        "domain": string,
+        "name": string | null,
+        "area_id": string | null,
+        "device_id": string | null,
+        "platform": string | null,
+        "state": string | null,
+
+        "disabled_by": string | null,
+        "entity_category": string | null,
+        "device_class": string | null,
+        "state_class": string | null,
+        "unit_of_measurement": string | null,
+
+        "supported_features": number | null,
+        "supported_color_modes": [string] | null,
+
+        "brightness": number | null,
+        "color_mode": string | null,
+        "color_temp_kelvin": number | null,
+        "min_color_temp_kelvin": number | null,
+        "max_color_temp_kelvin": number | null,
+        "hs_color": [number] | null,
+        "rgb_color": [number] | null,
+        "rgbw_color": [number] | null,
+        "xy_color": [number] | null,
+        "effect": string | null,
+        "effect_list": [string] | null,
+
+        "options": [string] | null,
+        "min": number | null,
+        "max": number | null,
+        "step": number | null,
+        "mode": string | null,
+
+        "auto_update": boolean | null,
+        "display_precision": number | null,
+        "installed_version": string | null,
+        "latest_version": string | null,
+        "in_progress": boolean | null,
+        "release_url": string | null,
+
+        "event_types": [string] | null,
+        "event_type": string | null,
+
+        "temperature": number | null,
+        "temperature_unit": string | null,
+        "humidity": number | null,
+        "cloud_coverage": number | null,
+        "uv_index": number | null,
+        "pressure": number | null,
+        "pressure_unit": string | null,
+        "wind_bearing": number | null,
+        "wind_speed": number | null,
+        "wind_speed_unit": string | null,
+        "visibility_unit": string | null,
+        "precipitation_unit": string | null,
+        "dew_point": number | null,
+
+        "battery_level": number | null,
+        "battery_voltage": number | null,
+        "battery_size": string | null,
+        "battery_quantity": number | null
+    }
+
+Schema rules:
+- The payload may omit keys whose value would be JSON null.
+- If an expected optional key is missing, treat it as null/unknown, not false, empty, unavailable, or unsupported.
+- Use entities as the primary automation-capability source.
+- Use devices only as supporting metadata for manufacturer, model, and physical device identity.
+- Match room-based requests using entity.area_id first.
+- If entity.area_id is missing, you may use the matching device.area_id via entity.device_id.
+- Ignore entities and devices with disabled_by set unless the user explicitly asks about disabled or unavailable items.
+- protocol should usually come from entity.platform or the matching device manufacturer/model when platform is not enough.
+- required_domains should be derived from the domains of the required_entities.
+
 
 Rules:
 - If device_discovery.connected is false, return can_fulfill=false with empty primary_hardware and empty alternatives.
@@ -190,11 +297,23 @@ Rules:
 - If the request cannot be fully satisfied with current hardware, set can_fulfill=false and explain the gap using only the discovered hardware context.
 - Keep the explanation concise and concrete.
 
+Capability guidance:
+- Color-capable lights must have domain="light" and supported_color_modes containing a color mode such as "rgb", "rgbw", "rgbww", "hs", or "xy".
+- Brightness-capable lights should have domain="light" and either brightness present, supported_features indicating brightness support, or a supported_color_modes value that implies dimming.
+- Color temperature-capable lights must have supported_color_modes containing "color_temp" or color temperature fields such as min_color_temp_kelvin/max_color_temp_kelvin.
+- Motion or occupancy triggers should use binary_sensor entities with device_class="motion" or device_class="occupancy".
+- Door/window/contact triggers should use binary_sensor entities with device_class="opening", "door", "window", or similar.
+- Temperature conditions or triggers should use sensor entities with device_class="temperature".
+- Humidity conditions or triggers should use sensor entities with device_class="humidity".
+- Power/energy conditions or triggers should use sensor entities with device_class="power", "energy", "current", or "voltage" as appropriate.
+- Firmware update availability should use update entities, preferably with device_class="firmware". A state of "on" usually means an update is available; "off" usually means no update is available; "unknown" means the availability is unknown.
+
+
 Validation before final answer:
 1) If can_fulfill=true then len(primary_hardware) >= 1.
 2) Every primary_hardware item must include hardware, why, protocol, required_domains, and required_entities.
 3) Every alternatives item must include hardware, why, protocol, required_domains, required_entities, and alternative_to.
-4) Every required_entities value must be an entity_id present in device_discovery.devices.
+4) Every required_entities value must be an entity_id present in device_discovery.entities.
 5) Every alternative_to value must exactly match one entity_id from primary_hardware.required_entities.
 6) If connected=false, both primary_hardware and alternatives must be empty.
 7) Do not include the same entity_id in both primary_hardware and alternatives.
@@ -360,6 +479,7 @@ class HomeAssistantAgent(LLMAgent):
         self._device_cache_ttl = 30.0
         self._automation_cache: dict[str, Any] = {"timestamp": 0.0, "data": None}
         self._automation_cache_ttl = 30.0
+        self._other_tool_max_rounds = 3
 
     # ── Cost tracking helper ─────────────────────────────────────────────────
 
@@ -435,6 +555,9 @@ class HomeAssistantAgent(LLMAgent):
         if action == "list_entities":
             return await self._list_entities()
 
+        if action == "get_entities_state":
+            return await self._handle_entities_state_request(text)
+
         if action == "list_automations":
             automations = await self._get_automations_brief()
             return self._list_automations(automations)
@@ -466,6 +589,9 @@ class HomeAssistantAgent(LLMAgent):
             # return await self._create_automation(text, entities, hardware_result.get("hardware", []))
             return await self._recommend_hardware(text, devices)
 
+        if action == "other":
+            return await self._handle_other_request(text)
+
         return self._unsupported_action_response(text)
 
     # ── Intent classification ────────────────────────────────────────────────
@@ -481,12 +607,17 @@ class HomeAssistantAgent(LLMAgent):
             "list_areas",
             "list_devices",
             "list_entities",
+            "other",
             "unknown",
         }
 
+        heuristic = self._classify_action_heuristic(text)
+        if heuristic == "get_entities_state":
+            return heuristic
+
         if self.llm is None:
             logger.warning("[%s] No LLM provider configured; skipping action classification LLM call.", self.name)
-            return self._classify_action_heuristic(text)
+            return heuristic
 
         try:
             response, usage = await self.llm.complete(
@@ -501,7 +632,7 @@ class HomeAssistantAgent(LLMAgent):
         except Exception as exc:
             logger.warning("[%s] Action classification LLM call failed: %s", self.name, exc)
 
-        return self._classify_action_heuristic(text)
+        return heuristic
 
     @staticmethod
     def _classify_action_heuristic(text: str) -> str:
@@ -512,7 +643,9 @@ class HomeAssistantAgent(LLMAgent):
             return "list_devices"
         if any(w in lower for w in ("list entities", "show entities", "show me entities", "what entities")):
             return "list_entities"
-        if any(w in lower for w in ("list", "show me", "show all", "what automations", "what are my automations")):
+        if "get_entities_state" in lower:
+            return "get_entities_state"
+        if any(w in lower for w in ("list automations", "show automations", "show all automations", "what automations", "what are my automations")):
             return "list_automations"
         if any(w in lower for w in ("delete", "remove automation", "disable automation")):
             return "delete_automation"
@@ -527,7 +660,26 @@ class HomeAssistantAgent(LLMAgent):
             return "recommend_hardware"
         if any(w in lower for w in ("create", "add automation", "new automation", "build automation", "make automation")):
             return "create_automation"
+        ha_context_terms = (
+            "home assistant", "hass", "entity", "entities", "device", "devices",
+            "sensor", "sensors", "light", "lights", "switch", "thermostat",
+            "thermometer", "thermometers", "temperature", "humidity", "garage", "kitchen", "bedroom",
+            "living room", "hallway", "bathroom", "room", "rooms",
+        )
+        if re.search(r"\bha\b", lower) or any(term in lower for term in ha_context_terms):
+            return "other"
         return "unknown"
+
+    @staticmethod
+    def _extract_entity_ids(text: str) -> list[str]:
+        seen: set[str] = set()
+        entity_ids: list[str] = []
+        for match in re.finditer(r"\b[a-z_][a-z0-9_]*\.[a-z0-9_]+\b", text.lower()):
+            entity_id = match.group(0)
+            if entity_id not in seen:
+                seen.add(entity_id)
+                entity_ids.append(entity_id)
+        return entity_ids
 
     @staticmethod
     def _unsupported_action_response(text: str) -> dict[str, Any]:
@@ -537,6 +689,136 @@ class HomeAssistantAgent(LLMAgent):
                 "I can help with Home Assistant hardware recommendations and automations: "
                 "create, edit, delete, list automations, list areas, list devices, and list entities."
             ),
+        }
+
+    async def _handle_entities_state_request(self, text: str) -> dict[str, Any]:
+        entity_ids = self._extract_entity_ids(text)
+        if not entity_ids:
+            return {
+                "task": text,
+                "result": "Please include one or more explicit Home Assistant entity IDs, like sensor.kitchen_temperature.",
+                "error": "explicit_entity_id_required",
+            }
+        if not self.ha_url or not self.ha_token:
+            return {
+                "task": text,
+                "result": "HA_URL or HA_TOKEN not configured.",
+                "error": "HA_URL or HA_TOKEN not configured.",
+            }
+
+        try:
+            states = await get_states(self.ha_url, self.ha_token)
+        except Exception as exc:
+            return {"task": text, "result": f"Home Assistant state query failed: {exc}", "error": str(exc)}
+
+        states_by_id = {s.get("entity_id"): s for s in states or [] if isinstance(s, dict)}
+        found = {eid: states_by_id[eid] for eid in entity_ids if eid in states_by_id}
+        missing = [eid for eid in entity_ids if eid not in found]
+
+        for entity_id, state_obj in found.items():
+            # Publish using the original topic format (entity_id as topic) so
+            # existing tests and subscribers are not broken, but include the
+            # full state object and entity_id in the payload so that dynamic
+            # agents filtering on payload.get('entity_id') work correctly.
+            # homeassistant/state_changes/# wildcards match this topic since
+            # entity_id is a subtopic path (e.g. sensor.living_room_temp).
+            await self._mqtt_publish(
+                f"homeassistant/state_changes/{entity_id}",
+                {
+                    "event_type": "state_changed",
+                    "entity_id": entity_id,
+                    "new_state": state_obj,
+                    "old_state": None,
+                },
+            )
+
+        parts = [f"{entity_id}: {state.get('state', 'unknown')}" for entity_id, state in found.items()]
+        if missing:
+            parts.append("Missing: " + ", ".join(missing))
+
+        return {
+            "task": text,
+            "result": "; ".join(parts) if parts else "No requested entity states were found.",
+            "data": {"states": found, "missing": missing},
+        }
+
+    async def _handle_other_request(self, text: str) -> dict[str, Any]:
+        if not self.ha_url or not self.ha_token:
+            return {
+                "task": text,
+                "result": "HA_URL or HA_TOKEN not configured.",
+                "error": "HA_URL or HA_TOKEN not configured.",
+            }
+        if self.llm is None:
+            return {
+                "task": text,
+                "result": "No LLM provider configured.",
+                "error": "No LLM provider configured.",
+            }
+
+        messages: list[dict[str, Any]] = [{"role": "user", "content": text}]
+        tool_cache: dict[str, str] = {}
+        tools = [HA_OTHER_TOOL]
+
+        for _round in range(self._other_tool_max_rounds):
+            try:
+                completion = await self.llm.complete_with_tools(
+                    messages=messages,
+                    tools=tools,
+                    system=HA_OTHER_PROMPT,
+                    max_tokens=1200,
+                )
+            except Exception as exc:
+                logger.warning("[%s] Other HA tool loop failed: %s", self.name, exc)
+                return {
+                    "task": text,
+                    "result": f"Home Assistant tool request failed: {exc}",
+                    "error": str(exc),
+                }
+
+            self._accumulate_usage(getattr(completion, "usage", {}))
+            tool_calls = list(getattr(completion, "tool_calls", []) or [])
+            if not tool_calls:
+                content = str(getattr(completion, "content", "") or "").strip()
+                return {"task": text, "result": content or "I could not answer that Home Assistant request."}
+
+            assistant_message = getattr(completion, "assistant_message", None)
+            if assistant_message:
+                messages.append(assistant_message)
+
+            for call in tool_calls:
+                tool_name = getattr(call, "name", "")
+                tool_call_id = getattr(call, "id", "") or tool_name
+                if tool_name != "get_simplified_ha_data":
+                    result_text = f"Unsupported tool: {tool_name}"
+                    is_error = True
+                else:
+                    is_error = False
+                    if tool_name not in tool_cache:
+                        try:
+                            data = await get_simplified_ha_data(self.ha_url, self.ha_token)
+                            tool_cache[tool_name] = json.dumps(data, default=str)
+                        except Exception as exc:
+                            tool_cache[tool_name] = f"Home Assistant data fetch failed: {exc}"
+                            is_error = True
+                    result_text = tool_cache[tool_name]
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "name": tool_name,
+                        "content": result_text,
+                        "is_error": is_error,
+                    }
+                )
+
+        return {
+            "task": text,
+            "result": (
+                "I could not complete that Home Assistant request within "
+                f"{self._other_tool_max_rounds} tool rounds."
+            ),
+            "error": "tool_round_limit",
         }
 
     # ── Device discovery ─────────────────────────────────────────────────────
@@ -550,7 +832,6 @@ class HomeAssistantAgent(LLMAgent):
         if not self.ha_url or not self.ha_token:
             data: dict[str, Any] = {
                 "connected": False,
-                "domains": set(),
                 "devices": [],
                 "reason": "HOME_ASSISTANT_URL or HOME_ASSISTANT_TOKEN is not configured",
             }
@@ -558,22 +839,15 @@ class HomeAssistantAgent(LLMAgent):
             return data
 
         try:
-            devices = await fetch_devices_entities_with_location(self.ha_url, self.ha_token, include_states=True)
-            if not isinstance(devices, list):
+            devices = await get_simplified_ha_data(self.ha_url, self.ha_token)
+            if not isinstance(devices, dict):
                 devices = []
-            domains: set[str] = set()
-            for device in devices:
-                for entity in device.get("entities", []) or []:
-                    eid = str(entity.get("entity_id", ""))
-                    if "." in eid:
-                        domains.add(eid.split(".", 1)[0])
-            data = {"connected": True, "domains": domains, "devices": devices, "reason": ""}
+            data = {"connected": True, "devices": devices, "reason": ""}
             self._device_cache = {"timestamp": now, "data": data}
             return data
         except Exception as exc:
             data = {
                 "connected": False,
-                "domains": set(),
                 "devices": [],
                 "reason": f"Could not query Home Assistant devices: {exc}",
             }
@@ -705,8 +979,10 @@ class HomeAssistantAgent(LLMAgent):
             "device_discovery": {
                 "connected": connected,
                 "reason": devices.get("reason", ""),
-                "domains": sorted(list(devices.get("domains", set()) or set())),
-                "devices": devices.get("devices", []) or [],
+                "devices": devices.get("devices", {}).get("devices", []) or [],
+                "entities": devices.get("devices", {}).get("entities", []) or [],
+                "floors": devices.get("devices", {}).get("floors", []) or [],
+                "areas": devices.get("devices", {}).get("areas", []) or [],
             },
         }
         user_msg = {"role": "user", "content": json.dumps(payload)}
@@ -1282,6 +1558,13 @@ class HomeAssistantAgent(LLMAgent):
 
     @staticmethod
     def _strip_fences(text: str) -> str:
+        """Remove markdown code fences from an LLM response.
+
+        LLMs often wrap JSON output in triple-backtick fences (e.g. ```json ... ```).
+        This strips the opening fence and optional language tag as well as the closing
+        fence, returning only the inner content. If no fences are present the text is
+        returned unchanged (after stripping surrounding whitespace).
+        """
         cleaned = (text or "").strip()
         if cleaned.startswith("```"):
             cleaned = re.sub(r"^```[a-zA-Z]*", "", cleaned).strip()
@@ -1304,16 +1587,20 @@ class HomeAssistantAgent(LLMAgent):
 
     @staticmethod
     def _available_entity_ids(devices: dict[str, Any]) -> set[str]:
+        """Extract the flat set of all entity IDs from a device-discovery result.
+
+        Walks ``devices["devices"]["entities"]`` and collects every non-empty
+        ``entity_id`` string. The resulting set is used as the ground-truth
+        allowlist when normalizing LLM hardware recommendations, so that any
+        entity ID the LLM invented but that is not present here gets discarded.
+        """
         available: set[str] = set()
-        for device in devices.get("devices", []) or []:
-            if not isinstance(device, dict):
+        for entity in devices.get("devices", {}).get("entities", []) or []:
+            if not isinstance(entity, dict):
                 continue
-            for entity in device.get("entities", []) or []:
-                if not isinstance(entity, dict):
-                    continue
-                entity_id = str(entity.get("entity_id", "")).strip()
-                if entity_id:
-                    available.add(entity_id)
+            entity_id = str(entity.get("entity_id", "")).strip()
+            if entity_id:
+                available.add(entity_id)
         return available
 
     @staticmethod
@@ -1321,6 +1608,20 @@ class HomeAssistantAgent(LLMAgent):
         items: list[dict[str, Any]],
         available_entities: set[str],
     ) -> list[dict[str, Any]]:
+        """Validate and sanitize raw LLM hardware items against discovered HA entities.
+
+        For each item returned by the LLM:
+        - Keeps only ``required_entities`` that exist in ``available_entities``,
+          discarding hallucinated entity IDs.
+        - Drops the item entirely if no valid entities remain after filtering.
+        - Derives ``required_domains`` from entity ID prefixes when the LLM omitted them.
+        - Drops items that still lack a hardware name or resolvable domain.
+        - Deduplicates by ``(hardware_name, entity_ids)`` to prevent repeated entries.
+        - Normalises the output shape to a consistent set of fields.
+
+        The result is a clean, grounded list where every recommendation is backed
+        by real, currently-discovered Home Assistant entities.
+        """
         normalized: list[dict[str, Any]] = []
         seen: set[tuple[str, tuple[str, ...]]] = set()
 
@@ -1381,6 +1682,20 @@ class HomeAssistantAgent(LLMAgent):
         primary_hardware: list[dict[str, Any]],
         alternatives: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
+        """Remove alternatives that are not genuine substitutes for primary hardware.
+
+        An alternative survives only if all four conditions hold:
+        - It has at least one ``required_entity``.
+        - Its ``alternative_to`` field is non-empty and matches an entity ID that
+          appears in ``primary_hardware`` — linking it to a specific primary item.
+        - None of its own ``required_entities`` overlap with the primary entity set,
+          preventing the LLM from re-listing a primary item as its own alternative.
+        - Its ``(hardware_name, entity_ids)`` identity has not been seen before,
+          removing duplicates.
+
+        The result is a deduplicated list of alternatives that each offer a distinct,
+        non-overlapping swap for one of the recommended primary hardware items.
+        """
         primary_entities = {
             str(entity_id).strip()
             for item in primary_hardware
