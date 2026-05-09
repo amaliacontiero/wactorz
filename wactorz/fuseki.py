@@ -1293,6 +1293,12 @@ async def _main() -> None:
 
 def _cli_main() -> None:
     """Sync entry point for the ``wactorz-fuseki`` console script."""
+    import sys
+    if sys.platform == "win32":
+        # Python 3.10 on Windows defaults to ProactorEventLoop which does not
+        # support add_reader / add_writer.  aiohttp and aiomqtt both rely on
+        # these, so switch to SelectorEventLoop before starting the event loop.
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(_main())
 
 
