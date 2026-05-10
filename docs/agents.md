@@ -72,6 +72,8 @@ Every DynamicAgent spawned during the session is saved to the `_spawned_agents` 
 
 Spawned by MainActor for every `PIPELINE`-classified request. The planner queries `home-assistant-agent` for the full list of real entity IDs, samples live topic schemas from the TopicBus, then asks the LLM to produce a multi-agent plan as a JSON array. Each step is either a `dynamic` agent (Python code string) or an `ha_actuator` agent (declarative HA service call). The planner spawns all agents, registers the pipeline rule with main, and exits.
 
+After spawning, the planner fires a background `_bootstrap_ha_entity_states()` task that extracts HA entity IDs from the plan (generated code, `ha_actuator` actions, MQTT topics, and the enriched task string) and sends a `get_entities_state` request to `home-assistant-agent`. This re-publishes the current HA state over MQTT so freshly-spawned agents that subscribe to `homeassistant/state_changes/#` fire immediately — without waiting for the next real HA state change.
+
 #### Supported patterns
 
 | Pattern | Trigger | Action | Agents spawned |
@@ -179,10 +181,15 @@ Wraps the Home Assistant REST API. Uses multiple internal LLM calls to classify 
 | Action | Description |
 |--------|-------------|
 | `list_entities` | Fetch all entities (used by Planner and OneOffActuator) |
-| `call_service` | Turn on/off lights, switches, climate, covers, scripts… |
-| `create_automation` | Generate and POST a YAML automation via HA API |
-| `delete_entity` | Remove an entity or automation |
-| `get_state` | Read current state of one or more entities |
+| `list_automations` | List all automations |
+| `list_areas` | List all areas |
+| `list_devices` | List all devices |
+| `recommend_hardware` | Hardware recommendations using compact `get_simplified_ha_data` snapshot |
+| `create_automation` | Generate and POST a YAML automation via HA REST API |
+| `edit_automation` | Identify and update an existing automation |
+| `delete_automation` | Remove an automation |
+| `get_entities_state` | Fetch current state for explicit entity IDs and re-publish to MQTT — used by PlannerAgent bootstrap |
+| `other` | Answer open-ended HA questions via a short LLM tool-call loop backed by `get_simplified_ha_data` |
 
 #### Configuration
 

@@ -250,7 +250,8 @@ When MainActor classifies a message as `PIPELINE` it spawns a short-lived **Plan
 3. Calls the LLM once to produce a JSON plan — an array of agent specs, each with `name`, `type`, `code` (for dynamic agents) or `actions` (for ha_actuator agents)
 4. Spawns each agent from the plan via `DynamicAgent`
 5. Sends a `save_pipeline_rule` message to MainActor with the list of agent names
-6. Exits — the spawned agents run indefinitely from this point
+6. Fires a background `_bootstrap_ha_entity_states()` task — extracts HA entity IDs from the plan and asks `home-assistant-agent` to re-publish their current state to `homeassistant/state_changes/{entity_id}` over MQTT. This lets freshly-spawned agents evaluate the current state immediately, rather than waiting for the next real HA state change to arrive.
+7. Exits — the spawned agents run indefinitely from this point
 
 > **⚠ Planner hallucination** — If the planner's response looks like a tool call (e.g. `<tool_call>agent.send_to...</tool_call>`) with an instant perfect response, it is the LLM hallucinating — not a real agent interaction. Real pipeline creation takes 5–15 seconds and produces log lines showing agents being compiled and registered.
 
