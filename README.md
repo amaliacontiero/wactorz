@@ -76,7 +76,7 @@ Every user message goes through a single cheap LLM call that classifies it into 
 | Intent | Description | Route |
 |--------|-------------|-------|
 | `ACTUATE` | Immediate one-shot Home Assistant device control — turn on/off lights, set temperature, lock/unlock, open/close covers | → ephemeral `OneOffActuatorAgent` |
-| `HA` | Home Assistant management and automation CRUD — list devices/entities/areas, create/edit/delete automations | → `home-assistant-agent` |
+| `HA` | Home Assistant management and automation CRUD — list devices/entities/areas, create/edit/delete automations, answer open-ended HA questions | → `home-assistant-agent` |
 | `PIPELINE` | Reactive rule — "if X then Y", "when X send me a message", any event-driven logic | → `PlannerAgent` |
 | `OTHER` | General conversation, coding, questions, everything else | → `main` LLM |
 
@@ -194,6 +194,7 @@ Spawned on-demand for two distinct modes:
 3. LLM designs the agent wiring using canonical patterns (see Section 9)
 4. Spawn `ha_actuator` agents (for HA service calls) and `dynamic` agents (for filtering, webcam, notifications)
 5. Register each rule in main's pipeline registry for persistence and listing
+6. Bootstrap HA state — re-publishes current state for all referenced entities over MQTT so freshly-spawned agents fire immediately instead of waiting for the next real HA state change
 
 **Trigger the planner explicitly or automatically:**
 
@@ -432,6 +433,7 @@ The `PlannerAgent` handles pipeline requests:
 3. **Agent design** — LLM selects the correct wiring pattern and generates spawn configs with real entity IDs
 4. **Spawning** — agents are created and registered in the spawn registry (auto-restore on restart)
 5. **Rule registration** — the rule is saved in main's pipeline registry with its agent list
+6. **State bootstrap** — re-publishes current HA state for all referenced entities over MQTT so agents that subscribe to `homeassistant/state_changes/#` fire immediately without waiting for the next real HA event
 
 ### Wiring Patterns
 
@@ -666,7 +668,7 @@ This is a best-effort blocklist, not a sandbox. For true isolation in multi-tena
 
 Every LLM call across every agent accumulates token usage into three counters: `total_input_tokens`, `total_output_tokens`, and `total_cost_usd`. These are visible per-agent in the dashboard and via `/cost` in the CLI.
 
-Cost is tracked for all five providers (Anthropic, OpenAI, Ollama free, NIM free/paid, Google Gemini). The `HomeAssistantAgent` tracks costs across all 7 of its internal LLM calls: classification, hardware selection, correction retry, automation generation, delete confirmation, edit identification, and edit generation.
+Cost is tracked for all five providers (Anthropic, OpenAI, Ollama free, NIM free/paid, Google Gemini). The `HomeAssistantAgent` tracks costs across all of its internal LLM calls: classification, hardware selection, correction retry, automation generation, delete confirmation, edit identification, edit generation, and the `other`-action tool-call loop (up to 3 rounds).
 
 ### Google Gemini Pricing (per 1M tokens, standard context ≤200K)
 
