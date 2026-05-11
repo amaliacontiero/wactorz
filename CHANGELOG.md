@@ -22,6 +22,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Version
 - **`HomeAssistantAgent` — `list_*` classification tightened** — The `list_automations`, `list_areas`, `list_devices`, and `list_entities` actions now only fire on explicit inventory requests ("list all automations"). Existence, count, lookup, and state questions ("do I have a thermostat?", "what is the state of X?") are correctly routed to the new `other` action.
 - **`HomeAssistantAgent` — MQTT state-change payload** — `get_entities_state` now publishes the canonical state-change payload (`event_type`, `entity_id`, `new_state`, `old_state`) to `homeassistant/state_changes/{entity_id}`, matching the format emitted by `HomeAssistantStateBridgeAgent` on real HA state changes.
 
+### Fixed
+
+- **LLM cost persistence** — Five places where token usage was accumulated in memory but never written to SQLite, causing cost data to be lost on restart or crash: `LLMAgent._handle_task` silently discarded all usage from TASK-type messages; `LLMAgent._maybe_summarize` did not persist summarization tokens; `HomeAssistantAgent` never persisted lifetime spend (entirely lost on restart); `MainActor._classify_intent` dropped tokens for PIPELINE/ACTUATE/HA routes where no `chat()` follows; `MainActor._extract_durable_facts` left facts-extraction tokens unpersisted until the next turn.
+
 ### Tests
 
 - Added `tests/test_home_assistant_agent.py` — covers `other` tool-call loop, `get_entities_state` action, MQTT publish payloads, and bootstrap entity ID extraction.
