@@ -490,6 +490,7 @@ class HomeAssistantAgent(LLMAgent):
         self.total_input_tokens  += usage.get("input_tokens", 0)
         self.total_output_tokens += usage.get("output_tokens", 0)
         self.total_cost_usd      += usage.get("cost_usd", 0.0)
+        self._persist_cost()
 
     # ── Public entry points ──────────────────────────────────────────────────
 

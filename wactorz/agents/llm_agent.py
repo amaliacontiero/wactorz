@@ -1000,6 +1000,7 @@ class LLMAgent(Actor):
             self.total_input_tokens  += usage.get("input_tokens", 0)
             self.total_output_tokens += usage.get("output_tokens", 0)
             self.total_cost_usd      += usage.get("cost_usd", 0.0)
+            self._persist_cost()
             self._history_summary = summary.strip()
             self._conversation_history = to_keep
             self.persist("history_summary", self._history_summary)
@@ -1058,7 +1059,7 @@ class LLMAgent(Actor):
                 for m in self._conversation_history[-self.max_history:]
                 if isinstance(m, dict) and m.get("role") in ("user", "assistant")
             ]
-            response, _usage = await self.llm.complete(
+            response, usage = await self.llm.complete(
                 messages=safe_history,
                 system=self.system_prompt,
             )
@@ -1067,8 +1068,13 @@ class LLMAgent(Actor):
             self.metrics.tasks_completed += 1
             duration = time.time() - start
 
+            self.total_input_tokens  += usage.get("input_tokens", 0)
+            self.total_output_tokens += usage.get("output_tokens", 0)
+            self.total_cost_usd      += usage.get("cost_usd", 0.0)
+
             # Persist after each exchange
             self.persist("conversation_history", self._conversation_history)
+            self._persist_cost()
 
             # Publish completion
             await self._mqtt_publish(
