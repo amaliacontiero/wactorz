@@ -49,10 +49,7 @@ _FALLBACK_PRICING: dict[str, tuple[float, float]] = {
     "gpt-4-turbo":            (10.00, 30.00),
     # Ollama — local, no cost
     "ollama":                 ( 0.00,  0.00),
-    # NVIDIA NIM — free tier: 1000 req/month per model
-    "nvidia/llama-3.1-nemotron-70b": ( 0.35,  0.40),
-    "meta/llama-3.1-405b":           ( 3.45,  3.45),
-    "mistralai/mistral-large":       ( 2.00,  6.00),
+    # NVIDIA NIM — free tier covers most usage; paid tier pricing varies by model
     "nim/":                          ( 0.00,  0.00),
     # Google Gemini
     "gemini-2.5-flash-lite":         ( 0.10,  0.40),
