@@ -21,7 +21,7 @@ Wactorz supports two deployment modes:
 ```bash
 git clone https://github.com/waldiez/wactorz
 cd wactorz
-cp .env.example .env
+cp .env.template .env
 nano .env           # set LLM_API_KEY at minimum
 docker compose up -d
 ```
@@ -178,7 +178,7 @@ See `.env.example` for the full annotated list.  The most important ones:
 |---|---|---|
 | `LLM_PROVIDER` | `anthropic` | `anthropic` / `openai` / `ollama` |
 | `LLM_MODEL` | `claude-sonnet-4-6` | Any model ID |
-| `LLM_API_KEY` | _(required)_ | API key |
+| `LLM_API_KEY` | _(required for cloud providers)_ | API key — not needed for Ollama or NIM free tier |
 | `MQTT_HOST` | `localhost` | Use `mosquitto` inside Docker |
 | `MQTT_PORT` | `1883` | |
 | `API_ADDR` | `0.0.0.0:8080` | REST listen address |
@@ -235,7 +235,7 @@ rest_command:
     payload: '{"to":"main-actor","content":"{{ message }}"}'
 ```
 
-Set `HOMEASSISTANT_URL` and `HOMEASSISTANT_TOKEN` in `.env`.
+Set `HA_URL` and `HA_TOKEN` in `.env`.
 
 ---
 
