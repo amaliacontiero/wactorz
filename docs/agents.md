@@ -483,7 +483,9 @@ All providers receive the same `complete(messages, system)` and `stream(messages
 
 #### Cost tracking
 
-All providers track token usage and compute cost in USD per call. Costs are accumulated in `LLMAgent.metrics` and published with every heartbeat. The `PRICING` dict in `llm_agent.py` covers all major model variants — add new entries there to track custom models.
+All providers track token usage and compute cost in USD per call. Costs are accumulated in `LLMAgent.metrics` and published with every heartbeat.
+
+Pricing is resolved dynamically: on startup, `LLMAgent` fetches live per-token rates from the [LiteLLM model catalogue](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) and caches them for 24 hours. If the fetch fails or the model isn't listed, it falls back to the hardcoded `_FALLBACK_PRICING` table in `llm_agent.py`. To debug which source a model is using, call `pricing_info(model_name)` — it returns `source` (`"live"` or `"fallback"`), rates, and cache age.
 
 ---
 
