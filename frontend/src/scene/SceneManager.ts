@@ -217,6 +217,10 @@ export class SceneManager {
     if (this.cardDashboard) this.cardDashboard.setTotalMessages(count);
   }
 
+  updateRemoteNode(name: string, agents: string[]): void {
+    this.cardDashboard?.updateRemoteNode(name, agents);
+  }
+
   reconcileAgents(liveAgents: AgentInfo[]): void {
     const liveIds = new Set(liveAgents.map((agent) => agent.id));
     for (const id of this.agents.keys()) {

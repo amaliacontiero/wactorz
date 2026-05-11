@@ -525,6 +525,7 @@ mqtt.on("completed", (payload) => {
 });
 
 mqtt.on("node-heartbeat", (payload) => {
+  scene.updateRemoteNode(payload.node, payload.agents);
   pushFeed({
     type: "health",
     label: `node online · ${payload.agents.length} agent${payload.agents.length !== 1 ? "s" : ""}`,
