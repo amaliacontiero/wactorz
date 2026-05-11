@@ -178,7 +178,7 @@ See `.env.example` for the full annotated list.  The most important ones:
 |---|---|---|
 | `LLM_PROVIDER` | `anthropic` | `anthropic` / `openai` / `ollama` |
 | `LLM_MODEL` | `claude-sonnet-4-6` | Any model ID |
-| `LLM_API_KEY` | _(required for cloud providers)_ | API key — not needed for Ollama or NIM free tier |
+| `LLM_API_KEY` | _(required for cloud providers)_ | API key — not needed for Ollama only |
 | `MQTT_HOST` | `localhost` | Use `mosquitto` inside Docker |
 | `MQTT_PORT` | `1883` | |
 | `API_ADDR` | `0.0.0.0:8080` | REST listen address |
