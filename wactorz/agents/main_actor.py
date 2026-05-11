@@ -1377,6 +1377,7 @@ class MainActor(LLMAgent):
             self.total_input_tokens  += _usage.get("input_tokens", 0)
             self.total_output_tokens += _usage.get("output_tokens", 0)
             self.total_cost_usd      += _usage.get("cost_usd", 0.0)
+            self._persist_cost()
             import json as _json
             clean = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
             if not clean:
@@ -1588,6 +1589,7 @@ class MainActor(LLMAgent):
             self.total_input_tokens  += _usage.get("input_tokens", 0)
             self.total_output_tokens += _usage.get("output_tokens", 0)
             self.total_cost_usd      += _usage.get("cost_usd", 0.0)
+            self._persist_cost()
             token = (decision or "").strip().upper().split()[0] if decision else "OTHER"
             if token in ("HA", "PIPELINE", "OTHER", "ACTUATE"):
                 return token
