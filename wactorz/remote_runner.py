@@ -61,11 +61,43 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 import time
 import traceback
 import uuid
 from typing import Any, Optional
+
+
+def _bootstrap_deps() -> None:
+    """Install runtime deps using the same interpreter that launched this script."""
+    _needed = []
+    try:
+        import aiomqtt  # noqa: F401
+    except ImportError:
+        _needed.append("aiomqtt")
+    try:
+        import paho.mqtt.client  # noqa: F401
+    except ImportError:
+        _needed.append("paho-mqtt")
+    try:
+        import psutil  # noqa: F401
+    except ImportError:
+        _needed.append("psutil")
+    if not _needed:
+        return
+    cmd = [sys.executable, "-m", "pip", "install", *_needed, "-q"]
+    if sys.platform != "win32":
+        cmd.append("--break-system-packages")
+    print(f"[remote_runner] auto-installing {_needed} via {sys.executable}...", flush=True)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"[remote_runner] pip warning: {result.stderr[:200]}", flush=True)
+    else:
+        print("[remote_runner] deps installed.", flush=True)
+
+
+_bootstrap_deps()
 
 logger = logging.getLogger("remote_runner")
 
