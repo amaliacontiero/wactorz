@@ -1105,10 +1105,20 @@ async def cost_limit_handler(request):
         body = await request.json()
         limit_usd = float(body.get("limit_usd", 0))
         period = body.get("period", "monthly")
-        if period not in ("monthly", "weekly"):
-            return web.json_response({"error": "period must be monthly or weekly"}, status=400)
+        if period not in ("daily", "weekly", "monthly"):
+            return web.json_response({"error": "period must be daily, weekly, or monthly"}, status=400)
         set_cost_limit(limit_usd, period)
         return web.json_response({"ok": True, "limit_usd": limit_usd, "period": period})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=400)
+
+
+async def cost_reset_handler(request):
+    from aiohttp import web
+    from .agents.llm_agent import reset_global_cost
+    try:
+        info = reset_global_cost()
+        return web.json_response({"ok": True, **info})
     except Exception as e:
         return web.json_response({"error": str(e)}, status=400)
 
@@ -1535,6 +1545,8 @@ async def main(exit_on_failure: bool = False):
     app.router.add_get("/cost",                  cost_handler)
     app.router.add_post("/api/cost/limit",       cost_limit_handler)
     app.router.add_post("/cost/limit",           cost_limit_handler)
+    app.router.add_post("/api/cost/reset",       cost_reset_handler)
+    app.router.add_post("/cost/reset",           cost_reset_handler)
     app.router.add_get("/ws",                    ws_handler)
     app.router.add_get("/mqtt",                  mqtt_proxy_handler)
 
