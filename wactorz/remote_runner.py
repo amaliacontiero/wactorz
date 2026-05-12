@@ -57,6 +57,7 @@ Compile errors and setup() fatals are never retried — broken code won't fix it
 
 import argparse
 import asyncio
+import importlib
 import json
 import logging
 import os
@@ -69,35 +70,40 @@ import uuid
 from typing import Any, Optional
 
 
-def _bootstrap_deps() -> None:
-    """Install runtime deps using the same interpreter that launched this script."""
-    _needed = []
-    try:
-        import aiomqtt  # noqa: F401
-    except ImportError:
-        _needed.append("aiomqtt")
-    try:
-        import paho.mqtt.client  # noqa: F401
-    except ImportError:
-        _needed.append("paho-mqtt")
-    try:
-        import psutil  # noqa: F401
-    except ImportError:
-        _needed.append("psutil")
-    if not _needed:
+def _missing_deps() -> list:
+    needed = []
+    for module, pkg in [("aiomqtt", "aiomqtt"), ("paho.mqtt.client", "paho-mqtt"), ("psutil", "psutil")]:
+        try:
+            importlib.import_module(module)
+        except ImportError:
+            needed.append(pkg)
+    return needed
+
+
+async def _bootstrap_deps_async(ready: "asyncio.Event") -> None:
+    """Install missing deps in a thread pool, then signal the event."""
+    import importlib as _il
+    needed = _missing_deps()
+    if not needed:
+        ready.set()
         return
-    cmd = [sys.executable, "-m", "pip", "install", *_needed, "-q"]
-    if sys.platform != "win32":
-        cmd.append("--break-system-packages")
-    print(f"[remote_runner] auto-installing {_needed} via {sys.executable}...", flush=True)
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"[remote_runner] pip warning: {result.stderr[:200]}", flush=True)
+    print(f"[remote_runner] auto-installing {needed} via {sys.executable}...", flush=True)
+
+    def _pip() -> tuple:
+        cmd = [sys.executable, "-m", "pip", "install", *needed, "-q"]
+        if sys.platform != "win32":
+            cmd.append("--break-system-packages")
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        return r.returncode, r.stderr[:300]
+
+    loop = asyncio.get_running_loop()
+    rc, err = await loop.run_in_executor(None, _pip)
+    if rc != 0:
+        print(f"[remote_runner] pip warning: {err}", flush=True)
     else:
         print("[remote_runner] deps installed.", flush=True)
-
-
-_bootstrap_deps()
+    _il.invalidate_caches()
+    ready.set()
 
 logger = logging.getLogger("remote_runner")
 
@@ -566,6 +572,7 @@ class _RemoteRunner:
         self._agents:   dict[str, _RemoteAgent] = {}   # name → agent
         self._pub_queue: asyncio.Queue = None   # created in run() inside the event loop
         self._running   = False
+        self._deps_ready: asyncio.Event = None  # set once aiomqtt/paho are importable
 
     # ── MQTT publish (queue-based, reconnect-safe) ────────────────────────────
 
@@ -673,6 +680,7 @@ class _RemoteRunner:
         time when we block on queue.get(), causing silent message loss.
         paho.loop_start() runs a background thread that handles ACKs/keepalives.
         """
+        await self._deps_ready.wait()
         import paho.mqtt.client as paho_mqtt
         loop = asyncio.get_event_loop()
 
@@ -721,6 +729,7 @@ class _RemoteRunner:
           nodes/{node_name}/reply/#        — route replies back to waiting agents
           agents/by-name/+/task           — task addressed to a named agent
         """
+        await self._deps_ready.wait()
         import aiomqtt
         topics = [
             f"nodes/{self.node_name}/spawn",
@@ -840,7 +849,11 @@ class _RemoteRunner:
     async def run(self):
         self._running = True
         self._pub_queue = asyncio.Queue()   # must be created inside the running event loop
+        self._deps_ready = asyncio.Event()
         logger.info(f"[runner] Starting node '{self.node_name}' → broker {self.broker}:{self.port}")
+
+        # Bootstrap missing deps in thread pool; publisher/subscriber wait on this event.
+        asyncio.create_task(_bootstrap_deps_async(self._deps_ready))
 
         tasks = [
             asyncio.create_task(self._publisher_loop()),
