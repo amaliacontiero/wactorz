@@ -1,8 +1,18 @@
+![Wactorz](.github/assets/icon.png)
+
 # Wactorz
 
-**Spawn, coordinate and monitor AI agents at runtime -- just by talking to them.**
+**Spawn, coordinate, and monitor AI agents at runtime just by talking to them.**
 
-Wactorz is an open-source, actor-model multi-agent framework built for the real world. You describe what you need. The LLM writes the code. A new agent appears -- persisted, self-healing, and connected to everything else via MQTT. No restart. No YAML. No hardcoded types.
+Wactorz is an actor-model multi-agent framework for real-world automation:
+dynamic agents, MQTT wiring, Home Assistant control, remote nodes, persistent state,
+live telemetry, and LLM cost tracking.
+
+[Docs](https://waldiez.github.io/wactorz/) |
+[Quickstart](docs/quickstart.md) |
+[Architecture](docs/architecture.md) |
+[Home Assistant Addon](ha-addon/DOCS.md) |
+[Issues](https://github.com/waldiez/wactorz/issues)
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://python.org)
@@ -11,186 +21,214 @@ Wactorz is an open-source, actor-model multi-agent framework built for the real 
 
 ---
 
-## See it in action
+## The Short Version
 
+You describe an automation. Wactorz classifies the intent, asks the LLM for the code it needs,
+spawns one or more agents, wires them through MQTT, persists their state, and monitors them while
+they run.
+
+```text
+You:     monitor my kitchen temperature and alert me on Discord if it goes above 28 C
+
+Wactorz: Understood. I will create two agents:
+
+         temp-monitor-agent     polls sensors/temperature every 30s
+         discord-notify-agent   sends the alert when the threshold is crossed
+
+         Both agents are live. They will survive a restart automatically.
 ```
-You:       monitor my kitchen temperature and alert me on Discord if it goes above 28°C
 
-Wactorz:   Understood. I'll create two agents for this.
-
-           [spawning temp-monitor-agent  -- polls sensors/temperature every 30s]
-           [spawning discord-notify-agent -- sends alert when threshold is crossed]
-
-           Both agents are live. They'll survive a restart automatically.
-```
-
-That's it. No config files, no code changes, no service restart.
+No restart. No hardcoded agent classes. No hand-written YAML pipeline.
 
 ---
 
-## Why Wactorz?
+## Why It Feels Different
 
-Frameworks like LangGraph, CrewAI, and AutoGen are designed for the cloud. Wactorz is designed for the physical world.
-
-| | Wactorz | LangGraph / CrewAI / AutoGen |
-|---|---|---|
-| Spawn agents at runtime | Yes -- from natural language | No -- types defined at code time |
-| MQTT / IoT native | Yes -- MQTT is the core bus | No |
-| Runs on a Raspberry Pi | Yes | No |
-| Works fully offline | Yes (Ollama) | Cloud-dependent |
-| Home Assistant built-in | Yes -- native HA Supervisor addon | No |
-| Actor model supervision | Yes -- Erlang-style OTP restarts | No |
-| Multi-machine edge deployment | Yes -- SSH-bootstrap remote nodes | No |
-| LLM cost tracking | Yes -- per-agent, across restarts | Varies |
+| Capability | What it means in practice |
+|---|---|
+| Runtime agent spawning | New agents can appear while the system is already running. |
+| Actor supervision | Each agent has its own mailbox, lifecycle, heartbeat, and restart policy. |
+| MQTT-native wiring | Agent events, logs, heartbeats, sensor readings, and results flow through topics. |
+| Home Assistant aware | Natural-language device control, entity lookup, automations, and HA Supervisor addon support. |
+| Remote-node ready | Spawn agents on laptops, Raspberry Pis, VMs, and edge machines over SSH. |
+| Offline capable | Use Ollama for local models when cloud APIs are not desired. |
+| Provider flexible | Anthropic, OpenAI, Gemini, NVIDIA NIM, or Ollama. |
+| Cost visible | Token usage and USD spend are tracked per agent and survive restarts. |
 
 ---
 
-## Quick start
+## Quick Start
 
 ```bash
 git clone https://github.com/waldiez/wactorz
 cd wactorz
 pip install -e ".[all]"
 
-# Mosquitto broker (required -- pick one)
-docker run -d -p 1883:1883 eclipse-mosquitto   # Docker
-# mosquitto -v                                 # or native install
+# Local MQTT broker for native development
+docker compose up -d mosquitto
 
-# Set your LLM key
+# Pick an LLM provider
 export ANTHROPIC_API_KEY=sk-ant-...
 
 python -m wactorz
 ```
 
-Open **http://localhost:8888** for the live dashboard.
+Open the dashboard:
 
-**No API key? Use Ollama (free, local, offline):**
+```text
+http://localhost:8888
+```
+
+Use a local model instead:
 
 ```bash
 ollama pull llama3
 python -m wactorz --llm ollama --ollama-model llama3
 ```
 
-> Windows user? See [docs/windows.md](docs/windows.md) for a one-click setup script.
+Windows users can use the helper script in [docs/windows.md](docs/windows.md).
+Docker, systemd, native binary, staging, and Home Assistant deployments are covered in
+[docs/deployment.md](docs/deployment.md).
 
 ---
 
-## What it does
+## What You Can Build
 
-### Reactive pipelines -- describe a rule, agents wire themselves
+### Reactive Pipelines
 
-```
+Describe the rule. Wactorz plans the agents, generates the code, wires the topics, and persists
+the pipeline so it restores on restart.
+
+```text
 if the front door opens, send me a Telegram message
 when a person is detected on my webcam, turn on the hallway light
-whenever the living room temperature drops below 18°C, turn on the heater
+whenever the living room temperature drops below 18 C, turn on the heater
 ```
 
-Wactorz classifies the intent, queries your Home Assistant for real entity IDs, generates the agent code, spawns the actors, and registers the rule -- so it restores automatically on the next restart.
+### Home Assistant Control
 
-### Home Assistant -- natural language device control
+Talk to your home like an API you do not have to memorize.
 
-```
+```text
 turn off all the lights in the bedroom
 set the thermostat to 22 degrees
 create an automation: when the sun sets, dim the living room to 40%
 what sensors do I have in the kitchen?
 ```
 
-Install as a **Home Assistant Supervisor addon** for zero-config integration. No external server needed.
+### Remote Agents
 
-### Remote nodes -- spawn agents on any machine
+Deploy work to another machine and let it join the same live system.
 
-```
+```text
 /deploy rpi-kitchen
 spawn a temperature sensor on rpi-kitchen that reads from a DHT22 every 30 seconds
 ```
 
-One Python file, one pip package. The node self-bootstraps over SSH and appears in the dashboard within seconds. Agents on remote nodes have the same API as local agents.
+Remote nodes self-bootstrap over SSH and report back through the same dashboard and MQTT fabric.
 
-### Actor model -- built to survive
+### Always-On Monitoring
 
-Every agent runs in its own async actor with its own mailbox, heartbeat, and persisted state. An Erlang-style supervisor watches every actor and restarts failed ones automatically, with configurable backoff and restart caps. Crashes are events -- not catastrophes.
-
-### LLM cost tracking -- know what you're spending
-
-Every LLM call across every agent is tracked: input tokens, output tokens, cost in USD. Visible per-agent in the dashboard, in the CLI via `/cost`, and queryable via the REST API. Cost data survives restarts.
-
----
-
-## LLM providers
-
-| Provider | Env var | Notes |
-|---|---|---|
-| Anthropic Claude | `ANTHROPIC_API_KEY` | Default |
-| OpenAI | `OPENAI_API_KEY` | |
-| Google Gemini | `GEMINI_API_KEY` | Free tier -- [aistudio.google.com](https://aistudio.google.com) |
-| NVIDIA NIM | `NIM_API_KEY` | Free tier (1000 req/month) -- [build.nvidia.com](https://build.nvidia.com) |
-| Ollama | _(none)_ | Local models, fully offline |
-
----
-
-## Interfaces
-
-| Interface | How |
-|---|---|
-| CLI (streaming) | `python -m wactorz` |
-| Live dashboard | `http://localhost:8888` -- agent cards, logs, cost meters, spawn controls |
-| REST API | `python -m wactorz --interface rest` |
-| Discord | `--interface discord` -- bot responds to @mention |
-| Telegram | `--interface telegram` -- self-hosted bot, no public server needed |
-| MCP server | `wactorz-mcp` -- expose Wactorz as tools to any MCP-compatible client |
-| Flutter app | iOS/Android companion app -- agents, chat, activity feed |
-| Home Assistant addon | One-click install, runs inside the HA Supervisor |
+Every actor publishes a heartbeat. `MonitorAgent` watches for stale agents, warnings, failures,
+and restarts. State is written to SQLite as it changes, not only on graceful shutdown.
 
 ---
 
 ## Architecture
 
-```
-You  (chat / REST / Discord / Telegram / HA)
- |
-[MainActor]  -- classifies intent in one LLM call
-  |
-  +-- ACTUATE  --> OneOffActuatorAgent  --> HA service call
-  |
-  +-- PIPELINE --> PlannerAgent  --> spawns agents --> MQTT wiring
-  |
-  +-- HA       --> HomeAssistantAgent  --> HA REST / WebSocket
-  |
-  +-- OTHER    --> streaming LLM reply
+```mermaid
+flowchart LR
+    User["User<br/>CLI, REST, Discord, Telegram, HA"] --> Main["MainActor<br/>intent routing"]
 
-All agents <--> [Mosquitto MQTT broker] <--> Dashboard / Remote nodes / Home Assistant
+    Main --> Actuate["OneOffActuatorAgent<br/>direct service calls"]
+    Main --> Planner["PlannerAgent<br/>pipeline planning"]
+    Main --> HA["HomeAssistantAgent<br/>REST + WebSocket"]
+    Main --> Chat["LLM reply<br/>streaming response"]
+
+    Planner --> Dynamic["DynamicAgents<br/>LLM-generated runtime code"]
+    Actuate --> Bus["MQTT broker"]
+    HA --> Bus
+    Dynamic --> Bus
+
+    Bus --> Dashboard["Live dashboard<br/>agents, logs, cost, heartbeats"]
+    Bus --> Remote["Remote nodes"]
+    Bus --> External["Sensors, services, and IoT systems"]
 ```
 
-Each agent publishes a heartbeat every 10 seconds. The `MonitorAgent` watches for stale heartbeats and escalates failures through warning, restart, and user notification stages. All state is written to SQLite on every change -- not just on graceful shutdown.
+The model is deliberately simple: actors own work, MQTT carries events, persistence keeps the
+system durable, and the dashboard makes the invisible parts visible.
+
+---
+
+## Interfaces
+
+| Interface | How to use it |
+|---|---|
+| CLI | `python -m wactorz` |
+| Live dashboard | `http://localhost:8888` |
+| REST API | `python -m wactorz --interface rest` |
+| Discord | `python -m wactorz --interface discord` |
+| Telegram | `python -m wactorz --interface telegram` |
+| MCP server | `wactorz-mcp` |
+| Flutter app | iOS/Android companion app for agents, chat, and activity feed |
+| Home Assistant addon | One-click install inside the HA Supervisor |
+
+---
+
+## LLM Providers
+
+| Provider | Environment variable | Notes |
+|---|---|---|
+| Anthropic Claude | `ANTHROPIC_API_KEY` | Default hosted provider |
+| OpenAI | `OPENAI_API_KEY` | OpenAI-compatible hosted models |
+| Google Gemini | `GEMINI_API_KEY` | Gemini models |
+| NVIDIA NIM | `NIM_API_KEY` | NIM-hosted models |
+| Ollama | none | Local, offline models |
+
+---
+
+## Repository Map
+
+| Path | What lives there |
+|---|---|
+| `wactorz/` | Python actor runtime, built-in agents, interfaces, monitoring, HA integration |
+| `frontend/` | Vite + TypeScript + Babylon.js dashboard |
+| `rust/` | Rust backend crates and MQTT/interface support |
+| `mobile/` | Flutter companion app |
+| `ha-addon/` | Home Assistant Supervisor addon |
+| `docs/` | Markdown docs source |
+| `site/` and `static/` | Built documentation and bundled web assets |
+| `infra/` | Mosquitto, Prometheus, OpenTelemetry, Fuseki, nginx, and HA configs |
+| `tests/` | Python test suite and backend parity harness |
 
 ---
 
 ## Documentation
 
-| | |
+| Start here | For |
 |---|---|
-| [Quickstart](docs/quickstart.md) | Windows setup script and first run |
-| [Architecture](docs/architecture.md) | Actor model, TopicBus, intent routing |
-| [Agents](docs/agents.md) | All built-in agents and their APIs |
-| [Pipelines](docs/pipelines.md) | Reactive pipeline patterns and wiring |
+| [Quickstart](docs/quickstart.md) | First run and Windows setup |
+| [Architecture](docs/architecture.md) | Actor system, supervision, MQTT flow |
+| [Agents](docs/agents.md) | Built-in agents, recipes, and dynamic agents |
+| [Pipelines](docs/pipelines.md) | Reactive automation patterns |
 | [Remote nodes](docs/remote-nodes.md) | Edge deployment over SSH |
-| [Interfaces](docs/interfaces.md) | CLI, REST, Discord, Telegram, MCP |
-| [API reference](docs/api.md) | REST endpoints |
-| [Deployment](docs/deployment.md) | Docker, native binary, systemd, HA addon |
-| [HA Addon](ha-addon/DOCS.md) | Home Assistant Supervisor addon |
-| [Technical reference](docs/reference.md) | Deep-dive agent internals and APIs |
+| [Interfaces](docs/interfaces.md) | CLI, REST, chat platforms, dashboard, MCP |
+| [API reference](docs/api.md) | REST endpoints and payloads |
+| [Deployment](docs/deployment.md) | Docker, native binary, systemd, staging, HA addon |
+| [Prometheus](docs/prometheus.md) | Metrics and monitoring |
+| [Technical reference](docs/reference.md) | Deeper internals |
 
 ---
 
 ## Contributing
 
-Contributions are welcome -- new agents, bug fixes, new LLM providers, docs, translations.
+Contributions are welcome: agents, providers, docs, tests, UI polish, Home Assistant recipes,
+deployment hardening, and bug fixes.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) to get started. For questions and ideas, open an issue or start a GitHub Discussion.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) to get set up.
 
 ---
 
 ## License
 
-[Apache 2.0](LICENSE) -- free to use, modify, and distribute.
+[Apache 2.0](LICENSE). Free to use, modify, and distribute.
