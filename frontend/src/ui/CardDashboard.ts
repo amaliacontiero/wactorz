@@ -2628,7 +2628,7 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
 
     const h = document.createElement("h3");
     h.className = "af-settings-section-heading";
-    h.textContent = "💸 LLM Spend Limit";
+    h.textContent = "🪙 LLM Spend Limit";
     section.appendChild(h);
 
     const grid = document.createElement("div");
