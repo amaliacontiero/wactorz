@@ -1098,6 +1098,21 @@ async def cost_handler(request):
     return web.json_response(get_global_cost_info())
 
 
+async def cost_limit_handler(request):
+    from aiohttp import web
+    from .agents.llm_agent import set_cost_limit
+    try:
+        body = await request.json()
+        limit_usd = float(body.get("limit_usd", 0))
+        period = body.get("period", "monthly")
+        if period not in ("monthly", "weekly"):
+            return web.json_response({"error": "period must be monthly or weekly"}, status=400)
+        set_cost_limit(limit_usd, period)
+        return web.json_response({"ok": True, "limit_usd": limit_usd, "period": period})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=400)
+
+
 async def send_message_handler(request):
     from aiohttp import web
     actor_id = request.match_info["actor_id"]
@@ -1518,6 +1533,8 @@ async def main(exit_on_failure: bool = False):
     app.router.add_get("/health",                health_handler)
     app.router.add_get("/api/cost",              cost_handler)
     app.router.add_get("/cost",                  cost_handler)
+    app.router.add_post("/api/cost/limit",       cost_limit_handler)
+    app.router.add_post("/cost/limit",           cost_limit_handler)
     app.router.add_get("/ws",                    ws_handler)
     app.router.add_get("/mqtt",                  mqtt_proxy_handler)
 

@@ -30,10 +30,19 @@ def _global_cost_kv_key(period: str) -> str:
 def get_global_cost_info() -> dict:
     """Return current period spend and limit. Used by GET /api/cost."""
     from ..config import CONFIG
+    db = get_db()
+    # Runtime override (set via POST /api/cost/limit) takes priority over env var
     limit = CONFIG.llm_cost_limit_usd
     period = CONFIG.llm_cost_limit_period
+    if db is not None:
+        try:
+            override = db.kv_get("_system", "_cost_limit_override")
+            if isinstance(override, dict):
+                limit = float(override.get("limit_usd", limit))
+                period = override.get("period", period)
+        except Exception:
+            pass
     key = _global_cost_kv_key(period)
-    db = get_db()
     spend = 0.0
     if db is not None:
         try:
@@ -50,6 +59,14 @@ def get_global_cost_info() -> dict:
         "limit_reached": limit > 0 and spend >= limit,
         "warning": limit > 0 and spend >= limit * 0.8,
     }
+
+
+def set_cost_limit(limit_usd: float, period: str) -> None:
+    """Persist a runtime cost limit override to SQLite."""
+    db = get_db()
+    if db is None:
+        raise RuntimeError("Database not available")
+    db.kv_set("_system", "_cost_limit_override", {"limit_usd": limit_usd, "period": period})
 
 
 def _accumulate_global_cost(delta: float) -> None:

@@ -124,6 +124,8 @@ export class CardDashboard {
   private _historyLoaded: Set<string> = new Set();
   private _totalCostUsd: number | null = null;
   private _totalMessages: number | null = null;
+  private _costLimitInfo: Record<string, any> | null = null;
+  private _costPollTimer: ReturnType<typeof setInterval> | null = null;
 
   // Event listeners (stored for cleanup)
   private _evFeed: ((e: Event) => void) | null = null;
@@ -183,6 +185,8 @@ export class CardDashboard {
     this._wireEvents();
     this._renderView();
     this.tickTimer = setInterval(() => this._refreshTimestamps(), 5000);
+    void this._fetchCostInfo();
+    this._costPollTimer = setInterval(() => void this._fetchCostInfo(), 30_000);
     // Connect HA once for the session — stays connected across sub-view changes
     // so state_changed events flow to the activity feed at all times.
     if (this.haClient && !this.haClient.connected) {
@@ -203,6 +207,10 @@ export class CardDashboard {
       clearInterval(this.tickTimer);
       this.tickTimer = null;
     }
+    if (this._costPollTimer) {
+      clearInterval(this._costPollTimer);
+      this._costPollTimer = null;
+    }
   }
 
   destroy(): void {
@@ -213,6 +221,41 @@ export class CardDashboard {
   setTotalCostUsd(usd: number): void {
     this._totalCostUsd = usd;
     if (this.view === "overview") this._renderStats();
+  }
+
+  private async _fetchCostInfo(): Promise<void> {
+    const ingress: string = (window as any).__WACTORZ_INGRESS_PATH ?? "";
+    try {
+      const res = await fetch(`${ingress}/api/cost`);
+      if (res.ok) {
+        this._costLimitInfo = await res.json();
+        if (this.view === "overview") this._renderStats();
+      }
+    } catch { /* ignore — server may not be ready */ }
+  }
+
+  private async _promptSetCostLimit(): Promise<void> {
+    const ingress: string = (window as any).__WACTORZ_INGRESS_PATH ?? "";
+    const current = this._costLimitInfo?.limit_usd ?? 0;
+    const input = window.prompt(
+      "Set monthly/weekly spend limit in USD (0 to disable):",
+      String(current ?? 0),
+    );
+    if (input === null) return;
+    const limit_usd = parseFloat(input);
+    if (isNaN(limit_usd) || limit_usd < 0) return;
+    const periodInput = window.prompt("Period: monthly or weekly", this._costLimitInfo?.period ?? "monthly");
+    if (!periodInput) return;
+    const period = periodInput.trim().toLowerCase();
+    if (period !== "monthly" && period !== "weekly") return;
+    try {
+      await fetch(`${ingress}/api/cost/limit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ limit_usd, period }),
+      });
+      await this._fetchCostInfo();
+    } catch { /* ignore */ }
   }
 
   setTotalMessages(count: number): void {
@@ -602,40 +645,60 @@ export class CardDashboard {
       : agents.reduce((s, a) => s + (a.costUsd ?? 0), 0);
     const events = this.feedItems.length;
 
+    const lim = this._costLimitInfo;
+    const hasLimit = lim && typeof lim.limit_usd === "number" && lim.limit_usd > 0;
+    const barColor = lim?.limit_reached ? "#ef4444" : lim?.warning ? "#f59e0b" : "#22d3a0";
+    const pct = hasLimit ? Math.min(lim!.pct_used ?? 0, 100) : 0;
+    const costDetail = hasLimit
+      ? `$${lim!.spend_usd.toFixed(4)} / $${lim!.limit_usd.toFixed(2)} this ${lim!.period}`
+      : "reported by actors";
+    const costExtra = hasLimit ? `
+      <div style="margin-top:8px;background:rgba(255,255,255,0.1);border-radius:4px;height:5px;overflow:hidden">
+        <div style="width:${pct}%;height:100%;background:${barColor};border-radius:4px;transition:width 0.4s"></div>
+      </div>` : "";
+
     [
       {
         label: "Wactorz",
         value: String(total),
         detail: `${healthy} running`,
         accent: "#60a5fa",
+        extra: "",
       },
       {
         label: "Messages",
         value: String(msgs),
         detail: "processed across actors",
         accent: "#22d3a0",
+        extra: "",
       },
       {
         label: "Cost",
         value: `$${cost.toFixed(4)}`,
-        detail: "reported by actors",
-        accent: "#f59e0b",
+        detail: costDetail,
+        accent: lim?.limit_reached ? "#ef4444" : "#f59e0b",
+        extra: costExtra,
+        clickable: true,
       },
       {
         label: "Feed Events",
         value: String(events),
         detail: "since dashboard loaded",
         accent: "#8b5cf6",
+        extra: "",
       },
-    ].forEach(({ label, value, detail, accent }) => {
+    ].forEach(({ label, value, detail, accent, extra, clickable }: any) => {
       const card = document.createElement("div");
       card.className = "af-stat-card";
       card.style.borderColor = `${accent}44`;
+      if (clickable) card.style.cursor = "pointer";
       card.innerHTML = `
         <div class="af-stat-label">${label}</div>
         <div class="af-stat-value" style="color:${accent}">${value}</div>
         <div class="af-stat-detail">${detail}</div>
+        ${extra}
       `;
+      if (clickable) card.addEventListener("click", () => void this._promptSetCostLimit());
       container.appendChild(card);
     });
   }
