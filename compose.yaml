@@ -111,6 +111,30 @@ services:
         condition: service_healthy
     command: ["wactorz-fuseki"]
 
+  # ── OpenTelemetry Collector ──────────────────────────────────────────────────
+  # docker compose --profile otel up -d
+  # Add to python profile:  --profile python --profile otel
+  # Receives OTLP HTTP on 4318; exposes /metrics on 8889 for Prometheus.
+  # Set OTEL_EXPORTER_OTLP_ENDPOINT=http://otelcol:4318 in .env to activate.
+  otelcol:
+    profiles: [otel]
+    image: otel/opentelemetry-collector-contrib:0.104.0
+    container_name: wactorz-otelcol
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./infra/otelcol/config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "${OTELCOL_OTLP_PORT:-4318}:4318"
+      - "${OTELCOL_METRICS_PORT:-8889}:8889"
+    networks:
+      - wactorz-net
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:13133/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
   prometheus:
     profiles: [python, python-full]
     image: prom/prometheus:v2.54.1
@@ -124,6 +148,8 @@ services:
       PROMETHEUS_PYTHON_TARGET: "${PROMETHEUS_PYTHON_TARGET:-wactorz-python}"
       PROMETHEUS_MONITOR_MOSQUITTO: "${PROMETHEUS_MONITOR_MOSQUITTO:-0}"
       PROMETHEUS_MONITOR_FUSEKI: "${PROMETHEUS_MONITOR_FUSEKI:-0}"
+      PROMETHEUS_MONITOR_OTELCOL: "${PROMETHEUS_MONITOR_OTELCOL:-0}"
+      REST_EXTERNAL_PORT: "${REST_EXTERNAL_PORT:-8000}"
     ports:
       - "${PROMETHEUS_EXTERNAL_PORT:-9090}:9090"
     extra_hosts:
