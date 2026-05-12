@@ -46,7 +46,7 @@ options:
   llm_model: claude-sonnet-4-6
   llm_api_key: ""
 
-  # Spend cap — set to 0 to disable. Resets each period automatically.
+  # Spend cap — set to 0 to disable. Period: daily, weekly, or monthly. Resets automatically.
   llm_cost_limit_usd: 0
   llm_cost_limit_period: monthly
 
@@ -97,7 +97,7 @@ schema:
   llm_model: str
   llm_api_key: str?
   llm_cost_limit_usd: float
-  llm_cost_limit_period: list(monthly|weekly)
+  llm_cost_limit_period: list(daily|weekly|monthly)
   ollama_url: url
   mqtt_host: str
   mqtt_port: port
