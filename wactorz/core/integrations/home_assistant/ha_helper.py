@@ -81,11 +81,11 @@ async def get_automations(base_url: str, token: str) -> list[dict[str, Any]]:
                 automation_ids.append(s.get("attributes")["id"] if isinstance(s.get("attributes"), dict) else "")
 
         automations: list[dict[str, Any]] = []
-        for id in automation_ids:
-            config = None
-            if isinstance(id, str) and id.strip():
-                config = await _fetch_automation_config(rest_url, id.strip(), token)
-                automations.append(config)
+        for automation_id in automation_ids:
+            if isinstance(automation_id, str) and automation_id.strip():
+                config = await _fetch_automation_config(rest_url, automation_id.strip(), token)
+                if config is not None:
+                    automations.append(config)
 
 
         return automations or []
@@ -103,7 +103,6 @@ async def delete_automation(base_url: str, token: str, automation_id: str) -> bo
     }
     async with aiohttp.ClientSession() as session:
         async with session.delete(endpoint, headers=headers) as response:
-            print(f"response.status: {response.status}")
             return response.status == 200
 
 
@@ -183,7 +182,7 @@ async def fetch_devices_entities_with_location(
 
         return sorted(output, key=lambda x: (x["name"] or ""))
 
-#Finished
+
 async def get_full_ha_data(ws_url: str, token: str) -> Dict[str, List[Dict[str, Any]]]:
     """Fetch raw registry dumps for floors, areas, devices, entities, and states.
 
@@ -239,7 +238,7 @@ async def get_full_ha_data(ws_url: str, token: str) -> Dict[str, List[Dict[str, 
             "states": states or [],
         }
     
-#Finished
+
 async def get_simplified_ha_data(ws_url: str, token: str) -> Dict[str, List[Dict[str, Any]]]:
     """Fetch compact, null-stripped registry data for floors, areas, devices, and entities.
 
@@ -334,7 +333,7 @@ async def get_simplified_ha_data(ws_url: str, token: str) -> Dict[str, List[Dict
             ],
         }
 
-#Finished
+
 async def get_floors(ws_url: str, token: str) -> List[Dict[str, Any]]:
     """Fetch the floor registry and return the list as-is from Home Assistant.
 
@@ -354,7 +353,7 @@ async def get_floors(ws_url: str, token: str) -> List[Dict[str, Any]]:
     except Exception:
         return []
 
-#Finished
+
 async def get_areas(ws_url: str, token: str) -> List[Dict[str, Any]]:
     """Fetch the full area registry and return the list as-is from Home Assistant.
 
@@ -369,7 +368,7 @@ async def get_areas(ws_url: str, token: str) -> List[Dict[str, Any]]:
         areas = await ha.call("config/area_registry/list")
         return areas or []
     
-#Finished
+
 async def get_devices(ws_url: str, token: str) -> List[Dict[str, Any]]:
     """Fetch the full device registry and return the list as-is from Home Assistant,
     with an additional ``swid`` field appended to each entry.
@@ -412,7 +411,7 @@ async def get_devices_simple(ws_url: str, token: str) -> List[Dict[str, Any]]:
         for d in (devices or [])
     ]
 
-#Finished
+
 async def get_entities(ws_url: str, token: str) -> List[Dict[str, Any]]:
     """Fetch the full entity registry and return the list as-is from Home Assistant.
 
@@ -429,7 +428,7 @@ async def get_entities(ws_url: str, token: str) -> List[Dict[str, Any]]:
         entities = await ha.call("config/entity_registry/list")
         return entities or []
 
-#Finished
+
 async def get_entities_for_display(ws_url: str, token: str) -> Dict[str, Any]:
     """Fetch entity registry entries optimised for display, as returned by the HA frontend API.
 
@@ -456,12 +455,11 @@ async def get_entities_for_display(ws_url: str, token: str) -> Dict[str, Any]:
       - ``en``  — display name (resolved by HA, equivalent to ``friendly_name``)
       - ``dp``  — display precision (decimal places, only present when set)
     """
-    entities = await get_entities(ws_url, token)
     async with HAWebSocketClient(ws_url, token) as ha:
         entities = await ha.call("config/entity_registry/list_for_display")
         return entities or {}
 
-# Finished
+
 async def get_exposed_entities(ws_url: str, token: str) -> Dict[str, Any]:
     """Fetch entities exposed to HA assistants and return the response as-is from Home Assistant.
 
@@ -501,7 +499,7 @@ async def get_entities_simple(ws_url: str, token: str) -> List[Dict[str, Any]]:
         for e in (entities or [])
     ]
 
-# Finished
+
 async def get_states(ws_url: str, token: str) -> List[Dict[str, Any]]:
     """Fetch all current entity states and return the list as-is from Home Assistant.
 
@@ -590,34 +588,29 @@ def extract_entity_ids(devices: List[Dict[str, Any]]) -> List[str]:
     return entity_ids
 
 
-async def update_automation(
+async def _post_automation_config(
     base_url: str,
     token: str,
     automation_id: str,
     automation_config: Dict[str, Any],
+    default_alias: str = "automation",
 ) -> Dict[str, Any]:
-    """Overwrite an existing automation by POSTing to its config endpoint.
+    """POST an automation config to the HA REST API (create or update).
 
     The HA REST API uses the same POST /api/config/automation/config/{id}
-    endpoint for both creation and update; supplying an existing id performs
-    an in-place update, preserving the automation's internal ID and history.
+    endpoint for both creation and update; the caller supplies the id.
+    Raises RuntimeError on HTTP 4xx/5xx.
     """
     normalized_base = normalize_ha_base_url(base_url)
 
-    alias = str(automation_config.get("name") or "Updated automation").strip()
-    description = str(automation_config.get("description") or "").strip()
-    trigger = automation_config.get("trigger") or []
-    condition = automation_config.get("condition") or []
-    action = automation_config.get("action") or []
-    mode = str(automation_config.get("mode") or "single").strip() or "single"
-
+    alias = str(automation_config.get("name") or default_alias).strip()
     payload = {
         "alias": alias,
-        "description": description,
-        "trigger": trigger,
-        "condition": condition,
-        "action": action,
-        "mode": mode,
+        "description": str(automation_config.get("description") or "").strip(),
+        "trigger": automation_config.get("trigger") or [],
+        "condition": automation_config.get("condition") or [],
+        "action": automation_config.get("action") or [],
+        "mode": str(automation_config.get("mode") or "single").strip() or "single",
     }
 
     endpoint = f"{normalized_base}/api/config/automation/config/{automation_id}"
@@ -637,7 +630,7 @@ async def update_automation(
 
             if response.status >= 400:
                 raise RuntimeError(
-                    f"REST automation update failed ({response.status}): {body}"
+                    f"REST automation POST failed ({response.status}): {body}"
                 )
 
             return {
@@ -645,6 +638,18 @@ async def update_automation(
                 "status": response.status,
                 "result": body,
             }
+
+
+async def update_automation(
+    base_url: str,
+    token: str,
+    automation_id: str,
+    automation_config: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Overwrite an existing automation by POSTing to its config endpoint."""
+    return await _post_automation_config(
+        base_url, token, automation_id, automation_config, default_alias="Updated automation"
+    )
 
 
 async def create_automation_via_websocket(
@@ -660,7 +665,7 @@ async def _fetch_automation_config(rest_base: str, automation_id: str, token: st
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
-    
+
     url = f"{rest_base}/api/config/automation/config/{automation_id}"
     async with aiohttp.ClientSession() as session:
         try:
@@ -678,53 +683,13 @@ async def create_automation_via_rest(
     token: str,
     automation_config: Dict[str, Any],
 ) -> Dict[str, Any]:
-    normalized_base = normalize_ha_base_url(base_url)
+    """Create a new automation by generating a unique ID and POSTing to the HA REST API."""
     alias = str(automation_config.get("name") or "Generated automation").strip()
-    description = str(automation_config.get("description") or "").strip()
-    trigger = automation_config.get("trigger") or []
-    condition = automation_config.get("condition") or []
-    action = automation_config.get("action") or []
-    mode = str(automation_config.get("mode") or "single").strip() or "single"
-
     slug_base = re.sub(r"[^a-z0-9]+", "_", alias.lower()).strip("_") or "generated_automation"
     automation_id = f"{slug_base}_{int(time.time())}"
-
-    payload = {
-        "alias": alias,
-        "description": description,
-        "trigger": trigger,
-        "condition": condition,
-        "action": action,
-        "mode": mode,
-    }
-
-    endpoint = f"{normalized_base}/api/config/automation/config/{automation_id}"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-
-    async with aiohttp.ClientSession() as session:
-        async with session.post(endpoint, headers=headers, json=payload) as response:
-            content_type = (response.headers.get("Content-Type") or "").lower()
-            body: Any
-            if "application/json" in content_type:
-                body = await response.json()
-            else:
-                body = await response.text()
-
-            if response.status >= 400:
-                raise RuntimeError(
-                    f"REST automation create failed ({response.status}): {body}"
-                )
-
-            return {
-                "automation_id": automation_id,
-                "status": response.status,
-                "result": body,
-            }
-
-#Finished
+    return await _post_automation_config(
+        base_url, token, automation_id, automation_config, default_alias="Generated automation"
+    )
 async def get_config_entries(ws_url: str, token: str) -> List[Dict[str, Any]]:
     """Fetch config entries and return the list as-is from Home Assistant.
 
