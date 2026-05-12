@@ -20,6 +20,9 @@ exporters:
     namespace: wactorz
     send_timestamps: true
     enable_open_metrics: true
+  # Uncomment to log incoming data to otelcol container logs:
+  # debug:
+  #   verbosity: detailed
 
 service:
   extensions: [health_check]
@@ -28,3 +31,4 @@ service:
       receivers: [otlp]
       processors: [batch]
       exporters: [prometheus]
+      # exporters: [prometheus, debug]
