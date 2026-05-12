@@ -7,12 +7,82 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Optional
 
 from ..core.actor import Actor, Message, MessageType
 from ..core.persistence import get_db
 
 logger = logging.getLogger(__name__)
+
+
+# ── Global cost limit ────────────────────────────────────────────────────────
+
+def _period_key(period: str) -> str:
+    now = datetime.now()
+    return now.strftime("%Y-W%W") if period == "weekly" else now.strftime("%Y-%m")
+
+
+def _global_cost_kv_key(period: str) -> str:
+    return f"_global_cost_{_period_key(period)}"
+
+
+def get_global_cost_info() -> dict:
+    """Return current period spend and limit. Used by GET /api/cost."""
+    from ..config import CONFIG
+    limit = CONFIG.llm_cost_limit_usd
+    period = CONFIG.llm_cost_limit_period
+    key = _global_cost_kv_key(period)
+    db = get_db()
+    spend = 0.0
+    if db is not None:
+        try:
+            spend = float(db.kv_get("_system", key) or 0.0)
+        except Exception:
+            pass
+    pct = round(spend / limit * 100, 1) if limit > 0 else None
+    return {
+        "period": period,
+        "period_key": _period_key(period),
+        "spend_usd": round(spend, 6),
+        "limit_usd": limit if limit > 0 else None,
+        "pct_used": pct,
+        "limit_reached": limit > 0 and spend >= limit,
+        "warning": limit > 0 and spend >= limit * 0.8,
+    }
+
+
+def _accumulate_global_cost(delta: float) -> None:
+    from ..config import CONFIG
+    if CONFIG.llm_cost_limit_usd <= 0 or delta <= 0:
+        return
+    db = get_db()
+    if db is None:
+        return
+    key = _global_cost_kv_key(CONFIG.llm_cost_limit_period)
+    try:
+        current = float(db.kv_get("_system", key) or 0.0)
+        db.kv_set("_system", key, round(current + delta, 6))
+    except Exception as exc:
+        logger.debug("[cost-limit] global accumulate failed: %s", exc)
+
+
+def _check_cost_limit() -> None:
+    from ..config import CONFIG
+    if CONFIG.llm_cost_limit_usd <= 0:
+        return
+    info = get_global_cost_info()
+    if info["limit_reached"]:
+        raise RuntimeError(
+            f"LLM cost limit of ${CONFIG.llm_cost_limit_usd:.2f} reached "
+            f"for {info['period_key']}. Blocking further LLM calls."
+        )
+    if info["warning"]:
+        logger.warning(
+            "[cost-limit] %.1f%% of $%.2f %s budget used ($%.4f)",
+            info["pct_used"], CONFIG.llm_cost_limit_usd,
+            info["period"], info["spend_usd"],
+        )
 
 
 # Fallback pricing per 1M tokens (input, output) in USD.
@@ -954,6 +1024,7 @@ class LLMAgent(Actor):
         self.total_input_tokens  = 0
         self.total_output_tokens = 0
         self.total_cost_usd      = 0.0
+        self._last_persisted_usd = 0.0
 
     def _current_task_description(self) -> str:
         return self._current_task
@@ -1106,6 +1177,12 @@ class LLMAgent(Actor):
             logger.warning(f"[{self.name}] No LLM provider configured.")
             return
 
+        try:
+            _check_cost_limit()
+        except RuntimeError as e:
+            await self.send(self.name, MessageType.CHAT, {"role": "assistant", "content": str(e)})
+            return
+
         start = time.time()
         try:
             self._conversation_history.append({"role": "user", "content": task_text, "ts": start})
@@ -1164,6 +1241,10 @@ class LLMAgent(Actor):
         """Direct async call - useful for the main conversation actor."""
         if self.llm is None:
             return "[No LLM configured]"
+        try:
+            _check_cost_limit()
+        except RuntimeError as e:
+            return str(e)
 
         self.metrics.messages_processed += 1
         ts_user = time.time()
@@ -1286,6 +1367,10 @@ class LLMAgent(Actor):
 
     def _persist_cost(self):
         """Write lifetime cost to durable SQLite storage after each exchange."""
+        delta = self.total_cost_usd - self._last_persisted_usd
+        if delta > 0:
+            _accumulate_global_cost(delta)
+            self._last_persisted_usd = self.total_cost_usd
         self.persist("_final_cost", {
             "input_tokens":  self.total_input_tokens,
             "output_tokens": self.total_output_tokens,

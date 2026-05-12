@@ -46,6 +46,10 @@ options:
   llm_model: claude-sonnet-4-6
   llm_api_key: ""
 
+  # Spend cap — set to 0 to disable. Resets each period automatically.
+  llm_cost_limit_usd: 0
+  llm_cost_limit_period: monthly
+
   # Ollama (local LLM alternative — set llm_provider: ollama)
   ollama_url: "http://localhost:11434"
 
@@ -92,6 +96,8 @@ schema:
   llm_provider: list(anthropic|ollama|openai|gemini|nim)
   llm_model: str
   llm_api_key: str?
+  llm_cost_limit_usd: float
+  llm_cost_limit_period: list(monthly|weekly)
   ollama_url: url
   mqtt_host: str
   mqtt_port: port

@@ -1092,6 +1092,12 @@ async def health_handler(request):
     return web.json_response({"status": "ok"})
 
 
+async def cost_handler(request):
+    from aiohttp import web
+    from .agents.llm_agent import get_global_cost_info
+    return web.json_response(get_global_cost_info())
+
+
 async def send_message_handler(request):
     from aiohttp import web
     actor_id = request.match_info["actor_id"]
@@ -1510,6 +1516,8 @@ async def main(exit_on_failure: bool = False):
     app = web.Application()
     app.router.add_get("/",                      index_handler)
     app.router.add_get("/health",                health_handler)
+    app.router.add_get("/api/cost",              cost_handler)
+    app.router.add_get("/cost",                  cost_handler)
     app.router.add_get("/ws",                    ws_handler)
     app.router.add_get("/mqtt",                  mqtt_proxy_handler)
 
