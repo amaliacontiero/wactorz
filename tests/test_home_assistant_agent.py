@@ -1,3 +1,4 @@
+import json
 import sys
 import tempfile
 import types
@@ -17,6 +18,16 @@ class _ClassifyingLLM:
 
     async def complete(self, *args, **kwargs):
         return self.response, {"input_tokens": 1, "output_tokens": 1, "cost_usd": 0.0}
+
+
+class _SequencedLLM:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    async def complete(self, *args, **kwargs):
+        self.calls.append({"args": args, "kwargs": kwargs})
+        return self.responses.pop(0), {"input_tokens": 1, "output_tokens": 1, "cost_usd": 0.0}
 
 
 class _ToolLLM:
@@ -48,6 +59,15 @@ class HomeAssistantAgentOtherFeatureTest(unittest.IsolatedAsyncioTestCase):
         agent.ha_url = "ws://ha.local:8123/api/websocket"
         agent.ha_token = "token"
         return agent
+
+    def _valid_automation(self) -> dict:
+        return {
+            "name": "Porch lights",
+            "trigger": [{"platform": "state", "entity_id": "binary_sensor.porch_motion", "to": "on"}],
+            "condition": [],
+            "action": [{"service": "light.turn_on", "target": {"entity_id": "light.porch"}}],
+            "mode": "single",
+        }
 
     async def test_classify_action_accepts_other(self):
         """The HA action classifier must accept the new `other` class from the LLM."""
@@ -329,6 +349,190 @@ class HomeAssistantAgentOtherFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("Home Assistant tool request failed", result["result"])
         self.assertIn("provider does not support tools", result["error"])
+
+    async def test_edit_automation_updates_generated_automation(self):
+        """Editing awaits generation and sends the generated automation payload to HA."""
+        updated_automation = self._valid_automation()
+        llm = _SequencedLLM(
+            [
+                '{"found": true, "automation_id": "abc123", "automation_name": "Porch lights"}',
+                json.dumps({"can_edit": True, "automation": updated_automation}),
+            ]
+        )
+        agent = self._agent(llm)
+
+        automations = [{"id": "abc123", "alias": "Porch lights"}]
+        devices = {"data": {"entities": [{"entity_id": "light.porch"}]}}
+
+        with (
+            patch(
+                "wactorz.agents.home_assistant_agent.get_automations",
+                new=AsyncMock(return_value=[{"id": "abc123", "alias": "Porch lights", **updated_automation}]),
+            ),
+            patch(
+                "wactorz.agents.home_assistant_agent.update_automation",
+                new=AsyncMock(return_value=True),
+            ) as update,
+        ):
+            result = await agent._edit_automation("turn on porch light on motion", automations, devices)
+
+        self.assertTrue(result["edited"])
+        update.assert_awaited_once_with(agent.ha_url, agent.ha_token, "abc123", updated_automation)
+        self.assertEqual(result["automation"], updated_automation)
+
+    async def test_edit_automation_uses_minimal_config_when_full_config_missing(self):
+        """The edit flow preserves the old fallback when HA cannot return full config."""
+        updated_automation = self._valid_automation()
+        llm = _SequencedLLM(
+            [
+                '{"found": true, "automation_id": "abc123", "automation_name": "Porch lights"}',
+                json.dumps({"can_edit": True, "automation": updated_automation}),
+            ]
+        )
+        agent = self._agent(llm)
+
+        with (
+            patch(
+                "wactorz.agents.home_assistant_agent.get_automations",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "wactorz.agents.home_assistant_agent.update_automation",
+                new=AsyncMock(return_value=True),
+            ),
+        ):
+            result = await agent._edit_automation(
+                "turn on porch light on motion",
+                [{"id": "abc123", "alias": "Porch lights"}],
+                {"data": {"entities": []}},
+            )
+
+        self.assertTrue(result["edited"])
+        edit_payload = llm.calls[1]["kwargs"]["messages"][0]["content"]
+        self.assertEqual(
+            json.loads(edit_payload)["existing_automation"],
+            {"id": "abc123", "alias": "Porch lights"},
+        )
+
+    async def test_edit_automation_identify_failure_stops_before_ha_update(self):
+        """If no automation can be identified, edit does not fetch full config or update HA."""
+        llm = _SequencedLLM(['{"found": false, "result": "Ambiguous automation."}'])
+        agent = self._agent(llm)
+
+        with (
+            patch(
+                "wactorz.agents.home_assistant_agent.get_automations",
+                new=AsyncMock(return_value=[]),
+            ) as get_automations,
+            patch(
+                "wactorz.agents.home_assistant_agent.update_automation",
+                new=AsyncMock(return_value=True),
+            ) as update,
+        ):
+            result = await agent._edit_automation(
+                "change porch lights",
+                [{"id": "abc123", "alias": "Porch lights"}],
+                {"data": {"entities": []}},
+            )
+
+        self.assertFalse(result["edited"])
+        get_automations.assert_not_awaited()
+        update.assert_not_awaited()
+
+    async def test_edit_automation_can_edit_false_stops_before_ha_update(self):
+        """If the edit LLM refuses the edit, no Home Assistant update is sent."""
+        llm = _SequencedLLM(
+            [
+                '{"found": true, "automation_id": "abc123", "automation_name": "Porch lights"}',
+                '{"can_edit": false, "result": "The requested change is unclear."}',
+            ]
+        )
+        agent = self._agent(llm)
+
+        with (
+            patch(
+                "wactorz.agents.home_assistant_agent.get_automations",
+                new=AsyncMock(return_value=[{"id": "abc123", "alias": "Porch lights"}]),
+            ),
+            patch(
+                "wactorz.agents.home_assistant_agent.update_automation",
+                new=AsyncMock(return_value=True),
+            ) as update,
+        ):
+            result = await agent._edit_automation(
+                "change porch lights",
+                [{"id": "abc123", "alias": "Porch lights"}],
+                {"data": {"entities": []}},
+            )
+
+        self.assertFalse(result["edited"])
+        update.assert_not_awaited()
+
+    async def test_edit_automation_validation_failure_stops_before_ha_update(self):
+        """Generated automation must pass local validation before HA is updated."""
+        invalid_automation = {
+            "name": "Porch lights",
+            "trigger": [{"platform": "state", "entity_id": "binary_sensor.porch_motion", "to": "on"}],
+            "condition": [],
+            "mode": "single",
+        }
+        llm = _SequencedLLM(
+            [
+                '{"found": true, "automation_id": "abc123", "automation_name": "Porch lights"}',
+                json.dumps({"can_edit": True, "automation": invalid_automation}),
+            ]
+        )
+        agent = self._agent(llm)
+
+        with (
+            patch(
+                "wactorz.agents.home_assistant_agent.get_automations",
+                new=AsyncMock(return_value=[{"id": "abc123", "alias": "Porch lights"}]),
+            ),
+            patch(
+                "wactorz.agents.home_assistant_agent.update_automation",
+                new=AsyncMock(return_value=True),
+            ) as update,
+        ):
+            result = await agent._edit_automation(
+                "change porch lights",
+                [{"id": "abc123", "alias": "Porch lights"}],
+                {"data": {"entities": []}},
+            )
+
+        self.assertFalse(result["edited"])
+        self.assertIn("automation.action", result["result"])
+        update.assert_not_awaited()
+
+    async def test_edit_automation_update_exception_returns_not_edited(self):
+        """Home Assistant update failures are reported without claiming success."""
+        updated_automation = self._valid_automation()
+        llm = _SequencedLLM(
+            [
+                '{"found": true, "automation_id": "abc123", "automation_name": "Porch lights"}',
+                json.dumps({"can_edit": True, "automation": updated_automation}),
+            ]
+        )
+        agent = self._agent(llm)
+
+        with (
+            patch(
+                "wactorz.agents.home_assistant_agent.get_automations",
+                new=AsyncMock(return_value=[{"id": "abc123", "alias": "Porch lights"}]),
+            ),
+            patch(
+                "wactorz.agents.home_assistant_agent.update_automation",
+                new=AsyncMock(side_effect=RuntimeError("HA rejected it")),
+            ),
+        ):
+            result = await agent._edit_automation(
+                "change porch lights",
+                [{"id": "abc123", "alias": "Porch lights"}],
+                {"data": {"entities": []}},
+            )
+
+        self.assertFalse(result["edited"])
+        self.assertIn("HA rejected it", result["result"])
 
 
 if __name__ == "__main__":

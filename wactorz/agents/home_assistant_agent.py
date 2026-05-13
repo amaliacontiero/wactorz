@@ -45,6 +45,11 @@ from .llm_agent import LLMAgent, LLMProvider
 
 logger = logging.getLogger(__name__)
 
+
+class AutomationEditError(Exception):
+    """Internal error used to map edit helper failures to the public edit response."""
+
+
 # ---------------------------------------------------------------------------
 # System prompts
 # ---------------------------------------------------------------------------
@@ -1436,6 +1441,86 @@ class HomeAssistantAgent(LLMAgent):
 
     # ── Automation editing ────────────────────────────────────────────────────
 
+    async def _identify_automation(
+        self,
+        text: str,
+        automations: list[dict[str, Any]],
+    ) -> tuple[str, str]:
+        """Identify which automation the user wants to edit based on their request and the list of automations."""
+        ident_payload = {"user_request": text, "automations": automations}
+        try:
+            ident_response, usage = await self.llm.complete(
+                messages=[{"role": "user", "content": json.dumps(ident_payload)}],
+                system=HA_IDENTIFY_AUTOMATION_PROMPT,
+            )
+            self._accumulate_usage(usage)
+            ident_data = json.loads(self._strip_fences(ident_response))
+        except Exception as exc:
+            raise AutomationEditError(f"Could not identify automation to edit: {exc}") from exc
+
+        if not isinstance(ident_data, dict):
+            raise AutomationEditError("Could not identify which automation to edit.")
+        if not ident_data.get("found"):
+            raise AutomationEditError(str(ident_data.get("result", "Could not identify which automation to edit.")))
+
+        automation_id = str(ident_data.get("automation_id", "")).strip()
+        automation_name = str(ident_data.get("automation_name", "")).strip()
+
+        if not automation_id:
+            raise AutomationEditError("Could not determine the automation ID to edit.")
+
+        return automation_id, automation_name
+
+    async def _get_automation_config(self, automation_id: str, automation_name: str) -> dict[str, Any]:
+        """Fetch the full automation config for a given automation ID."""
+        try:
+            full_list = await get_automations(self.ha_url, self.ha_token)
+            match = next(
+                (
+                    a for a in (full_list or [])
+                    if isinstance(a, dict)
+                    and (a.get("id") == automation_id or a.get("alias") == automation_name)
+                ),
+                None,
+            )
+            if isinstance(match, dict):
+                return match
+            return {}
+        except Exception as exc:
+            logger.warning("[%s] Could not fetch full automation config: %s", self.name, exc)
+            return {}
+
+    async def _generate_modified_automation_config(
+        self,
+        text: str,
+        existing_config: dict[str, Any],
+        entity_ids: list[str],
+    ) -> dict[str, Any]:
+        """Generate the updated automation config from the user's edit request."""
+        edit_payload = {
+            "user_request": text,
+            "existing_automation": existing_config,
+            "available_entities": entity_ids[:100],
+        }
+        try:
+            edit_response, usage = await self.llm.complete(
+                messages=[{"role": "user", "content": json.dumps(edit_payload)}],
+                system=HA_EDIT_AUTOMATION_PROMPT,
+            )
+            self._accumulate_usage(usage)
+            edit_data = json.loads(self._strip_fences(edit_response))
+        except Exception as exc:
+            raise AutomationEditError(f"LLM could not generate updated automation: {exc}") from exc
+
+        if not isinstance(edit_data, dict):
+            raise AutomationEditError("Invalid generated automation config.")
+        if not edit_data.get("can_edit"):
+            raise AutomationEditError(str(edit_data.get("result", "Automation cannot be edited.")))
+        updated_automation = edit_data.get("automation") or {}
+        if not isinstance(updated_automation, dict):
+            raise AutomationEditError("Generated automation config must be an object.")
+        return updated_automation
+
     async def _edit_automation(
         self,
         text: str,
@@ -1450,80 +1535,34 @@ class HomeAssistantAgent(LLMAgent):
             return {"result": "HA_URL or HA_TOKEN not configured.", "edited": False}
 
         # Step 1 — identify which automation the user wants to edit
-        ident_payload = {"user_request": text, "automations": automations}
         try:
-            ident_response, usage = await self.llm.complete(
-                messages=[{"role": "user", "content": json.dumps(ident_payload)}],
-                system=HA_IDENTIFY_AUTOMATION_PROMPT,
-            )
-            self._accumulate_usage(usage)
-            ident_data = json.loads(self._strip_fences(ident_response))
-        except Exception as exc:
-            return {"result": f"Could not identify automation to edit: {exc}", "edited": False}
-
-        if not isinstance(ident_data, dict):
-            return {"result": "Could not identify which automation to edit.", "edited": False}
-        if not ident_data.get("found"):
-            return {
-                "result": str(ident_data.get("result", "Could not identify which automation to edit.")),
-                "edited": False,
-            }
-
-        automation_id = str(ident_data.get("automation_id", "")).strip()
-        automation_name = str(ident_data.get("automation_name", "")).strip()
-
-        if not automation_id:
-            return {"result": "Could not determine the automation ID to edit.", "edited": False}
+            automation_id, automation_name = await self._identify_automation(text, automations)
+        except AutomationEditError as exc:
+            return {"result": str(exc), "edited": False}
 
         # Fetch the full automation config for context
         existing_config: dict[str, Any] = {"id": automation_id, "alias": automation_name}
-        try:
-            full_list = await get_automations(self.ha_url, self.ha_token)
-            match = next(
-                (
-                    a for a in (full_list or [])
-                    if isinstance(a, dict)
-                    and (a.get("id") == automation_id or a.get("alias") == automation_name)
-                ),
-                None,
+        fetched_config = await self._get_automation_config(automation_id, automation_name)
+        if fetched_config:
+            existing_config = fetched_config
+        else:
+            logger.warning(
+                "[%s] Could not fetch full automation config for automation_id: %s, automation_name: %s",
+                self.name,
+                automation_id,
+                automation_name,
             )
-            if match:
-                existing_config = match
-        except Exception as exc:
-            logger.warning("[%s] Could not fetch full automation config: %s", self.name, exc)
 
         # Build flat entity list for context (cap to avoid huge prompts)
-        entity_ids = [
-            e.get("entity_id")
-            for e in devices.get("data", {}).get("entities", []) or []
-            if e.get("entity_id")
-        ]
+        entity_ids = self._entity_ids_from_devices(devices)
 
         # Step 2 — LLM generates the updated automation
-        edit_payload = {
-            "user_request": text,
-            "existing_automation": existing_config,
-            "available_entities": entity_ids[:100],
-        }
         try:
-            edit_response, usage = await self.llm.complete(
-                messages=[{"role": "user", "content": json.dumps(edit_payload)}],
-                system=HA_EDIT_AUTOMATION_PROMPT,
-            )
-            self._accumulate_usage(usage)
-            edit_data = json.loads(self._strip_fences(edit_response))
-        except Exception as exc:
-            return {"result": f"LLM could not generate updated automation: {exc}", "edited": False}
+            updated_automation = await self._generate_modified_automation_config(text, existing_config, entity_ids)
+        except AutomationEditError as exc:
+            logger.warning("[%s] Could not generate updated automation: %s", self.name, exc)
+            return {"result": str(exc), "edited": False}
 
-        if not isinstance(edit_data, dict):
-            return {"result": "Could not update automation.", "edited": False}
-        if not edit_data.get("can_edit"):
-            return {
-                "result": str(edit_data.get("result", "Could not update automation.")),
-                "edited": False,
-            }
-
-        updated_automation = edit_data.get("automation") or {}
         error = self._validate_automation(updated_automation)
         if error:
             return {"result": f"Updated automation is invalid: {error}", "edited": False}
@@ -1542,6 +1581,14 @@ class HomeAssistantAgent(LLMAgent):
             return {"result": f"Error updating automation: {exc}", "edited": False}
 
     # ── Static helpers ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _entity_ids_from_devices(devices: dict[str, Any]) -> list[str]:
+        return [
+            e.get("entity_id")
+            for e in devices.get("data", {}).get("entities", []) or []
+            if e.get("entity_id")
+        ]
 
     @staticmethod
     def _extract_payload(payload: Any) -> tuple[str, list[str], list[dict[str, Any]]]:
