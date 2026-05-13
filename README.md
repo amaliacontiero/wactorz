@@ -289,10 +289,6 @@ async def handle_task(agent, payload):
 ## 6. Health Monitoring & Error Recovery
 
 Wactorz has a four-layer error handling system. Errors are first-class events, not just log lines.
-
-## UPDATE: Section 6 — Health Monitoring & Error Recovery
- 
-Replace the existing "Layer 1" content with this expanded version that includes the self-healing layers:
  
 ---
  
