@@ -1,10 +1,15 @@
 <p align="center">
   <img src=".github/assets/logo.svg" width="120" alt="Wactorz" />
 </p>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)"  srcset=".github/assets/title-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset=".github/assets/title-light.svg">
+    <img src=".github/assets/title-dark.svg" width="320" alt="Wactorz" />
+  </picture>
+</p>
 
-# Wactorz
-
-**Spawn, coordinate, and monitor AI agents at runtime just by talking to them.**
+<p align="center"><strong>Spawn, coordinate, and monitor AI agents at runtime just by talking to them.</strong></p>
 
 Wactorz is an actor-model multi-agent framework for real-world automation:
 dynamic agents, MQTT wiring, Home Assistant control, remote nodes, persistent state,
