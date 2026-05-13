@@ -1,4 +1,6 @@
-![Wactorz](.github/assets/icon.png)
+<p align="center">
+  <img src=".github/assets/logo.svg" width="120" alt="Wactorz" />
+</p>
 
 # Wactorz
 
@@ -18,6 +20,7 @@ live telemetry, and LLM cost tracking.
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://python.org)
 [![MQTT](https://img.shields.io/badge/transport-MQTT-purple.svg)](https://mosquitto.org)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-addon-41BDF5.svg)](ha-addon/DOCS.md)
+[![All Contributors](https://img.shields.io/badge/all_contributors-4-orange.svg?style=flat-square)](#contributors-)
 
 ---
 
@@ -220,12 +223,75 @@ system durable, and the dashboard makes the invisible parts visible.
 
 ---
 
+## Contributors
+
+<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
+<!-- prettier-ignore-start -->
+<!-- markdownlint-disable -->
+<table>
+  <tbody>
+    <tr>
+      <td align="center" valign="top" width="14.28%">
+        <a href="https://github.com/ounospanas">
+          <img src="https://avatars.githubusercontent.com/u/29335277?v=4" width="100px;" alt="Panagiotis Kasnesis"/>
+          <br /><sub><b>Panagiotis Kasnesis</b></sub>
+        </a>
+        <br />
+        <a href="#projectManagement-ounospanas" title="Project Management">📆</a>
+        <a href="https://github.com/waldiez/wactorz/commits?author=ounospanas" title="Code">💻</a>
+      </td>
+      <td align="center" valign="top" width="14.28%">
+        <a href="https://github.com/lazToum">
+          <img src="https://avatars.githubusercontent.com/u/4764837?v=4" width="100px;" alt="Lazaros Toumanidis"/>
+          <br /><sub><b>Lazaros Toumanidis</b></sub>
+        </a>
+        <br />
+        <a href="https://github.com/waldiez/wactorz/commits?author=lazToum" title="Code">💻</a>
+        <a href="#design-lazToum" title="UI & Design">🎨</a>
+      </td>
+      <td align="center" valign="top" width="14.28%">
+        <a href="https://github.com/hchris0">
+          <img src="https://avatars.githubusercontent.com/u/23460824?v=4" width="100px;" alt="Chris"/>
+          <br /><sub><b>Chris</b></sub>
+        </a>
+        <br />
+        <a href="https://github.com/waldiez/wactorz/commits?author=hchris0" title="Code">💻</a>
+        <a href="#userTesting-hchris0" title="User Testing">📓</a>
+      </td>
+      <td align="center" valign="top" width="14.28%">
+        <a href="https://github.com/amaliacontiero">
+          <img src="https://avatars.githubusercontent.com/u/29499343?v=4" width="100px;" alt="Amalia Contiero"/>
+          <br /><sub><b>Amalia Contiero</b></sub>
+        </a>
+        <br />
+        <a href="https://github.com/waldiez/wactorz/commits?author=amaliacontiero" title="Code">💻</a>
+        <a href="#promotion-amaliacontiero" title="Promotion">📣</a>
+      </td>
+    </tr>
+  </tbody>
+</table>
+<!-- markdownlint-restore -->
+<!-- prettier-ignore-end -->
+<!-- ALL-CONTRIBUTORS-LIST:END -->
+
+Want to see your avatar here? Contributions of any kind are welcome -- read [CONTRIBUTING.md](CONTRIBUTING.md) to get started.
+
+---
+
 ## Contributing
 
-Contributions are welcome: agents, providers, docs, tests, UI polish, Home Assistant recipes,
-deployment hardening, and bug fixes.
+Wactorz is built in the open and all kinds of contributions are welcome.
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) to get set up.
+| What | How |
+|---|---|
+| Found a bug | [Open an issue](https://github.com/waldiez/wactorz/issues/new?template=bug_report.yml) |
+| Have an idea | [Start a discussion](https://github.com/waldiez/wactorz/discussions) |
+| Want to code | Fork, branch, and open a PR against `main` |
+| Docs, tests, UI | Same as above -- every improvement counts |
+| New agent recipe | Add it in `wactorz/agents/` and open a PR |
+| Home Assistant | HA integrations and addon config PRs are very welcome |
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions, code style, and the PR process.
 
 ---
 
