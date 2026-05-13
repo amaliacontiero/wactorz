@@ -9,6 +9,173 @@ Wactorz supports two deployment modes:
 
 ---
 
+## Docker Hub
+
+> **Prerequisite:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running.
+
+- [Option A - Terminal + Compose](#option-a---terminal--compose-recommended)
+- [Option B - Docker Desktop GUI](#option-b---docker-desktop-gui)
+
+---
+
+### Option A - Terminal + Compose (recommended)
+
+Works in any terminal, including the built-in terminal in Docker Desktop.
+
+**1. Create a project folder**
+
+```bash
+mkdir wactorz
+cd wactorz
+```
+
+**2. Create three files inside that folder**
+
+> **Windows tip:** open Notepad, paste the content, then *Save As* - set *Save as type* to **All Files** and type the filename exactly as shown. This prevents Windows from secretly adding `.txt` to the end.
+
+**`mosquitto.conf`**
+
+```
+listener 1883
+listener 9001
+protocol websockets
+allow_anonymous true
+persistence true
+persistence_location /mosquitto/data/
+log_dest stdout
+```
+
+**`compose.yaml`**
+
+```yaml
+name: wactorz
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: wactorz-mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto-data:/mosquitto/data
+    networks:
+      - wactorz-net
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-t", "$$SYS/#", "-C", "1", "-i", "hc", "-W", "3"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  wactorz:
+    image: waldiez/wactorz:latest
+    container_name: wactorz
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
+    ports:
+      - "8000:8000"
+      - "8888:8888"
+    networks:
+      - wactorz-net
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+
+networks:
+  wactorz-net:
+
+volumes:
+  mosquitto-data:
+```
+
+**`.env`** - uncomment the provider you want to use:
+
+```bash
+# ── Anthropic (Claude) ── default ────────────────────────────────────────────
+LLM_API_KEY=sk-ant-...
+LLM_PROVIDER=anthropic
+LLM_MODEL=claude-sonnet-4-6
+
+# ── OpenAI ────────────────────────────────────────────────────────────────────
+# LLM_API_KEY=sk-...
+# LLM_PROVIDER=openai
+# LLM_MODEL=gpt-4o
+
+# ── Ollama (local) ───────────────────────────────────────────────────────────
+# LLM_PROVIDER=ollama
+# LLM_MODEL=llama3
+```
+
+**3. Start**
+
+```bash
+docker compose up -d
+```
+
+Images are pulled automatically on first run.
+
+**4. Open**
+
+| | URL |
+|---|---|
+| Monitor UI | `http://localhost:8888` |
+| REST API | `http://localhost:8000` |
+
+To stop: `docker compose down`
+
+---
+
+### Option B - Docker Desktop GUI
+
+**Step 1 - Start Mosquitto**
+
+1. In Docker Desktop search for `eclipse-mosquitto`
+2. Pull tag `2.0`
+3. Click **Run**, expand **Optional settings**, and fill in:
+
+| Field | Value |
+|---|---|
+| Container name | `wactorz-mosquitto` |
+| Host port for `1883` | `1883` |
+| Host port for `9001` | `9001` |
+
+4. Under **Networks**, type `wactorz-net` to create a new shared network and attach this container to it
+5. Click **Run**
+
+**Step 2 - Start Wactorz**
+
+1. Search for `waldiez/wactorz`, pull tag `latest`
+2. Click **Run**, expand **Optional settings**, and fill in:
+
+| Field | Value |
+|---|---|
+| Container name | `wactorz` |
+| Host port for `8000` | `8000` |
+| Host port for `8888` | `8888` |
+
+3. Add these **Environment variables**:
+
+| Variable | Value |
+|---|---|
+| `LLM_API_KEY` | your API key |
+| `LLM_PROVIDER` | `anthropic` (or `openai` / `ollama`) |
+| `LLM_MODEL` | `claude-sonnet-4-6` |
+| `MQTT_HOST` | `wactorz-mosquitto` |
+| `MQTT_PORT` | `1883` |
+
+4. Under **Networks**, attach to the same `wactorz-net` network
+5. Click **Run**
+
+Open `http://localhost:8888`.
+
+---
+
 ## Full Docker  (`compose.yaml`)
 
 ### Prerequisites
