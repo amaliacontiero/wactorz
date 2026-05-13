@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import time
 from typing import Any
@@ -496,18 +495,17 @@ class HomeAssistantAgent(LLMAgent):
 
     async def chat(self, user_message: str) -> str:
         """Direct entry point used by CLI when addressing this agent."""
-        import time as _t
-        ts_user = _t.time()
+        ts_user = time.time()
         self._conversation_history.append({"role": "user", "content": user_message, "ts": ts_user})
         result = await self._process(user_message)
         response = str(result.get("result", ""))
-        ts_reply = _t.time()
+        ts_reply = time.time()
         self._conversation_history.append({"role": "assistant", "content": response, "ts": ts_reply})
         await self._maybe_summarize()
         self.persist("conversation_history", self._conversation_history)
         self._log_chat_turn(user_message, response, ts_user=ts_user, ts_reply=ts_reply)
         return response
-    
+
     async def chat_stream(self, user_message: str):
         """
         Override LLMAgent streaming path so direct @home-assistant-agent calls
@@ -580,6 +578,8 @@ class HomeAssistantAgent(LLMAgent):
 
         if action == "create_automation":
             # Create flow: hardware selection then automation generation.
+            # NOTE: the create_automation flow is temporarily disabled in _process.
+            # instead, hardware recommendation is used.
             devices = await self._get_devices()
             logger.info("[%s] Got devices from Home Assistant", self.name)
             # hardware_result = await self._select_hardware(text, devices)
@@ -648,9 +648,9 @@ class HomeAssistantAgent(LLMAgent):
             return "get_entities_state"
         if any(w in lower for w in ("list automations", "show automations", "show all automations", "what automations", "what are my automations")):
             return "list_automations"
-        if any(w in lower for w in ("delete", "remove automation", "disable automation")):
+        if any(w in lower for w in ("delete automation", "remove automation", "disable automation")):
             return "delete_automation"
-        if any(w in lower for w in ("edit", "update automation", "change automation", "modify automation", "rename automation")):
+        if any(w in lower for w in ("edit automation", "update automation", "change automation", "modify automation", "rename automation")):
             return "edit_automation"
         if (
             "automation" in lower
@@ -833,23 +833,24 @@ class HomeAssistantAgent(LLMAgent):
         if not self.ha_url or not self.ha_token:
             data: dict[str, Any] = {
                 "connected": False,
-                "devices": [],
+                "data": {},
                 "reason": "HOME_ASSISTANT_URL or HOME_ASSISTANT_TOKEN is not configured",
             }
             self._device_cache = {"timestamp": now, "data": data}
             return data
 
         try:
-            devices = await get_simplified_ha_data(self.ha_url, self.ha_token)
-            if not isinstance(devices, dict):
-                devices = []
-            data = {"connected": True, "devices": devices, "reason": ""}
+            ha_data = await get_simplified_ha_data(self.ha_url, self.ha_token)
+            if not isinstance(ha_data, dict):
+                logger.warning("[%s] get_simplified_ha_data returned unexpected type %s", self.name, type(ha_data))
+                ha_data = {}
+            data = {"connected": True, "data": ha_data, "reason": ""}
             self._device_cache = {"timestamp": now, "data": data}
             return data
         except Exception as exc:
             data = {
                 "connected": False,
-                "devices": [],
+                "data": {},
                 "reason": f"Could not query Home Assistant devices: {exc}",
             }
             self._device_cache = {"timestamp": now, "data": data}
@@ -885,13 +886,15 @@ class HomeAssistantAgent(LLMAgent):
             return []
 
     # ── Hardware selection ────────────────────────────────────────────────────
+    # NOTE: _select_hardware, _format_hardware_result, and _extract_entity_ids_from_hardware
+    # are currently unused — the create_automation flow is temporarily disabled in _process.
 
     async def _select_hardware(self, text: str, devices: dict[str, Any]) -> dict[str, Any]:
         """LLM-backed hardware selection. Returns a formatted hardware result dict."""
         if self.llm is None:
             return self._format_hardware_result(text, devices, [], False, "No LLM provider configured.")
 
-        dev_list = devices.get("devices", []) or []
+        dev_list = devices.get("data", {}).get("devices", []) or []
         payload = {
             "user_request": text,
             "device_discovery": {
@@ -980,10 +983,10 @@ class HomeAssistantAgent(LLMAgent):
             "device_discovery": {
                 "connected": connected,
                 "reason": devices.get("reason", ""),
-                "devices": devices.get("devices", {}).get("devices", []) or [],
-                "entities": devices.get("devices", {}).get("entities", []) or [],
-                "floors": devices.get("devices", {}).get("floors", []) or [],
-                "areas": devices.get("devices", {}).get("areas", []) or [],
+                "devices": devices.get("data", {}).get("devices", []) or [],
+                "entities": devices.get("data", {}).get("entities", []) or [],
+                "floors": devices.get("data", {}).get("floors", []) or [],
+                "areas": devices.get("data", {}).get("areas", []) or [],
             },
         }
         user_msg = {"role": "user", "content": json.dumps(payload)}
@@ -1398,7 +1401,9 @@ class HomeAssistantAgent(LLMAgent):
         except Exception as exc:
             return {"result": f"Could not identify automation to delete: {exc}", "deleted": False}
 
-        if not isinstance(data, dict) or not data.get("found"):
+        if not isinstance(data, dict):
+            return {"result": "Could not identify which automation to delete.", "deleted": False}
+        if not data.get("found"):
             return {
                 "result": str(data.get("result", "Could not identify which automation to delete.")),
                 "deleted": False,
@@ -1441,6 +1446,8 @@ class HomeAssistantAgent(LLMAgent):
             return {"result": "No automations found in Home Assistant to edit.", "edited": False}
         if self.llm is None:
             return {"result": "No LLM provider configured.", "edited": False}
+        if not self.ha_url or not self.ha_token:
+            return {"result": "HA_URL or HA_TOKEN not configured.", "edited": False}
 
         # Step 1 — identify which automation the user wants to edit
         ident_payload = {"user_request": text, "automations": automations}
@@ -1454,7 +1461,9 @@ class HomeAssistantAgent(LLMAgent):
         except Exception as exc:
             return {"result": f"Could not identify automation to edit: {exc}", "edited": False}
 
-        if not isinstance(ident_data, dict) or not ident_data.get("found"):
+        if not isinstance(ident_data, dict):
+            return {"result": "Could not identify which automation to edit.", "edited": False}
+        if not ident_data.get("found"):
             return {
                 "result": str(ident_data.get("result", "Could not identify which automation to edit.")),
                 "edited": False,
@@ -1468,27 +1477,25 @@ class HomeAssistantAgent(LLMAgent):
 
         # Fetch the full automation config for context
         existing_config: dict[str, Any] = {"id": automation_id, "alias": automation_name}
-        if self.ha_url and self.ha_token:
-            try:
-                full_list = await get_automations(self.ha_url, self.ha_token)
-                match = next(
-                    (
-                        a for a in (full_list or [])
-                        if isinstance(a, dict)
-                        and (a.get("id") == automation_id or a.get("alias") == automation_name)
-                    ),
-                    None,
-                )
-                if match:
-                    existing_config = match
-            except Exception as exc:
-                logger.warning("[%s] Could not fetch full automation config: %s", self.name, exc)
+        try:
+            full_list = await get_automations(self.ha_url, self.ha_token)
+            match = next(
+                (
+                    a for a in (full_list or [])
+                    if isinstance(a, dict)
+                    and (a.get("id") == automation_id or a.get("alias") == automation_name)
+                ),
+                None,
+            )
+            if match:
+                existing_config = match
+        except Exception as exc:
+            logger.warning("[%s] Could not fetch full automation config: %s", self.name, exc)
 
         # Build flat entity list for context (cap to avoid huge prompts)
         entity_ids = [
             e.get("entity_id")
-            for d in devices.get("devices", [])
-            for e in d.get("entities", [])
+            for e in devices.get("data", {}).get("entities", []) or []
             if e.get("entity_id")
         ]
 
@@ -1508,7 +1515,9 @@ class HomeAssistantAgent(LLMAgent):
         except Exception as exc:
             return {"result": f"LLM could not generate updated automation: {exc}", "edited": False}
 
-        if not isinstance(edit_data, dict) or not edit_data.get("can_edit"):
+        if not isinstance(edit_data, dict):
+            return {"result": "Could not update automation.", "edited": False}
+        if not edit_data.get("can_edit"):
             return {
                 "result": str(edit_data.get("result", "Could not update automation.")),
                 "edited": False,
@@ -1518,9 +1527,6 @@ class HomeAssistantAgent(LLMAgent):
         error = self._validate_automation(updated_automation)
         if error:
             return {"result": f"Updated automation is invalid: {error}", "edited": False}
-
-        if not self.ha_url or not self.ha_token:
-            return {"result": "HA_URL or HA_TOKEN not configured.", "edited": False}
 
         try:
             await update_automation(self.ha_url, self.ha_token, automation_id, updated_automation)
@@ -1590,13 +1596,13 @@ class HomeAssistantAgent(LLMAgent):
     def _available_entity_ids(devices: dict[str, Any]) -> set[str]:
         """Extract the flat set of all entity IDs from a device-discovery result.
 
-        Walks ``devices["devices"]["entities"]`` and collects every non-empty
+        Walks ``devices["data"]["entities"]`` and collects every non-empty
         ``entity_id`` string. The resulting set is used as the ground-truth
         allowlist when normalizing LLM hardware recommendations, so that any
         entity ID the LLM invented but that is not present here gets discarded.
         """
         available: set[str] = set()
-        for entity in devices.get("devices", {}).get("entities", []) or []:
+        for entity in devices.get("data", {}).get("entities", []) or []:
             if not isinstance(entity, dict):
                 continue
             entity_id = str(entity.get("entity_id", "")).strip()
