@@ -1369,11 +1369,15 @@ class MainActor(LLMAgent):
         logger.info(f"[{self.name}] Facts extraction running on: {user_message[:80]!r}")
         exchange = f"USER: {user_message[:600]}\nASSISTANT: {assistant_response[:600]}"
         try:
-            raw, _ = await self.llm.complete(
+            raw, _usage = await self.llm.complete(
                 messages=[{"role": "user", "content": exchange}],
                 system=self._FACTS_EXTRACT_PROMPT,
                 max_tokens=300,
             )
+            self.total_input_tokens  += _usage.get("input_tokens", 0)
+            self.total_output_tokens += _usage.get("output_tokens", 0)
+            self.total_cost_usd      += _usage.get("cost_usd", 0.0)
+            self._persist_cost()
             import json as _json
             clean = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
             if not clean:
@@ -1573,7 +1577,7 @@ class MainActor(LLMAgent):
         if self.llm is None:
             return "OTHER"
         try:
-            decision, _ = await asyncio.wait_for(
+            decision, _usage = await asyncio.wait_for(
                 self.llm.complete(
                     messages=[{"role": "user", "content": text}],
                     system=self.INTENT_CLASSIFIER_PROMPT,
@@ -1582,6 +1586,10 @@ class MainActor(LLMAgent):
                 ),
                 timeout=60.0,
             )
+            self.total_input_tokens  += _usage.get("input_tokens", 0)
+            self.total_output_tokens += _usage.get("output_tokens", 0)
+            self.total_cost_usd      += _usage.get("cost_usd", 0.0)
+            self._persist_cost()
             token = (decision or "").strip().upper().split()[0] if decision else "OTHER"
             if token in ("HA", "PIPELINE", "OTHER", "ACTUATE"):
                 return token
@@ -1796,63 +1804,78 @@ class MainActor(LLMAgent):
                 "**Wactorz commands**",
                 "",
                 "**Agents**",
-                "  /agents               — list all known agents with descriptions and schemas",
-                "  /agents <keyword>     — filter agents by capability keyword",
-                "  /capabilities         — alias for /agents",
-                "  /agents stop <name>   — stop and remove an agent (local or remote)",
-                "  /agents delete <name> — alias for /agents stop",
-                "  /registry             — diagnostic: compare live registry, spawn registry, and manifest cache",
-                "  /plans                — list pending pipeline proposals (dry-run)",
-                "  /plans show <id>      — inspect a proposal's full code",
-                "  /plans approve <id>   — execute a proposed pipeline",
-                "  /plans reject <id>    — discard a proposed pipeline",
-                "  pipeline! <task>      — bypass approval and execute immediately (power users)",
-                "  @agent-name <msg>     — send a message directly to a named agent",
-                "  @catalog list         — list available catalog recipes",
-                "  @catalog spawn <n>    — spawn a catalog agent",
+                "  /agents                 — list all known agents with descriptions and schemas",
+                "  /agents <keyword>       — filter agents by capability keyword",
+                "  /capabilities           — alias for /agents",
+                "  /delete <agent>         — stop an agent and remove it from the spawn registry",
+                "  /stop <agent>           — alias of /delete",
+                "  /pause <agent>          — pause a local agent (remote not supported)",
+                "  /resume <agent>         — resume a paused local agent",
+                "  @agent-name <msg>       — send a message directly to a named agent",
+                "  @catalog list           — list available catalog recipes",
+                "  @catalog spawn <n>      — spawn a catalog agent",
                 "",
                 "**Nodes**",
-                "  /nodes                            — list remote nodes and their agents",
-                "  /nodes remove <node>              — stop all agents on a node and remove it",
+                "  /nodes                  — list local + remote nodes and their agents",
+                "  /nodes remove <node>    — stop all agents on a node and remove it",
                 "  /deploy <node> [host [user [pw [broker]]]]",
-                "                                    — deploy a remote Wactorz node",
-                "                                      (run with just <node> to auto-discover hosts)",
-                "  /migrate <agent> <node>           — move an agent to a different node",
+                "                          — deploy a remote Wactorz node",
+                "                            (run with just <node> to auto-discover hosts)",
+                "  /migrate <agent> <node> — move an agent to a different node",
                 "",
-                "**Pipelines**",
-                "  /rules                — list active pipeline rules",
-                "  /rules delete <id>    — stop agents and remove a rule",
+                "**Pipelines & Plans**",
+                "  /plans                  — list pending pipeline proposals (dry-run)",
+                "  /plans show <id>        — inspect a proposal's full code",
+                "  /plans approve <id>     — execute a proposed pipeline",
+                "  /plans reject <id>      — discard a proposed pipeline",
+                "  /clear-plans            — clear the plan cache",
+                "  /rules                  — list active pipeline rules",
+                "  /rules delete <id>      — stop agents and remove a rule",
+                "  pipeline! <task>        — bypass approval and execute immediately (power users)",
                 "",
                 "**Memory**",
-                "  /memory               — show stored user facts and conversation summary",
-                "  /memory clear         — wipe all memory",
-                "  /memory forget <key>  — remove one stored fact",
+                "  /memory                 — show stored user facts and conversation summary",
+                "  /memory clear           — wipe all memory",
+                "  /memory forget <key>    — remove one stored fact",
                 "",
                 "**Notifications**",
-                "  /webhook discord <url>   — store a Discord webhook URL",
-                "  /webhook telegram <url>  — store a Telegram webhook URL",
-                "  /webhook                 — list stored webhook URLs",
+                "  /webhook                — list stored webhook URLs",
+                "  /webhook discord <url>  — store a Discord webhook URL",
+                "  /webhook telegram <url> — store a Telegram webhook URL",
                 "",
-                "**System**",
-                "  /nodes                — list remote nodes and their agents",
-                "  /topics               — list MQTT topics published by known agents",
-                "  /topics <keyword>     — filter topics by keyword",
-                "  /bus                  — TopicBus registry: contracts, data flows, wiring pairs",
-                "  /mqtt                 — MQTT publisher status (connected, queue depth, outbox)",
-                "  /help                 — show this help",
+                "**System & diagnostics**",
+                "  /topics                 — list MQTT topics published by known agents",
+                "  /topics <keyword>       — filter topics by keyword",
+                "  /bus                    — TopicBus registry: contracts, data flows, wiring pairs",
+                "  /mqtt                   — MQTT publisher status (connected, queue depth, outbox)",
+                "  /registry               — diagnostic: compare live registry, spawn registry, manifest cache",
+                "  /help                   — show this help",
             ])
         if stripped in ("main.list_nodes", "list_nodes", "/nodes"):
             nodes = self.list_nodes()
-            if not nodes:
-                return note_prefix + "No remote nodes seen yet. Deploy one with /deploy <node-name>."
             import time as _t
-            lines = []
+
+            # Local row first — matches the format users got from io_agent
+            local_agents = []
+            if self._registry:
+                local_agents = sorted(a.name for a in self._registry.all_actors())
+            local_str = ", ".join("@" + n for n in local_agents) or "(none)"
+            lines = [f"  {'local':22s} 🟢 online  |  agents: {local_str}"]
+
+            # Remote rows
             for nd in sorted(nodes, key=lambda x: x["node"]):
-                status   = "🟢 online" if nd["online"] else "🔴 offline"
-                agents   = ", ".join(nd["agents"]) or "(no agents)"
+                status   = "🟢 online " if nd["online"] else "🔴 offline"
+                agents   = ", ".join("@" + a for a in nd["agents"]) or "(no agents)"
                 age      = int(_t.time() - nd["last_seen"])
                 lines.append(f"  {nd['node']:22s} {status}  |  agents: {agents}  |  last heartbeat: {age}s ago")
-            return note_prefix + "Remote nodes:\n" + "\n".join(lines) + "\nTo remove a node: /nodes remove <node-name>"
+
+            footer = ""
+            if not nodes:
+                footer = "\n(no remote nodes seen yet — deploy one with /deploy <node-name>)"
+            else:
+                footer = "\nTo remove a remote node: /nodes remove <node-name>"
+
+            return note_prefix + "Nodes:\n" + "\n".join(lines) + footer
 
         if stripped.startswith("/topics"):
             keyword = stripped[7:].strip().lstrip("(").rstrip(")")
@@ -2052,6 +2075,107 @@ class MainActor(LLMAgent):
             rule_id = stripped[len("/rules delete "):].strip()
             result = await self.delete_pipeline_rule(rule_id)
             return note_prefix + result
+
+        # ── /delete <agent>, /stop <agent> — direct shortcuts ──────────────
+        # Same behaviour as `/agents delete <name>` / `/agents stop <name>`,
+        # but as a top-level command so users (and main itself) don't need to
+        # round-trip through the LLM. Reuses the unified handler below by
+        # rewriting `stripped` and falling through.
+        for _short, _full in (("/delete ", "/agents delete "),
+                              ("/stop ",   "/agents stop ")):
+            if stripped.startswith(_short):
+                stripped = _full + stripped[len(_short):].strip()
+                break  # one match — fall through to the unified block
+
+        # ── /migrate <agent> <node> ─────────────────────────────────────────
+        # Moved here from io_agent so all interfaces (CLI, UI, Discord) share
+        # one implementation. The actual work is done by self.migrate_agent().
+        if stripped.startswith("/migrate"):
+            parts = stripped.split()
+            if len(parts) < 3:
+                return note_prefix + (
+                    "Usage: /migrate <agent-name> <target-node>\n"
+                    "Example: /migrate temp-sensor rpi-bedroom"
+                )
+            agent_name, target_node = parts[1], parts[2]
+            try:
+                result = await self.migrate_agent(agent_name, target_node)
+            except Exception as exc:
+                logger.exception(f"[main] /migrate failed for '{agent_name}' → '{target_node}'")
+                return note_prefix + f"Migrate failed: {exc}"
+            sym = "OK" if result.get("success") else "FAIL"
+            return note_prefix + f"[{sym}] {result.get('message', str(result))}"
+
+        # ── /deploy (non-streaming path) ────────────────────────────────────
+        # The streaming version yields progress chunks live; this version
+        # collects them and returns one joined string. Callers without
+        # streaming (Discord, REST, CLI input()) get the full transcript at
+        # the end. Implementation lives in _slash_deploy_stream so there is
+        # exactly one source of truth for what /deploy does.
+        if stripped.startswith("/deploy"):
+            chunks: list[str] = []
+            async for chunk in self._slash_deploy_stream(stripped):
+                if isinstance(chunk, str):
+                    chunks.append(chunk)
+            return note_prefix + "\n".join(chunks)
+
+        # ── /clear-plans ────────────────────────────────────────────────────
+        if stripped == "/clear-plans":
+            try:
+                self.persist("_plan_cache", {})
+            except Exception as exc:
+                logger.exception("[main] /clear-plans failed")
+                return note_prefix + f"Failed to clear plan cache: {exc}"
+            return note_prefix + "Plan cache cleared."
+
+        # ── /pause <agent>, /resume <agent> ─────────────────────────────────
+        # NOTE: the underlying remote_runner.py does not implement pause/resume
+        # topics, so these only affect LOCAL agents. For remote agents we tell
+        # the user honestly and suggest /stop instead.
+        for _cmd, _verb, _new_state in (
+            ("/pause ",  "pause",  ActorState.PAUSED),
+            ("/resume ", "resume", ActorState.RUNNING),
+        ):
+            if stripped.startswith(_cmd):
+                agent_name = stripped[len(_cmd):].strip()
+                if not agent_name:
+                    return note_prefix + f"Usage: {_cmd.strip()} <agent-name>"
+
+                # Remote check first — fail fast with a clear message
+                reg  = self._get_spawn_registry()
+                node = reg.get(agent_name, {}).get("node", "").strip()
+                if node:
+                    return note_prefix + (
+                        f"'{agent_name}' is running on remote node '{node}'. "
+                        f"Pause/resume is only supported for local agents. "
+                        f"Use /stop {agent_name} to stop it instead."
+                    )
+
+                if not self._registry:
+                    return note_prefix + "No actor registry available."
+
+                target = self._registry.find_by_name(agent_name)
+                if target is None:
+                    return note_prefix + f"Agent '{agent_name}' not found locally."
+
+                # Idempotent guards — be explicit so the user knows nothing changed
+                if _verb == "pause" and target.state == ActorState.PAUSED:
+                    return note_prefix + f"Agent '{agent_name}' is already paused."
+                if _verb == "resume" and target.state != ActorState.PAUSED:
+                    return note_prefix + (
+                        f"Agent '{agent_name}' is not paused (state: {target.state.name})."
+                    )
+
+                try:
+                    if _verb == "pause":
+                        await target.pause()
+                    else:
+                        await target.resume()
+                except Exception as exc:
+                    logger.exception(f"[main] /{_verb} failed for '{agent_name}'")
+                    return note_prefix + f"Failed to {_verb} '{agent_name}': {exc}"
+
+                return note_prefix + f"Agent '{agent_name}' {_verb}d."
 
         # ── /agents stop|delete|pause <name> ───────────────────────────────
         for _cmd in ("/agents stop ", "/agents delete ", "/agents pause ", "/agents remove "):
@@ -2553,6 +2677,14 @@ class MainActor(LLMAgent):
             or _stripped.startswith("@")
         )
         if _is_command:
+            # /deploy is the one slash command that needs to stream progress
+            # messages mid-execution (subnet scan, deploy phases). Other commands
+            # go through process_user_input which is request/response.
+            if _stripped.startswith("/deploy"):
+                async for chunk in self._slash_deploy_stream(_stripped):
+                    yield chunk
+                yield {"done": True, "spawned": [], "system_msg": ""}
+                return
             result = await self.process_user_input(text)
             yield result
             yield {"done": True, "spawned": [], "system_msg": ""}
@@ -4030,6 +4162,149 @@ class MainActor(LLMAgent):
                 if self.state.value not in ("stopped", "failed"):
                     logger.warning(f"[main] Manifest listener error: {e}. Reconnecting in 5s…")
                     await asyncio.sleep(5)
+
+    # ── Node deployment ────────────────────────────────────────────────────
+    # /deploy lives here (not in io_agent) so every interface — CLI, UI,
+    # Discord, future REST — shares one implementation. The streaming variant
+    # is the canonical one; process_user_input collects its chunks for the
+    # non-streaming path.
+
+    async def _slash_deploy_stream(self, stripped: str):
+        """
+        Async generator implementing /deploy. Yields progress strings.
+
+        Forms accepted:
+            /deploy <node>                                     — discovery only
+            /deploy <node> <host>                              — host given, ask for creds
+            /deploy <node> <host> <user> <password> [broker]   — full deploy
+        """
+        import socket as _socket
+
+        parts = stripped.split()
+        if len(parts) < 2:
+            yield ("[usage] /deploy <node-name> [host [user [password [broker]]]]\n"
+                   "Run with just the node name to discover hosts automatically.")
+            return
+
+        node_name = parts[1]
+        host      = parts[2] if len(parts) > 2 else ""
+        user      = parts[3] if len(parts) > 3 else ""
+        pw        = parts[4] if len(parts) > 4 else ""
+        broker    = parts[5] if len(parts) > 5 else ""
+
+        # ── Step 1: discover host if not provided ──────────────────────────
+        if not host:
+            yield f"[discover] Searching for '{node_name}' on the network..."
+
+            # mDNS first — try a few candidate hostnames
+            discovered = None
+            for candidate in [f"{node_name}.local", "raspberrypi.local",
+                               f"{node_name.replace('-', '')}.local"]:
+                try:
+                    ip = await asyncio.get_event_loop().run_in_executor(
+                        None, _socket.gethostbyname, candidate
+                    )
+                    discovered = ip
+                    yield f"[discover] Found via mDNS: {candidate} → {ip}"
+                    break
+                except _socket.gaierror:
+                    pass
+
+            # Fall back to subnet scan
+            if not discovered:
+                try:
+                    local_ip = await asyncio.get_event_loop().run_in_executor(
+                        None, lambda: _socket.gethostbyname(_socket.gethostname())
+                    )
+                    subnet = ".".join(local_ip.split(".")[:3])
+                except Exception:
+                    subnet = "192.168.1"
+                yield f"[discover] mDNS not found. Scanning {subnet}.1-254 for SSH..."
+                found = await self._scan_subnet_ssh(subnet)
+                if found:
+                    host_list = "\n".join(f"  {ip}" for ip in found)
+                    yield (
+                        f"[discover] Found {len(found)} SSH-accessible host(s):\n{host_list}\n\n"
+                        f"Re-run with the host you want:\n"
+                        f"  /deploy {node_name} <host> <user> <password> [broker]"
+                    )
+                else:
+                    yield (
+                        "[discover] No SSH hosts found.\n"
+                        f"Provide the host manually:\n"
+                        f"  /deploy {node_name} <host> <user> <password> [broker]"
+                    )
+            else:
+                yield (
+                    f"[discover] Host found: {discovered}\n"
+                    f"Re-run with credentials:\n"
+                    f"  /deploy {node_name} {discovered} <user> <password> [broker]"
+                )
+            return
+
+        # ── Step 2: need credentials ───────────────────────────────────────
+        if not user or not pw:
+            yield (
+                f"[deploy] Host: {host}\n"
+                f"Need SSH credentials. Re-run with:\n"
+                f"  /deploy {node_name} {host} <user> <password> [broker]"
+            )
+            return
+
+        # ── Step 3: deploy via installer agent ─────────────────────────────
+        broker = broker or "localhost"
+        if not hasattr(self, "delegate_to_installer"):
+            yield "[error] Installer agent not available."
+            return
+
+        yield (f"[deploy] Deploying to {user}@{host} as node '{node_name}'...\n"
+               f"(This may take 20-60 seconds while packages install on the remote machine)")
+        try:
+            result = await self.delegate_to_installer({
+                "action":    "node_deploy",
+                "host":      host,
+                "user":      user,
+                "password":  pw,
+                "node_name": node_name,
+                "broker":    broker,
+            }, timeout=120.0)
+        except Exception as exc:
+            logger.exception(f"[main] /deploy failed for node '{node_name}'")
+            yield f"[FAIL] Deploy failed: {exc}"
+            return
+
+        if result.get("success"):
+            yield (
+                f"[OK] Node '{node_name}' is live! It will appear in /nodes within ~15 seconds.\n\n"
+                f"Spawn agents on it:\n"
+                f"  \"spawn a CPU monitor agent on {node_name}\"\n"
+                f"  \"spawn a temperature sensor on {node_name}\""
+            )
+        else:
+            yield f"[FAIL] Deploy failed: {result.get('error', result)}"
+
+    async def _scan_subnet_ssh(self, subnet: str) -> list:
+        """Async port-22 scan of a /24 subnet. Returns sorted list of responding IPs."""
+        found: list[str] = []
+        sem = asyncio.Semaphore(60)
+
+        async def probe(ip: str):
+            async with sem:
+                try:
+                    _, w = await asyncio.wait_for(
+                        asyncio.open_connection(ip, 22), timeout=0.4
+                    )
+                    w.close()
+                    try:
+                        await w.wait_closed()
+                    except Exception:
+                        pass
+                    found.append(ip)
+                except Exception:
+                    pass
+
+        await asyncio.gather(*[probe(f"{subnet}.{i}") for i in range(1, 255)])
+        return sorted(found, key=lambda x: int(x.split(".")[-1]))
 
     async def migrate_agent(self, agent_name: str, target_node: str) -> dict:
         """

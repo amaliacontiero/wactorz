@@ -111,6 +111,9 @@ export class CardDashboard {
   private haClient: HAClient | null = null;
   private _haEntities: import("../io/HAClient").HAEntity[] = [];
 
+  private _remoteNodes = new Map<string, { agents: string[]; lastSeen: number }>();
+  private _removingIds = new Set<string>();
+
   // Streaming
   private _streamRow: HTMLElement | null = null;
   private _streamBody: HTMLElement | null = null;
@@ -248,17 +251,24 @@ export class CardDashboard {
       `[data-id="${CSS.escape(id)}"]`,
     );
     if (card) {
+      this._removingIds.add(id);
       card.style.animation = "cd-exit 0.25s ease forwards";
-      setTimeout(() => card.remove(), 250);
+      setTimeout(() => { card.remove(); this._removingIds.delete(id); }, 250);
     }
     if (this.view === "overview") this._renderStats();
     if (this.view === "chat") this._renderSidebar();
     this._updateTargetSelect();
   }
 
+  updateRemoteNode(name: string, agents: string[]): void {
+    this._remoteNodes.set(name, { agents, lastSeen: Date.now() });
+    if (this.view === "overview") this._renderNodes();
+  }
+
   onHeartbeat(agentId: string, timestampMs: number): void {
     this.lastHb.set(agentId, timestampMs);
     if (!this.root.classList.contains("cd-visible")) return;
+    if (this._removingIds.has(agentId)) return;
     const card = this.root.querySelector<HTMLElement>(
       `[data-id="${CSS.escape(agentId)}"]`,
     );
@@ -502,6 +512,36 @@ export class CardDashboard {
 
   // ── Private: overview ─────────────────────────────────────────────────────
 
+  private _renderNodes(container?: HTMLElement): void {
+    const list = container ?? this.root.querySelector<HTMLElement>("#af-node-list");
+    if (!list) return;
+    const agentNames = [...this.agents.values()].map((a) => a.name);
+    const rows: string[] = [];
+    rows.push(`
+      <div class="af-node-item">
+        <div>
+          <div class="af-node-name">local</div>
+          <div class="af-node-meta">${agentNames.length > 0 ? agentNames.join(", ") : "no agents"}</div>
+        </div>
+        <span class="af-node-pill online">online</span>
+      </div>`);
+    const staleMs = 90_000;
+    const now = Date.now();
+    for (const [name, info] of this._remoteNodes) {
+      const online = now - info.lastSeen < staleMs;
+      const meta = info.agents.length > 0 ? info.agents.join(", ") : "no agents";
+      rows.push(`
+        <div class="af-node-item">
+          <div>
+            <div class="af-node-name">${name}</div>
+            <div class="af-node-meta">${meta}</div>
+          </div>
+          <span class="af-node-pill ${online ? "online" : "offline"}">${online ? "online" : "offline"}</span>
+        </div>`);
+    }
+    list.innerHTML = rows.join("");
+  }
+
   private _buildOverview(): HTMLElement {
     const el = document.createElement("div");
     el.className = "af-overview";
@@ -538,17 +578,8 @@ export class CardDashboard {
     const nodeList = document.createElement("div");
     nodeList.className = "af-node-list";
     nodeList.id = "af-node-list";
-    const agentNames = [...this.agents.values()].map((a) => a.name);
-    nodeList.innerHTML = `
-      <div class="af-node-item">
-        <div>
-          <div class="af-node-name">local</div>
-          <div class="af-node-meta">${agentNames.length > 0 ? agentNames.join(", ") : "no agents"}</div>
-        </div>
-        <span class="af-node-pill online">online</span>
-      </div>
-    `;
     np.appendChild(nodeList);
+    this._renderNodes(nodeList);
 
     panels.appendChild(wp);
     panels.appendChild(np);
@@ -624,7 +655,10 @@ export class CardDashboard {
     });
     const live = new Set(sorted.map((a) => a.id));
     grid.querySelectorAll<HTMLElement>("[data-id]").forEach((el) => {
-      if (!live.has(el.dataset.id!)) el.remove();
+      if (!live.has(el.dataset.id!)) {
+        this._removingIds.delete(el.dataset.id!);
+        el.remove();
+      }
     });
     sorted.forEach((agent) => {
       if (!grid.querySelector(`[data-id="${CSS.escape(agent.id)}"]`)) {
@@ -634,6 +668,7 @@ export class CardDashboard {
   }
 
   private _patchCard(agent: AgentInfo): void {
+    if (this._removingIds.has(agent.id)) return;
     const card = this.root.querySelector<HTMLElement>(
       `[data-id="${CSS.escape(agent.id)}"]`,
     );

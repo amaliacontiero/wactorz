@@ -6,6 +6,7 @@ Supports Anthropic Claude, OpenAI, Ollama (local), and custom providers.
 import asyncio
 import logging
 import time
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from ..core.actor import Actor, Message, MessageType
@@ -14,12 +15,14 @@ from ..core.persistence import get_db
 logger = logging.getLogger(__name__)
 
 
-# Pricing per 1M tokens (input, output) in USD — update as needed
-PRICING = {
+# Fallback pricing per 1M tokens (input, output) in USD.
+# Used when the dynamic fetch fails or the model isn't in the LiteLLM catalogue.
+# Supports prefix matching so "gpt-5" covers "gpt-5-mini", etc.
+_FALLBACK_PRICING: dict[str, tuple[float, float]] = {
     # Anthropic
-    "claude-opus-4-6":        (15.00, 75.00),
+    "claude-opus-4-6":        ( 5.00, 25.00),
     "claude-sonnet-4-6":      ( 3.00, 15.00),
-    "claude-haiku-4-5":       ( 0.80,  4.00),
+    "claude-haiku-4-5":       ( 1.00,  5.00),
     # OpenAI
     "gpt-5.4-pro":            (30.00, 180.00),
     "gpt-5.4-mini":           ( 0.75,   4.50),
@@ -30,7 +33,7 @@ PRICING = {
     "gpt-5.2-codex":          ( 1.75,  14.00),
     "gpt-5.2":                ( 1.75,  14.00),
     "gpt-5.1-codex-max":      ( 1.25,  10.00),
-    "gpt-5.1-codex-mini":     ( 0.25,   2.00),
+    "gpt-5.1-codex-mini":     ( 0.275,  2.20),
     "gpt-5.1-chat-latest":    ( 1.25,  10.00),
     "gpt-5.1-codex":          ( 1.25,  10.00),
     "gpt-5.1":                ( 1.25,  10.00),
@@ -38,39 +41,92 @@ PRICING = {
     "gpt-5-pro":              (15.00, 120.00),
     "gpt-5-chat-latest":      ( 1.25,  10.00),
     "gpt-5-codex":            ( 1.25,  10.00),
-    "gpt-5-mini":             ( 0.25,   2.00),
-    "gpt-5-nano":             ( 0.05,   0.40),
+    "gpt-5-mini":             ( 0.275,  2.20),
+    "gpt-5-nano":             ( 0.055,  0.44),
     "gpt-5":                  ( 1.25,  10.00),
     "gpt-4o":                 ( 2.50, 10.00),
     "gpt-4o-mini":            ( 0.15,  0.60),
     "gpt-4-turbo":            (10.00, 30.00),
     # Ollama — local, no cost
     "ollama":                 ( 0.00,  0.00),
-    # NVIDIA NIM — free tier: 1000 req/month per model
-    # Most models are free; paid ones listed below
-    "nvidia/llama-3.1-nemotron-70b": ( 0.35,  0.40),
-    "meta/llama-3.1-405b":           ( 3.45,  3.45),
-    "mistralai/mistral-large":       ( 2.00,  6.00),
-    # All other NIM models: $0 (free tier)
+    # NVIDIA NIM — free tier covers most usage; paid tier pricing varies by model
     "nim/":                          ( 0.00,  0.00),
-    # Google Gemini — prices per 1M tokens (input, output), standard context ≤200K tokens
-    # Updated March 2026 — https://ai.google.dev/gemini-api/docs/pricing
+    # Google Gemini
     "gemini-2.5-flash-lite":         ( 0.10,  0.40),
-    "gemini-2.0-flash":              ( 0.10,  0.40),
+    "gemini-2.0-flash":              ( 0.075, 0.30),
     "gemini-2.5-flash":              ( 0.30,  2.50),
     "gemini-3-flash":                ( 0.50,  3.00),
     "gemini-2.5-pro":                ( 1.25, 10.00),
     "gemini-3.1-pro":                ( 2.00, 12.00),
-    # All other gemini models: approximate flash pricing
     "gemini-":                       ( 0.30,  2.50),
 }
 
+_LITELLM_PRICING_URL = (
+    "https://raw.githubusercontent.com/BerriAI/litellm/main"
+    "/model_prices_and_context_window.json"
+)
+_PRICING_TTL = 86400.0  # 24 hours
+
+# Populated by _refresh_pricing(); maps exact model name → ($/1M input, $/1M output)
+_dynamic_pricing: dict[str, tuple[float, float]] = {}
+_dynamic_pricing_ts: float = 0.0
+
+
+async def _refresh_pricing() -> None:
+    """Fetch latest model prices from LiteLLM's catalogue and cache them for 24 h."""
+    global _dynamic_pricing, _dynamic_pricing_ts
+    if time.time() - _dynamic_pricing_ts < _PRICING_TTL and _dynamic_pricing:
+        return
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                _LITELLM_PRICING_URL,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                data = await resp.json(content_type=None)
+        pricing: dict[str, tuple[float, float]] = {}
+        for model, info in data.items():
+            if not isinstance(info, dict):
+                continue
+            inp = info.get("input_cost_per_token")
+            out = info.get("output_cost_per_token")
+            if inp is not None and out is not None:
+                # Store as $/1M tokens to match _FALLBACK_PRICING units
+                pricing[model] = (float(inp) * 1_000_000, float(out) * 1_000_000)
+        _dynamic_pricing = pricing
+        _dynamic_pricing_ts = time.time()
+        logger.info("[pricing] Fetched %d model prices from LiteLLM", len(pricing))
+    except Exception as exc:
+        logger.warning("[pricing] Failed to fetch dynamic pricing: %s — using fallback", exc)
+
+
 def _calc_cost(model: str, input_tokens: int, output_tokens: int) -> float:
-    key = next((k for k in PRICING if model.startswith(k)), None)
+    # Exact match against live catalogue
+    if model in _dynamic_pricing:
+        price_in, price_out = _dynamic_pricing[model]
+        return (input_tokens * price_in + output_tokens * price_out) / 1_000_000
+    # Prefix match against local fallback table
+    key = next((k for k in _FALLBACK_PRICING if model.startswith(k)), None)
     if not key:
         return 0.0
-    price_in, price_out = PRICING[key]
+    price_in, price_out = _FALLBACK_PRICING[key]
     return (input_tokens * price_in + output_tokens * price_out) / 1_000_000
+
+
+def pricing_info(model: str) -> dict[str, object]:
+    """Return pricing source and rates for a model — useful for debugging."""
+    if model in _dynamic_pricing:
+        inp, out = _dynamic_pricing[model]
+        age = time.time() - _dynamic_pricing_ts
+        return {"source": "live", "input_per_1m": inp, "output_per_1m": out,
+                "cache_age_s": round(age)}
+    key = next((k for k in _FALLBACK_PRICING if model.startswith(k)), None)
+    if key:
+        inp, out = _FALLBACK_PRICING[key]
+        return {"source": "fallback", "input_per_1m": inp, "output_per_1m": out,
+                "matched_prefix": key}
+    return {"source": "unknown", "input_per_1m": 0.0, "output_per_1m": 0.0}
 
 
 class LLMProvider:
@@ -79,6 +135,81 @@ class LLMProvider:
     async def complete(self, messages: list[dict], system: str = "", **kwargs) -> tuple[str, dict]:
         """Returns (text, usage) where usage = {input_tokens, output_tokens, cost_usd}"""
         raise NotImplementedError
+
+    async def complete_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict[str, Any]],
+        system: str = "",
+        **kwargs: Any,
+    ) -> "ToolCompletion":
+        raise NotImplementedError(f"{self.__class__.__name__} does not support tool calls")
+
+
+@dataclass
+class ToolCall:
+    """Provider-neutral LLM tool request."""
+
+    id: str
+    name: str
+    arguments: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ToolCompletion:
+    """Provider-neutral LLM response that may request tool execution."""
+
+    content: str
+    usage: dict[str, Any]
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    assistant_message: dict[str, Any] | None = None
+
+
+def _openai_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool.get("description", ""),
+                "parameters": tool.get("parameters", {"type": "object", "properties": {}}),
+            },
+        }
+        for tool in tools
+    ]
+
+
+def _parse_tool_arguments(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if raw in (None, ""):
+        return {}
+    try:
+        import json
+
+        parsed = json.loads(str(raw))
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _usage_from_openai(model: str, usage_obj: Any) -> dict[str, Any]:
+    input_tok = getattr(usage_obj, "prompt_tokens", 0) if usage_obj else 0
+    output_tok = getattr(usage_obj, "completion_tokens", 0) if usage_obj else 0
+    return {
+        "input_tokens": input_tok,
+        "output_tokens": output_tok,
+        "cost_usd": _calc_cost(model, input_tok, output_tok),
+    }
+
+
+def _openai_tool_result_message(message: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "role": "tool",
+        "tool_call_id": message.get("tool_call_id") or message.get("id") or "",
+        "name": message.get("name") or message.get("tool_name") or "",
+        "content": str(message.get("content", "")),
+    }
 
 
 class AnthropicProvider(LLMProvider):
@@ -103,6 +234,96 @@ class AnthropicProvider(LLMProvider):
                                         response.usage.output_tokens),
         }
         return text, usage
+
+    async def complete_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict[str, Any]],
+        system: str = "",
+        **kwargs: Any,
+    ) -> ToolCompletion:
+        response = await self.client.messages.create(
+            model=self.model,
+            max_tokens=kwargs.get("max_tokens", 4096),
+            system=system,
+            messages=self._anthropic_messages(messages),
+            tools=self._anthropic_tools(tools),
+        )
+        text_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+        assistant_content: list[dict[str, Any]] = []
+        for block in getattr(response, "content", []) or []:
+            btype = getattr(block, "type", None)
+            if btype == "text":
+                text = getattr(block, "text", "")
+                text_parts.append(text)
+                assistant_content.append({"type": "text", "text": text})
+            elif btype == "tool_use":
+                name = getattr(block, "name", "")
+                call_id = getattr(block, "id", "")
+                args = getattr(block, "input", {}) or {}
+                if not isinstance(args, dict):
+                    args = {}
+                tool_calls.append(ToolCall(id=call_id, name=name, arguments=args))
+                assistant_content.append(
+                    {"type": "tool_use", "id": call_id, "name": name, "input": args}
+                )
+        usage_obj = getattr(response, "usage", None)
+        input_tok = getattr(usage_obj, "input_tokens", 0) if usage_obj else 0
+        output_tok = getattr(usage_obj, "output_tokens", 0) if usage_obj else 0
+        usage = {
+            "input_tokens": input_tok,
+            "output_tokens": output_tok,
+            "cost_usd": _calc_cost(self.model, input_tok, output_tok),
+        }
+        return ToolCompletion(
+            content="".join(text_parts).strip(),
+            usage=usage,
+            tool_calls=tool_calls,
+            assistant_message={"role": "assistant", "content": assistant_content},
+        )
+
+    @staticmethod
+    def _anthropic_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": tool["name"],
+                "description": tool.get("description", ""),
+                "input_schema": tool.get("parameters", {"type": "object", "properties": {}}),
+            }
+            for tool in tools
+        ]
+
+    @staticmethod
+    def _anthropic_messages(messages: list[dict]) -> list[dict]:
+        converted: list[dict[str, Any]] = []
+        for message in messages:
+            role = message.get("role")
+            if role == "system":
+                continue
+            if role == "tool":
+                converted.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": message.get("tool_call_id") or message.get("id") or "",
+                                "content": str(message.get("content", "")),
+                                "is_error": bool(message.get("is_error")),
+                            }
+                        ],
+                    }
+                )
+                continue
+            content = message.get("content", "")
+            converted.append(
+                {
+                    "role": "assistant" if role == "assistant" else "user",
+                    "content": content if isinstance(content, list) else str(content),
+                }
+            )
+        return converted
 
     async def stream(self, messages: list[dict], system: str = "", **kwargs):
         """Yield text chunks as they arrive. Final item is a dict with usage."""
@@ -159,6 +380,57 @@ class OpenAIProvider(LLMProvider):
                                         response.usage.completion_tokens),
         }
         return text, usage
+
+    async def complete_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict[str, Any]],
+        system: str = "",
+        **kwargs: Any,
+    ) -> ToolCompletion:
+        full_messages = ([{"role": "system", "content": system}] if system else []) + [
+            _openai_tool_result_message(m) if m.get("role") == "tool" else m
+            for m in messages
+        ]
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=full_messages,
+            tools=_openai_tools(tools),
+            tool_choice=kwargs.get("tool_choice", "auto"),
+            max_completion_tokens=kwargs.get("max_tokens", 4096),
+        )
+        message = response.choices[0].message
+        raw_calls = getattr(message, "tool_calls", None) or []
+        tool_calls = [
+            ToolCall(
+                id=getattr(call, "id", ""),
+                name=getattr(getattr(call, "function", None), "name", ""),
+                arguments=_parse_tool_arguments(getattr(getattr(call, "function", None), "arguments", "{}")),
+            )
+            for call in raw_calls
+        ]
+        assistant_message = {
+            "role": "assistant",
+            "content": getattr(message, "content", None),
+        }
+        if raw_calls:
+            assistant_message["tool_calls"] = [
+                {
+                    "id": getattr(call, "id", ""),
+                    "type": "function",
+                    "function": {
+                        "name": getattr(getattr(call, "function", None), "name", ""),
+                        "arguments": getattr(getattr(call, "function", None), "arguments", "{}"),
+                    },
+                }
+                for call in raw_calls
+            ]
+        return ToolCompletion(
+            content=getattr(message, "content", None) or "",
+            usage=_usage_from_openai(self.model, getattr(response, "usage", None)),
+            tool_calls=tool_calls,
+            assistant_message=assistant_message,
+        )
 
     async def stream(self, messages: list[dict], system: str = "", **kwargs):
         """Yield text chunks as they arrive. Final item is a dict with usage."""
@@ -224,6 +496,67 @@ class OllamaProvider(LLMProvider):
         eval_count  = data.get("eval_count", 0)
         usage = {"input_tokens": prompt_eval, "output_tokens": eval_count, "cost_usd": 0.0}
         return text, usage
+
+    async def complete_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict[str, Any]],
+        system: str = "",
+        **kwargs: Any,
+    ) -> ToolCompletion:
+        import aiohttp
+
+        ollama_messages = []
+        for message in messages:
+            if message.get("role") == "tool":
+                ollama_messages.append(
+                    {
+                        "role": "tool",
+                        "content": str(message.get("content", "")),
+                        "tool_name": message.get("name") or message.get("tool_name") or "",
+                    }
+                )
+            else:
+                ollama_messages.append(message)
+        payload = {
+            "model": self.model,
+            "messages": self._chat_messages(ollama_messages, system),
+            "stream": False,
+            "tools": _openai_tools(tools),
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{self.base_url}/api/chat", json=payload) as resp:
+                data = await resp.json()
+
+        message = data.get("message") or {}
+        raw_calls = message.get("tool_calls") or []
+        tool_calls: list[ToolCall] = []
+        for idx, call in enumerate(raw_calls):
+            function = call.get("function", {}) if isinstance(call, dict) else {}
+            tool_calls.append(
+                ToolCall(
+                    id=str(call.get("id") or f"ollama_tool_{idx}") if isinstance(call, dict) else f"ollama_tool_{idx}",
+                    name=str(function.get("name") or ""),
+                    arguments=_parse_tool_arguments(function.get("arguments") or {}),
+                )
+            )
+        usage = {
+            "input_tokens": data.get("prompt_eval_count", 0),
+            "output_tokens": data.get("eval_count", 0),
+            "cost_usd": 0.0,
+        }
+        assistant_message = {
+            "role": "assistant",
+            "content": message.get("content", ""),
+        }
+        if raw_calls:
+            assistant_message["tool_calls"] = raw_calls
+        return ToolCompletion(
+            content=message.get("content", "") or "",
+            usage=usage,
+            tool_calls=tool_calls,
+            assistant_message=assistant_message,
+        )
 
     async def stream(self, messages: list[dict], system: str = "", **kwargs):
         """Yield text chunks as they arrive. Final item is a dict with usage."""
@@ -304,6 +637,62 @@ class NIMProvider(LLMProvider):
         }
         return text, usage
 
+    async def complete_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict[str, Any]],
+        system: str = "",
+        **kwargs: Any,
+    ) -> ToolCompletion:
+        full_messages = ([{"role": "system", "content": system}] if system else []) + [
+            _openai_tool_result_message(m) if m.get("role") == "tool" else m
+            for m in messages
+        ]
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=full_messages,
+                tools=_openai_tools(tools),
+                tool_choice=kwargs.get("tool_choice", "auto"),
+                max_tokens=kwargs.get("max_tokens", 4096),
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"NIM tool calling failed; verify the selected model supports tools: {exc}"
+            ) from exc
+        message = response.choices[0].message
+        raw_calls = getattr(message, "tool_calls", None) or []
+        tool_calls = [
+            ToolCall(
+                id=getattr(call, "id", ""),
+                name=getattr(getattr(call, "function", None), "name", ""),
+                arguments=_parse_tool_arguments(getattr(getattr(call, "function", None), "arguments", "{}")),
+            )
+            for call in raw_calls
+        ]
+        assistant_message = {
+            "role": "assistant",
+            "content": getattr(message, "content", None),
+        }
+        if raw_calls:
+            assistant_message["tool_calls"] = [
+                {
+                    "id": getattr(call, "id", ""),
+                    "type": "function",
+                    "function": {
+                        "name": getattr(getattr(call, "function", None), "name", ""),
+                        "arguments": getattr(getattr(call, "function", None), "arguments", "{}"),
+                    },
+                }
+                for call in raw_calls
+            ]
+        return ToolCompletion(
+            content=getattr(message, "content", None) or "",
+            usage=_usage_from_openai(self.model, getattr(response, "usage", None)),
+            tool_calls=tool_calls,
+            assistant_message=assistant_message,
+        )
+
     async def stream(self, messages: list[dict], system: str = "", **kwargs):
         """Yield text chunks as they arrive. Final item is a dict with usage."""
         full_messages = ([{"role": "system", "content": system}] if system else []) + messages
@@ -330,8 +719,8 @@ class NIMProvider(LLMProvider):
 
 class GeminiProvider(LLMProvider):
     """
-    Google Gemini via the official google-generativeai SDK.
-    Install: pip install google-generativeai
+    Google Gemini via the official google-genai SDK.
+    Install: pip install google-genai
 
     Recommended models (March 2026):
       gemini-2.5-flash-lite   — cheapest ($0.10/$0.40 per 1M tokens), fast, free tier
@@ -349,39 +738,30 @@ class GeminiProvider(LLMProvider):
         model:   str = "gemini-2.5-flash",
         api_key: Optional[str] = None,
     ):
-        import google.generativeai as genai
-        if api_key:
-            genai.configure(api_key=api_key)
-        self.model_name = model
-        self._genai = genai
+        from google import genai
+        from google.genai import types as genai_types
 
-    def _get_model(self):
-        return self._genai.GenerativeModel(self.model_name)
+        self.model_name = model
+        self.client = genai.Client(api_key=api_key) if api_key else genai.Client()
+        self._types = genai_types
 
     async def complete(self, messages: list[dict], system: str = "", **kwargs) -> tuple[str, dict]:
-        import asyncio
-        model = self._get_model()
-
-        # Convert messages to Gemini format
-        # System prompt goes into system_instruction, history is contents
-        if system:
-            model = self._genai.GenerativeModel(
-                self.model_name,
-                system_instruction=system,
-            )
-
         contents = self._to_gemini_contents(messages)
-
-        # Run in executor since the SDK is sync
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: model.generate_content(contents),
+        config = self._types.GenerateContentConfig(
+            system_instruction=system or None,
+            max_output_tokens=kwargs.get("max_tokens", None),
         )
 
-        text = response.text or ""
-        input_tokens  = response.usage_metadata.prompt_token_count     if response.usage_metadata else 0
-        output_tokens = response.usage_metadata.candidates_token_count if response.usage_metadata else 0
+        response = self.client.models.generate_content(
+            model=self.model_name,
+            contents=contents,
+            config=config,
+        )
+
+        text = getattr(response, "text", "") or ""
+        usage_meta = getattr(response, "usage_metadata", None)
+        input_tokens = getattr(usage_meta, "prompt_token_count", 0) if usage_meta else 0
+        output_tokens = getattr(usage_meta, "candidates_token_count", 0) if usage_meta else 0
 
         usage = {
             "input_tokens":  input_tokens,
@@ -390,19 +770,79 @@ class GeminiProvider(LLMProvider):
         }
         return text, usage
 
+    async def complete_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict[str, Any]],
+        system: str = "",
+        **kwargs: Any,
+    ) -> ToolCompletion:
+        contents = self._to_gemini_contents(messages)
+        function_declarations = [self._gemini_function_declaration(tool) for tool in tools]
+        config = self._types.GenerateContentConfig(
+            system_instruction=system or None,
+            tools=[self._types.Tool(function_declarations=function_declarations)],
+            max_output_tokens=kwargs.get("max_tokens", None),
+        )
+        response = self.client.models.generate_content(
+            model=self.model_name,
+            contents=contents,
+            config=config,
+        )
+        text_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+        for candidate in getattr(response, "candidates", []) or []:
+            content = getattr(candidate, "content", None)
+            for part in getattr(content, "parts", []) or []:
+                text = getattr(part, "text", None)
+                if text:
+                    text_parts.append(text)
+                function_call = getattr(part, "function_call", None)
+                if function_call:
+                    call_id = str(getattr(function_call, "id", "") or f"gemini_tool_{len(tool_calls)}")
+                    args = getattr(function_call, "args", {}) or {}
+                    tool_calls.append(
+                        ToolCall(
+                            id=call_id,
+                            name=str(getattr(function_call, "name", "")),
+                            arguments=args if isinstance(args, dict) else dict(args),
+                        )
+                    )
+        usage_meta = getattr(response, "usage_metadata", None)
+        input_tokens = getattr(usage_meta, "prompt_token_count", 0) if usage_meta else 0
+        output_tokens = getattr(usage_meta, "candidates_token_count", 0) if usage_meta else 0
+        assistant_parts: list[dict[str, Any]] = []
+        if text_parts:
+            assistant_parts.append({"text": "".join(text_parts)})
+        for call in tool_calls:
+            assistant_parts.append(
+                {"function_call": {"id": call.id, "name": call.name, "args": call.arguments}}
+            )
+        return ToolCompletion(
+            content="".join(text_parts).strip(),
+            usage={
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cost_usd": _calc_cost(self.model_name, input_tokens, output_tokens),
+            },
+            tool_calls=tool_calls,
+            assistant_message={"role": "assistant", "content": assistant_parts},
+        )
+
+    def _gemini_function_declaration(self, tool: dict[str, Any]) -> Any:
+        return self._types.FunctionDeclaration(
+            name=tool["name"],
+            description=tool.get("description", ""),
+            parameters=tool.get("parameters", {"type": "object", "properties": {}}),
+        )
+
     async def stream(self, messages: list[dict], system: str = "", **kwargs):
         """Yield text chunks as they arrive. Final item is a dict with usage."""
         import asyncio
         import queue as _queue
 
-        model = self._genai.GenerativeModel(self.model_name)
-        if system:
-            model = self._genai.GenerativeModel(
-                self.model_name,
-                system_instruction=system,
-            )
-
         contents = self._to_gemini_contents(messages)
+        config = self._types.GenerateContentConfig(system_instruction=system or None)
 
         # Stream via SDK in a thread, bridge to async via queue
         q: _queue.Queue = _queue.Queue()
@@ -410,11 +850,17 @@ class GeminiProvider(LLMProvider):
 
         def _stream_thread():
             try:
-                for chunk in model.generate_content(contents, stream=True):
-                    if chunk.text:
-                        q.put(("text", chunk.text))
-                    if chunk.usage_metadata:
-                        q.put(("usage", chunk.usage_metadata))
+                for chunk in self.client.models.generate_content_stream(
+                    model=self.model_name,
+                    contents=contents,
+                    config=config,
+                ):
+                    text = getattr(chunk, "text", "")
+                    if text:
+                        q.put(("text", text))
+                    usage_metadata = getattr(chunk, "usage_metadata", None)
+                    if usage_metadata:
+                        q.put(("usage", usage_metadata))
             except Exception as e:
                 q.put(("error", str(e)))
             finally:
@@ -451,14 +897,34 @@ class GeminiProvider(LLMProvider):
         contents = []
         for m in messages:
             role = m.get("role", "user")
-            content = str(m.get("content", ""))
+            if role == "tool":
+                contents.append(
+                    {
+                        "role": "user",
+                        "parts": [
+                            {
+                                "function_response": {
+                                    "id": m.get("tool_call_id") or m.get("id") or "",
+                                    "name": m.get("name") or m.get("tool_name") or "",
+                                    "response": {"result": str(m.get("content", ""))},
+                                }
+                            }
+                        ],
+                    }
+                )
+                continue
+            content = m.get("content", "")
+            if isinstance(content, list):
+                parts = content
+            else:
+                parts = [{"text": str(content)}]
             # Gemini uses "user" and "model" (not "assistant")
             gemini_role = "model" if role == "assistant" else "user"
             # Merge consecutive same-role messages (Gemini requires alternating)
             if contents and contents[-1]["role"] == gemini_role:
-                contents[-1]["parts"][0]["text"] += "\n" + content
+                contents[-1]["parts"].extend(parts)
             else:
-                contents.append({"role": gemini_role, "parts": [{"text": content}]})
+                contents.append({"role": gemini_role, "parts": parts})
         return contents
 
 
@@ -493,6 +959,7 @@ class LLMAgent(Actor):
         return self._current_task
 
     async def on_start(self):
+        _ = asyncio.create_task(_refresh_pricing())
         # Restore conversation history and rolling summary from persistence
         saved = self.recall("conversation_history", [])
         clean = []
@@ -589,6 +1056,7 @@ class LLMAgent(Actor):
             self.total_input_tokens  += usage.get("input_tokens", 0)
             self.total_output_tokens += usage.get("output_tokens", 0)
             self.total_cost_usd      += usage.get("cost_usd", 0.0)
+            self._persist_cost()
             self._history_summary = summary.strip()
             self._conversation_history = to_keep
             self.persist("history_summary", self._history_summary)
@@ -647,7 +1115,7 @@ class LLMAgent(Actor):
                 for m in self._conversation_history[-self.max_history:]
                 if isinstance(m, dict) and m.get("role") in ("user", "assistant")
             ]
-            response, _usage = await self.llm.complete(
+            response, usage = await self.llm.complete(
                 messages=safe_history,
                 system=self.system_prompt,
             )
@@ -656,8 +1124,13 @@ class LLMAgent(Actor):
             self.metrics.tasks_completed += 1
             duration = time.time() - start
 
+            self.total_input_tokens  += usage.get("input_tokens", 0)
+            self.total_output_tokens += usage.get("output_tokens", 0)
+            self.total_cost_usd      += usage.get("cost_usd", 0.0)
+
             # Persist after each exchange
             self.persist("conversation_history", self._conversation_history)
+            self._persist_cost()
 
             # Publish completion
             await self._mqtt_publish(

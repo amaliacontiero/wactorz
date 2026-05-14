@@ -525,6 +525,7 @@ mqtt.on("completed", (payload) => {
 });
 
 mqtt.on("node-heartbeat", (payload) => {
+  scene.updateRemoteNode(payload.node, payload.agents);
   pushFeed({
     type: "health",
     label: `node online · ${payload.agents.length} agent${payload.agents.length !== 1 ? "s" : ""}`,
@@ -633,6 +634,12 @@ document.addEventListener("af-agent-command", (e) => {
   const { command, agentId } = (
     e as CustomEvent<{ command: string; agentId: string }>
   ).detail;
+  if (command === "delete") {
+    // Mark deleted immediately so MQTT "stopped" events don't re-add the card
+    // before the WS state-patch reply arrives.
+    deletedAgentIds.add(agentId);
+    scene.removeAgent(agentId);
+  }
   wsChat.sendRaw({ type: "command", command, agent_id: agentId });
 });
 

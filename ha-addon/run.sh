@@ -41,9 +41,10 @@ export OLLAMA_URL=$(get_config_safe 'ollama_url' 'http://localhost:11434')
 
 # Map generic LLM_API_KEY to provider-specific env vars expected by the Python app
 case "$LLM_PROVIDER" in
-    nim)    export NIM_API_KEY="$LLM_API_KEY" ;;
-    openai) export OPENAI_API_KEY="$LLM_API_KEY" ;;
+    nim)      export NIM_API_KEY="$LLM_API_KEY" ;;
+    openai)   export OPENAI_API_KEY="$LLM_API_KEY" ;;
     anthropic) export ANTHROPIC_API_KEY="$LLM_API_KEY" ;;
+    gemini)   export GEMINI_API_KEY="$LLM_API_KEY" ;;
 esac
 
 # MQTT Config (CRITICAL: ensure never empty)

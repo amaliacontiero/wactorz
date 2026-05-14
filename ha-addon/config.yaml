@@ -88,29 +88,29 @@ options:
   influx_bucket: "wactorz"
 
 schema:
-  api_key: str
+  api_key: str?
   llm_provider: list(anthropic|ollama|openai|gemini|nim)
   llm_model: str
-  llm_api_key: str
+  llm_api_key: str?
   ollama_url: url
   mqtt_host: str
   mqtt_port: port
   mqtt_ws_port: port
   ha_url: url
-  ha_token: str
+  ha_token: str?
   fuseki_url: url
   fuseki_dataset: str
   fuseki_user: str
   fuseki_password: str
   mosquitto_embedded: bool
   fuseki_embedded: bool
-  discord_bot_token: str
-  telegram_bot_token: str
+  discord_bot_token: str?
+  telegram_bot_token: str?
   telegram_allowed_user_id: int
-  otel_endpoint: str
-  otel_service_name: str
-  influx_url: str
-  influx_token: str
+  otel_endpoint: str?
+  otel_service_name: str?
+  influx_url: str?
+  influx_token: str?
   influx_org: str
   influx_bucket: str
 
