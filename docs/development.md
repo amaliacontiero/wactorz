@@ -26,6 +26,7 @@ cd wactorz
 pip install -e ".[all]"
 ```
 
+
 ---
 
 ## Optional dependencies
@@ -54,10 +55,13 @@ The `[all]` extra installs everything except the ML stack (heavy torch dependenc
 cp .env.template .env
 # edit .env and set LLM_API_KEY (or whichever provider you use)
 
-# 2. Start Wactorz (starts everything including the broker)
+# 2. Get/run MQTT broker (if you don't have already) and open ports 1883, 9001
+docker run -d --name mosquitto -p 1883:1883 -p 9001:9001 eclipse-mosquitto
+
+# 3. Start Wactorz
 wactorz
 
-# 3. Open the web dashboard
+# 4. Open the web dashboard
 # http://localhost:8888
 ```
 
@@ -129,6 +133,7 @@ WACTORZ_API_KEY=              # optional; mirrors API_KEY for REST auth
 # Only needed if using an external broker instead of the embedded one
 MQTT_HOST=localhost
 MQTT_PORT=1883
+MQTT_WS_PORT=9001
 ```
 
 #### Web dashboard
@@ -139,21 +144,10 @@ MONITOR_PORT=8888   # dashboard port, default 8888
 
 ---
 
-## MQTT broker
-
-Wactorz ships with an embedded MQTT broker that starts automatically — no separate installation needed for basic use. If you prefer to use an external Mosquitto instance (e.g. for multi-machine setups or when you already have a broker running), point Wactorz at it:
+## Running Mosquitto via Docker
 
 ```bash
-wactorz --mqtt-broker 192.168.1.10 --mqtt-port 1883
-```
-
-#### Running Mosquitto via Docker
-
-```bash
-docker run -d --name mosquitto \
-  -p 1883:1883 \
-  eclipse-mosquitto:latest \
-  mosquitto -c /mosquitto/config/mosquitto.conf
+docker run -d --name mosquitto -p 1883:1883 -p 9001:9001 eclipse-mosquitto
 ```
 
 > **Note (Docker Desktop on Windows/Mac):** When services run inside Docker and need to reach the broker on the host, use `host.docker.internal` as the broker hostname instead of `localhost`.
@@ -357,6 +351,9 @@ wactorz/                         ← repo root
 │   ├── core/
 │   │   ├── actor.py             ← Actor base class, Supervisor, persistence
 │   │   └── registry.py          ← ActorSystem, ActorRegistry, MQTT publisher
+│   │   ├── persistence.py       ← Actor storage to SQlite
+│   │   └── migrations.py        ← Migration to nodes
+│   │   ├── topic_bus.py         ← Reactive Pub/Sub Coordination Layer
 │   ├── agents/
 │   │   ├── main_actor.py        ← LLM orchestrator
 │   │   ├── llm_agent.py         ← LLM base + all providers
