@@ -487,6 +487,23 @@ All providers track token usage and compute cost in USD per call. Costs are accu
 
 Pricing is resolved dynamically: on startup, `LLMAgent` fetches live per-token rates from the [LiteLLM model catalogue](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) and caches them for 24 hours. If the fetch fails or the model isn't listed, it falls back to the hardcoded `_FALLBACK_PRICING` table in `llm_agent.py`. To debug which source a model is using, call `pricing_info(model_name)` — it returns `source` (`"live"` or `"fallback"`), rates, and cache age.
 
+#### Spend limit
+
+A hard cap on LLM API spend can be set per period. When the limit is reached, further LLM calls are blocked and the agent replies with a "limit reached" message instead of calling the API.
+
+Configure via env vars (startup default):
+
+```
+LLM_COST_LIMIT_USD=0.70
+LLM_COST_LIMIT_PERIOD=daily   # daily | weekly | monthly | total
+```
+
+The limit can also be updated at runtime from the dashboard Settings tab or via `POST /api/cost/limit` — the runtime value persists in SQLite and takes priority over the env var. Spend resets automatically at period boundaries (midnight UTC for daily, Monday for weekly, first of the month for monthly). To reset manually, call `POST /api/cost/reset`.
+
+The dashboard COST tile shows a progress bar: yellow at 80% of the limit, red at 100%.
+
+See [API reference](api.md#cost-management) for the full endpoint spec.
+
 ---
 
 ## Catalog recipes
