@@ -14,9 +14,18 @@ import asyncio
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+    # Force UTF-8 on the real Windows console only. Skip when stdio has been
+    # replaced (pytest capture, test runners, etc.) since re-wrapping a
+    # capture stream breaks the harness on Python 3.13.
+    _need_wrap = (
+        (getattr(sys.stdout, "encoding", "") or "").lower() != "utf-8"
+        and hasattr(sys.stdout, "buffer")
+        and hasattr(sys.stderr, "buffer")
+    )
+    if _need_wrap:
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 import json
 import logging
