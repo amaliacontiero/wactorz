@@ -5,39 +5,48 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Version
 
 ---
 
-## [0.4.2] -- 2026-05-14
+## [0.4.2] - 2026-05-14
 
 ### Added
 
-- **Dynamic LLM pricing** -- `LLMAgent` now fetches live model prices from the [LiteLLM model catalogue](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) on startup and caches them for 24 hours. Falls back to a hardcoded table if the fetch fails or the model is not found. `pricing_info(model)` helper added for debugging (reports source, rates, and cache age).
-- **`HomeAssistantAgent` -- `other` action** -- A new `other` action handles open-ended HA questions ("Do I have any thermometers?", "What is the state of my thermostat?") that do not map cleanly to `list_*` or `call_service`. The agent runs a short LLM tool-call loop (up to 3 rounds) using `get_simplified_ha_data` to answer the question without over-classifying inventory requests or listing every entity. A `ha_context_terms` heuristic ensures common HA-related questions are routed here instead of falling through to `unknown`.
-- **`HomeAssistantAgent` -- `get_entities_state` action** -- Accepts one or more explicit entity IDs, fetches their current states from HA, and re-publishes each state to `homeassistant/state_changes/{entity_id}` over MQTT. This lets callers query live state and simultaneously bootstrap any MQTT subscriber that is waiting for a change event.
-- **`ha_helper.get_full_ha_data()`** -- New async helper that returns raw registry dumps for floors, areas, devices, entities, and states in a single WebSocket session, without transforming or filtering any field.
-- **`ha_helper.get_simplified_ha_data()`** -- New async helper that returns a compact, null-stripped snapshot suitable for LLM prompts. Resolves entity display names from live states, excludes `hassio` platform entities, and drops icon/picture fields. Used by `HomeAssistantAgent` to replace the older `fetch_devices_entities_with_location` call, significantly reducing token usage in device-discovery prompts.
-- **`PlannerAgent` -- HA entity state bootstrap** -- After spawning a pipeline, the planner now calls `_bootstrap_ha_entity_states()` as a background task. It extracts entity IDs from the plan's generated code, `ha_actuator` actions, MQTT topics, and the enriched task string, then sends a `get_entities_state` request to `home-assistant-agent`. This re-publishes current HA state to `homeassistant/state_changes/{entity_id}` so freshly-spawned agents that subscribe to that topic fire immediately, instead of waiting for the next real HA state change to arrive.
-- **Remote runner self-bootstrap** -- `RemoteRunnerAgent` nodes now self-install `aiomqtt` / `paho-mqtt` on first start without requiring pre-installed dependencies. Heartbeat begins immediately; dependency installation runs in the background so the node appears on the overview before pip finishes.
-- **Live remote node tracking** -- the overview panel tracks remote runner nodes in real time; deleted-agent ghost entries no longer re-appear after removal.
-- **OpenTelemetry Collector** -- `otelcol` service added to Docker Compose with a Prometheus remote-write scrape target; healthcheck included and a commented debug exporter option for local tracing.
+- **Dynamic LLM pricing** - `LLMAgent` now fetches live model prices from the [LiteLLM model catalogue](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) on startup and caches them for 24 hours. Falls back to a hardcoded table if the fetch fails or the model is not found. `pricing_info(model)` helper added for debugging (reports source, rates, and cache age).
+- **`HomeAssistantAgent` tool call loop** - Agent now runs a structured LLM tool-call loop for actions that require live HA data, replacing single-shot prompts and improving reliability for multi-step queries.
+- **`HomeAssistantAgent` `other` action** - A new `other` action handles open-ended HA questions ("Do I have any thermometers?", "What is the state of my thermostat?") that do not map cleanly to `list_*` or `call_service`. The agent runs a short LLM tool-call loop (up to 3 rounds) using `get_simplified_ha_data` to answer the question without over-classifying inventory requests or listing every entity. A `ha_context_terms` heuristic ensures common HA-related questions are routed here instead of falling through to `unknown`.
+- **`HomeAssistantAgent` `get_entities_state` action** - Accepts one or more explicit entity IDs, fetches their current states from HA, and re-publishes each state to `homeassistant/state_changes/{entity_id}` over MQTT. This lets callers query live state and simultaneously bootstrap any MQTT subscriber that is waiting for a change event.
+- **`ha_helper.get_full_ha_data()`** - New async helper that returns raw registry dumps for floors, areas, devices, entities, and states in a single WebSocket session, without transforming or filtering any field.
+- **`ha_helper.get_simplified_ha_data()`** - New async helper that returns a compact, null-stripped snapshot suitable for LLM prompts. Resolves entity display names from live states, excludes `hassio` platform entities, and drops icon/picture fields. Used by `HomeAssistantAgent` to replace the older `fetch_devices_entities_with_location` call, significantly reducing token usage in device-discovery prompts.
+- **`PlannerAgent` HA entity state bootstrap** - After spawning a pipeline, the planner now calls `_bootstrap_ha_entity_states()` as a background task. It extracts entity IDs from the plan's generated code, `ha_actuator` actions, MQTT topics, and the enriched task string, then sends a `get_entities_state` request to `home-assistant-agent`. This re-publishes current HA state to `homeassistant/state_changes/{entity_id}` so freshly-spawned agents that subscribe to that topic fire immediately, instead of waiting for the next real HA state change to arrive.
+- **Remote runner self-bootstrap** - `RemoteRunnerAgent` nodes now self-install `aiomqtt` / `paho-mqtt` on first start without requiring pre-installed dependencies. Heartbeat begins immediately; dependency installation runs in the background so the node appears on the overview before pip finishes.
+- **Live remote node tracking** - the overview panel tracks remote runner nodes in real time; deleted-agent ghost entries no longer re-appear after removal.
+- **OpenTelemetry Collector** - `otelcol` service added to Docker Compose with a Prometheus remote-write scrape target; healthcheck included and a commented debug exporter option for local tracing.
+- **`watch-costs.ps1`** - PowerShell script for live LLM cost monitoring from the terminal.
 
 ### Changed
 
-- **`HomeAssistantAgent` -- device-discovery schema** -- The prompt schema for hardware-recommendation requests now uses the flattened `get_simplified_ha_data` structure (separate `floors`, `areas`, `devices`, `entities` lists) instead of the deeply nested `fetch_devices_entities_with_location` format. This cuts the context size and matches the real HA registry field names (`id`, `area_id`, `domain`, etc.).
-- **`HomeAssistantAgent` -- `list_*` classification tightened** -- The `list_automations`, `list_areas`, `list_devices`, and `list_entities` actions now only fire on explicit inventory requests ("list all automations"). Existence, count, lookup, and state questions ("do I have a thermostat?", "what is the state of X?") are correctly routed to the new `other` action.
-- **`HomeAssistantAgent` -- MQTT state-change payload** -- `get_entities_state` now publishes the canonical state-change payload (`event_type`, `entity_id`, `new_state`, `old_state`) to `homeassistant/state_changes/{entity_id}`, matching the format emitted by `HomeAssistantStateBridgeAgent` on real HA state changes.
+- **`HomeAssistantAgent` device-discovery token reduction** - Prompt schema for hardware-recommendation requests now uses the flattened `get_simplified_ha_data` structure (separate `floors`, `areas`, `devices`, `entities` lists) instead of the deeply nested `fetch_devices_entities_with_location` format. This cuts the context size and matches the real HA registry field names (`id`, `area_id`, `domain`, etc.).
+- **`HomeAssistantAgent` `list_*` classification tightened** - The `list_automations`, `list_areas`, `list_devices`, and `list_entities` actions now only fire on explicit inventory requests ("list all automations"). Existence, count, lookup, and state questions ("do I have a thermostat?", "what is the state of X?") are correctly routed to the new `other` action.
+- **`HomeAssistantAgent` MQTT state-change payload** - `get_entities_state` now publishes the canonical state-change payload (`event_type`, `entity_id`, `new_state`, `old_state`) to `homeassistant/state_changes/{entity_id}`, matching the format emitted by `HomeAssistantStateBridgeAgent` on real HA state changes.
+- **Slash commands** - all slash commands now route through a single source of truth in `MainActor`, eliminating inconsistencies across entry points.
 
 ### Fixed
 
-- **LLM cost persistence** -- Five places where token usage was accumulated in memory but never written to SQLite, causing cost data to be lost on restart or crash: `LLMAgent._handle_task` silently discarded all usage from TASK-type messages; `LLMAgent._maybe_summarize` did not persist summarization tokens; `HomeAssistantAgent` never persisted lifetime spend (entirely lost on restart); `MainActor._classify_intent` dropped tokens for PIPELINE/ACTUATE/HA routes where no `chat()` follows; `MainActor._extract_durable_facts` left facts-extraction tokens unpersisted until the next turn.
-- **Gemini API key mapping** -- `LLM_API_KEY` now correctly mapped to `GEMINI_API_KEY` in the HA addon `run.sh`.
-- **NIM documentation** -- `LLM_API_KEY` is always required for NVIDIA NIM calls; docs corrected.
-- **HA addon optional fields** -- `discord_bot_token`, `telegram_bot_token`, `ha_token`, and `api_key` declared as `str?` in `config.yaml` schema so the addon validates when these fields are left blank.
-- **Agent delete blink** -- deleted agents are marked immediately on delete command, preventing ghost re-appearance in the UI.
-- **NIM fallback pricing** -- deprecated NVIDIA NIM model entries removed from the hardcoded fallback price table.
+- **LLM cost persistence** - Five places where token usage was accumulated in memory but never written to SQLite, causing cost data to be lost on restart or crash: `LLMAgent._handle_task` silently discarded all usage from TASK-type messages; `LLMAgent._maybe_summarize` did not persist summarization tokens; `HomeAssistantAgent` never persisted lifetime spend (entirely lost on restart); `MainActor._classify_intent` dropped tokens for PIPELINE/ACTUATE/HA routes where no `chat()` follows; `MainActor._extract_durable_facts` left facts-extraction tokens unpersisted until the next turn.
+- **Cost tracking in `PlannerAgent` and `MainActor`** - planner and main actor now persist spend after every LLM call.
+- **Gemini API key mapping** - `LLM_API_KEY` now correctly mapped to `GEMINI_API_KEY` in the HA addon `run.sh`.
+- **NIM documentation** - `LLM_API_KEY` is always required for NVIDIA NIM calls; docs corrected.
+- **HA addon optional fields** - `discord_bot_token`, `telegram_bot_token`, `ha_token`, and `api_key` declared as `str?` in `config.yaml` schema so the addon validates when these fields are left blank.
+- **Agent delete blink** - deleted agents are marked immediately on delete command, preventing ghost re-appearance in the UI.
+- **NIM fallback pricing** - deprecated NVIDIA NIM model entries removed from the hardcoded fallback price table.
+- **OTel Collector healthcheck** - `otelcol` healthcheck corrected; debug exporter added as commented option.
+- **Remote runner async bootstrap** - heartbeat now starts before pip completes so the node appears in the overview immediately.
+- **UI non-streaming agent communication** - messages from non-streaming agents now display correctly in the chat interface.
+- **Catalog agent spawning** - timeout issue resolved; agents spawn reliably under load.
+- **Fuseki Python 3.10 compatibility** - `fuseki.py` now runs on Python 3.10.
 
 ### Tests
 
-- Added `tests/test_home_assistant_agent.py` -- covers `other` tool-call loop, `get_entities_state` action, MQTT publish payloads, and bootstrap entity ID extraction.
-- Added `tests/test_llm_provider_tools.py` -- covers `complete_with_tools` for all LLM providers.
+- Added `tests/test_home_assistant_agent.py` - covers `other` tool-call loop, `get_entities_state` action, MQTT publish payloads, and bootstrap entity ID extraction.
+- Added `tests/test_llm_provider_tools.py` - covers `complete_with_tools` for all LLM providers.
 
 ---
 
