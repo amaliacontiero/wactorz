@@ -236,6 +236,7 @@
 </tbody>
 </table>
 <p>Spawned by MainActor for every <code>PIPELINE</code>-classified request. The planner queries <code>home-assistant-agent</code> for the full list of real entity IDs, samples live topic schemas from the TopicBus, then asks the LLM to produce a multi-agent plan as a JSON array. Each step is either a <code>dynamic</code> agent (Python code string) or an <code>ha_actuator</code> agent (declarative HA service call). The planner spawns all agents, registers the pipeline rule with main, and exits.</p>
+<p>After spawning, the planner fires a background <code>_bootstrap_ha_entity_states()</code> task that extracts HA entity IDs from the plan (generated code, <code>ha_actuator</code> actions, MQTT topics, and the enriched task string) and sends a <code>get_entities_state</code> request to <code>home-assistant-agent</code>. This re-publishes the current HA state over MQTT so freshly-spawned agents that subscribe to <code>homeassistant/state_changes/#</code> fire immediately — without waiting for the next real HA state change.</p>
 <h4 id="supported-patterns">Supported patterns</h4>
 <table>
 <thead>
@@ -434,20 +435,40 @@
 <td>Fetch all entities (used by Planner and OneOffActuator)</td>
 </tr>
 <tr>
-<td><code>call_service</code></td>
-<td>Turn on/off lights, switches, climate, covers, scripts…</td>
+<td><code>list_automations</code></td>
+<td>List all automations</td>
+</tr>
+<tr>
+<td><code>list_areas</code></td>
+<td>List all areas</td>
+</tr>
+<tr>
+<td><code>list_devices</code></td>
+<td>List all devices</td>
+</tr>
+<tr>
+<td><code>recommend_hardware</code></td>
+<td>Hardware recommendations using compact <code>get_simplified_ha_data</code> snapshot</td>
 </tr>
 <tr>
 <td><code>create_automation</code></td>
-<td>Generate and POST a YAML automation via HA API</td>
+<td>Generate and POST a YAML automation via HA REST API</td>
 </tr>
 <tr>
-<td><code>delete_entity</code></td>
-<td>Remove an entity or automation</td>
+<td><code>edit_automation</code></td>
+<td>Identify and update an existing automation</td>
 </tr>
 <tr>
-<td><code>get_state</code></td>
-<td>Read current state of one or more entities</td>
+<td><code>delete_automation</code></td>
+<td>Remove an automation</td>
+</tr>
+<tr>
+<td><code>get_entities_state</code></td>
+<td>Fetch current state for explicit entity IDs and re-publish to MQTT — used by PlannerAgent bootstrap</td>
+</tr>
+<tr>
+<td><code>other</code></td>
+<td>Answer open-ended HA questions via a short LLM tool-call loop backed by <code>get_simplified_ha_data</code></td>
 </tr>
 </tbody>
 </table>
@@ -934,7 +955,8 @@
 </table>
 <p>All providers receive the same <code>complete(messages, system)</code> and <code>stream(messages, system)</code> calls. Ollama sends the system prompt as the first <code>{"role": "system"}</code> message in the native <code>/api/chat</code> payload, so local models receive the same persona/instructions as hosted providers.</p>
 <h4 id="cost-tracking">Cost tracking</h4>
-<p>All providers track token usage and compute cost in USD per call. Costs are accumulated in <code>LLMAgent.metrics</code> and published with every heartbeat. The <code>PRICING</code> dict in <code>llm_agent.py</code> covers all major model variants — add new entries there to track custom models.</p>
+<p>All providers track token usage and compute cost in USD per call. Costs are accumulated in <code>LLMAgent.metrics</code> and published with every heartbeat.</p>
+<p>Pricing is resolved dynamically: on startup, <code>LLMAgent</code> fetches live per-token rates from the <a href="https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json">LiteLLM model catalogue</a> and caches them for 24 hours. If the fetch fails or the model isn't listed, it falls back to the hardcoded <code>_FALLBACK_PRICING</code> table in <code>llm_agent.py</code>. To debug which source a model is using, call <code>pricing_info(model_name)</code> — it returns <code>source</code> (<code>"live"</code> or <code>"fallback"</code>), rates, and cache age.</p>
 <hr />
 <h2 id="catalog-recipes">Catalog recipes</h2>
 <p>Recipes live in <code>catalogue_agents/</code> as plain Python files exporting an <code>AGENT_CODE</code> string. They are loaded by <code>CatalogAgent</code> at startup and spawned on demand as DynamicAgents with <code>trusted=True</code> (safety validator bypassed).</p>

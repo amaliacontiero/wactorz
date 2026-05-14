@@ -312,6 +312,7 @@ Agent 2  (ha_actuator)  name: &lt;slug&gt;-actuator
 <li>Calls the LLM once to produce a JSON plan — an array of agent specs, each with <code>name</code>, <code>type</code>, <code>code</code> (for dynamic agents) or <code>actions</code> (for ha_actuator agents)</li>
 <li>Spawns each agent from the plan via <code>DynamicAgent</code></li>
 <li>Sends a <code>save_pipeline_rule</code> message to MainActor with the list of agent names</li>
+<li>Fires a background <code>_bootstrap_ha_entity_states()</code> task — extracts HA entity IDs from the plan and asks <code>home-assistant-agent</code> to re-publish their current state to <code>homeassistant/state_changes/{entity_id}</code> over MQTT. This lets freshly-spawned agents evaluate the current state immediately, rather than waiting for the next real HA state change to arrive.</li>
 <li>Exits — the spawned agents run indefinitely from this point</li>
 </ol>
 <blockquote>
