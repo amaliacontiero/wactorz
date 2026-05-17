@@ -1,9 +1,10 @@
 /**
  * IO bar (bottom of screen).
  *
+ * - Mic button: PTT (hold to speak, release/VAD silence to send)
+ * - Wake button: toggle always-on wake-word listening ("wactorz …")
  * - Textarea input: sends messages; Enter sends, Shift+Enter inserts newline
  * - Up/Down arrows: navigate message history (last 50 sent)
- * - Mic button: toggles voice recognition via {@link VoiceInput}
  * - Send button: morphs to spinner while awaiting response
  *
  * Coordinates with {@link ChatPanel} via DOM events to know which agent
@@ -15,9 +16,12 @@ import type { VoiceInput } from "../io/VoiceInput";
 import type { IOManager } from "../io/IOManager";
 
 const HISTORY_LIMIT = 50;
+const LS_WAKE_ACTIVE = "wactorz.wakeActive";
+const LS_WAKE_WORD   = "wactorz.wakeWordText";
 
 export class IOBar {
-  private micBtn: HTMLButtonElement;
+  private micBtn:  HTMLButtonElement;
+  private wakeBtn: HTMLButtonElement;
   private textInput: HTMLTextAreaElement;
   private sendBtn: HTMLButtonElement;
 
@@ -33,15 +37,25 @@ export class IOBar {
 
   constructor(voiceInput: VoiceInput, ioManager: IOManager) {
     this.voiceInput = voiceInput;
-    this.ioManager = ioManager;
+    this.ioManager  = ioManager;
 
-    this.micBtn = document.getElementById("mic-btn") as HTMLButtonElement;
-    this.textInput = document.getElementById(
-      "text-input",
-    ) as HTMLTextAreaElement;
-    this.sendBtn = document.getElementById("send-btn") as HTMLButtonElement;
+    this.micBtn    = document.getElementById("mic-btn")    as HTMLButtonElement;
+    this.wakeBtn   = document.getElementById("wake-btn")   as HTMLButtonElement;
+    this.textInput = document.getElementById("text-input") as HTMLTextAreaElement;
+    this.sendBtn   = document.getElementById("send-btn")   as HTMLButtonElement;
 
     this.bindEvents();
+
+    // Hide voice buttons immediately if the API isn't available
+    if (!this.voiceInput.isAvailable) {
+      this.micBtn.style.display  = "none";
+      this.wakeBtn.style.display = "none";
+    }
+
+    // Restore persistent wake-word state across page loads
+    if (this.voiceInput.isAvailable && localStorage.getItem(LS_WAKE_ACTIVE) === "1") {
+      this._toggleWake();
+    }
   }
 
   private bindEvents(): void {
@@ -61,26 +75,24 @@ export class IOBar {
         this.historyDown();
         return;
       }
-      // Any other key resets history navigation
-      if (!["ArrowUp", "ArrowDown"].includes(e.key)) {
-        this.histIdx = -1;
-      }
+      if (!["ArrowUp", "ArrowDown"].includes(e.key)) this.histIdx = -1;
     });
 
-    this.textInput.addEventListener("input", () => {
-      this.autoGrow();
-    });
+    this.textInput.addEventListener("input", () => this.autoGrow());
 
     this.sendBtn.addEventListener("click", () => void this.send());
 
     // Push-to-talk: hold to record, release (or VAD silence) to send
     this.micBtn.addEventListener("pointerdown", (e) => {
-      e.preventDefault(); // suppress context-menu on mobile long-press
+      e.preventDefault();
       this.micBtn.setPointerCapture(e.pointerId);
       void this.startMic();
     });
-    this.micBtn.addEventListener("pointerup", () => this.stopMic());
+    this.micBtn.addEventListener("pointerup",     () => this.stopMic());
     this.micBtn.addEventListener("pointercancel", () => this.stopMic());
+
+    // Wake-word toggle
+    this.wakeBtn.addEventListener("click", () => this._toggleWake());
 
     // Update placeholder + activeAgent when chat panel opens/closes
     document.addEventListener("panel-opened", (e) => {
@@ -93,14 +105,14 @@ export class IOBar {
       this.textInput.placeholder = "Talk to io-agent… (type @name to target)";
     });
 
-    // Voice transcript → text input
+    // PTT transcript → text input → auto-send on final
     this.voiceInput.onTranscript = (text, final) => {
       this.textInput.value = text;
       this.autoGrow();
       if (final) void this.send();
     };
 
-    // Sync mic button state when recognition ends for any reason
+    // Sync mic button when PTT ends
     this.voiceInput.onStop = () => {
       this.micBtn.classList.remove("recording");
       this.micBtn.title = "Hold to speak";
@@ -109,16 +121,52 @@ export class IOBar {
     this.voiceInput.onError = (message) => {
       this.micBtn.classList.remove("recording");
       this.micBtn.title = message;
-      // If voice is now permanently unavailable (e.g. HTTP / service-not-allowed),
-      // hide the mic button entirely so it stops cluttering the UI.
       if (!this.voiceInput.isAvailable) {
-        this.micBtn.style.display = "none";
+        this.micBtn.style.display  = "none";
+        this.wakeBtn.style.display = "none";
       } else {
-        setTimeout(() => {
-          this.micBtn.title = "Voice input";
-        }, 5000);
+        setTimeout(() => { this.micBtn.title = "Voice input"; }, 5000);
       }
     };
+
+    // Wake-word detected: fill + send, or open PTT for the command
+    this.voiceInput.onWakeWord = (textAfter) => {
+      this.wakeBtn.classList.add("triggered");
+      setTimeout(() => this.wakeBtn.classList.remove("triggered"), 700);
+
+      if (textAfter) {
+        this.textInput.value = textAfter;
+        this.autoGrow();
+        void this.send();
+      } else {
+        // No command in the same utterance — activate PTT to capture it
+        void this.startMic();
+      }
+    };
+
+    // Ambient listening stopped permanently (e.g. HTTPS required)
+    this.voiceInput.onAmbientStop = () => {
+      localStorage.setItem(LS_WAKE_ACTIVE, "0");
+      this.wakeBtn.classList.remove("ambient");
+      this.wakeBtn.title = "Wake word (unavailable — requires HTTPS)";
+      this.wakeBtn.style.display = "none";
+    };
+  }
+
+  private _toggleWake(): void {
+    if (this.voiceInput.isAmbient) {
+      this.voiceInput.stopAmbient();
+      localStorage.setItem(LS_WAKE_ACTIVE, "0");
+      this.wakeBtn.classList.remove("ambient");
+      this.wakeBtn.title = "Wake word — click to enable";
+    } else {
+      const word = localStorage.getItem(LS_WAKE_WORD) ?? "wactorz";
+      if (this.voiceInput.startAmbient(word)) {
+        localStorage.setItem(LS_WAKE_ACTIVE, "1");
+        this.wakeBtn.classList.add("ambient");
+        this.wakeBtn.title = `Listening for "${word}" — click to disable`;
+      }
+    }
   }
 
   private autoGrow(): void {
@@ -129,13 +177,10 @@ export class IOBar {
 
   private historyUp(): void {
     if (this.history.length === 0) return;
-    if (this.histIdx === -1) {
-      this.draftText = this.textInput.value;
-    }
+    if (this.histIdx === -1) this.draftText = this.textInput.value;
     this.histIdx = Math.min(this.histIdx + 1, this.history.length - 1);
     this.textInput.value = this.history[this.histIdx] ?? "";
     this.autoGrow();
-    // Move cursor to end
     const len = this.textInput.value.length;
     this.textInput.setSelectionRange(len, len);
   }
@@ -143,11 +188,9 @@ export class IOBar {
   private historyDown(): void {
     if (this.histIdx === -1) return;
     this.histIdx--;
-    if (this.histIdx === -1) {
-      this.textInput.value = this.draftText;
-    } else {
-      this.textInput.value = this.history[this.histIdx] ?? "";
-    }
+    this.textInput.value = this.histIdx === -1
+      ? this.draftText
+      : (this.history[this.histIdx] ?? "");
     this.autoGrow();
     const len = this.textInput.value.length;
     this.textInput.setSelectionRange(len, len);
@@ -157,7 +200,6 @@ export class IOBar {
     const text = this.textInput.value.trim();
     if (!text || this.isSending) return;
 
-    // Record in history (most recent first)
     this.history.unshift(text);
     if (this.history.length > HISTORY_LIMIT) this.history.pop();
     this.histIdx = -1;
@@ -188,6 +230,5 @@ export class IOBar {
   private stopMic(): void {
     if (!this.voiceInput.isRecording) return;
     this.voiceInput.stop();
-    // Button state is cleaned up by voiceInput.onStop
   }
 }

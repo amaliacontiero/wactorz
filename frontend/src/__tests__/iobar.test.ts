@@ -6,6 +6,7 @@ import type { AgentInfo } from "../types/agent";
 
 function setupDOM() {
   document.body.innerHTML = `
+    <button id="wake-btn"></button>
     <button id="mic-btn"></button>
     <textarea id="text-input"></textarea>
     <button id="send-btn"></button>

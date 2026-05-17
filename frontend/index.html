@@ -489,7 +489,7 @@
         border-top: 1px solid rgba(37, 99, 235, 0.15);
         z-index: 400;
       }
-      #mic-btn {
+      #mic-btn, #wake-btn {
         flex-shrink: 0; width: 36px; height: 36px; border-radius: 8px;
         background: rgba(37, 99, 235, 0.12);
         border: 1px solid rgba(37, 99, 235, 0.3);
@@ -497,7 +497,7 @@
         display: flex; align-items: center; justify-content: center;
         transition: all 0.2s ease;
       }
-      #mic-btn:hover { background: rgba(37, 99, 235, 0.22); }
+      #mic-btn:hover, #wake-btn:hover { background: rgba(37, 99, 235, 0.22); }
       #mic-btn.recording {
         background: rgba(251, 113, 133, 0.2);
         border-color: rgba(251, 113, 133, 0.5);
@@ -507,6 +507,22 @@
       @keyframes mic-pulse {
         0%, 100% { box-shadow: 0 0 0 0 rgba(251,113,133,0.3); }
         50% { box-shadow: 0 0 0 8px rgba(251,113,133,0); }
+      }
+      #wake-btn.ambient {
+        background: rgba(34, 197, 94, 0.15);
+        border-color: rgba(34, 197, 94, 0.4);
+        color: #4ade80;
+        animation: wake-pulse 2s ease-in-out infinite;
+      }
+      #wake-btn.triggered {
+        background: rgba(234, 179, 8, 0.2);
+        border-color: rgba(234, 179, 8, 0.5);
+        color: #facc15;
+        animation: none;
+      }
+      @keyframes wake-pulse {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(34,197,94,0.3); }
+        50% { box-shadow: 0 0 0 6px rgba(34,197,94,0); }
       }
       #text-input {
         flex: 1;
@@ -1397,7 +1413,7 @@
           min-height: 58px;
         }
         /* 44px touch targets — minimum recommended by Apple HIG */
-        #mic-btn, #send-btn { width: 44px; height: 44px; font-size: 16px; }
+        #wake-btn, #mic-btn, #send-btn { width: 44px; height: 44px; font-size: 16px; }
         #text-input { font-size: 16px; } /* 16px prevents iOS auto-zoom on focus */
       }
 
@@ -1935,8 +1951,9 @@
     <!-- Node hover tooltip -->
     <div id="node-tooltip"></div>
 
-    <!-- IO bar: mic + multiline textarea + send -->
+    <!-- IO bar: wake + mic + multiline textarea + send -->
     <div id="io-bar">
+      <button id="wake-btn" title="Wake word — click to enable">👂</button>
       <button id="mic-btn" title="Hold to speak">🎙</button>
       <textarea
         id="text-input"
