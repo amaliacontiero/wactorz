@@ -1306,6 +1306,7 @@ _ha_bridge_task: asyncio.Task | None = None
 async def _start_ha_bridge(_app=None) -> None:
     """Launch HAFusekiBridge as a background task if HA_TOKEN is configured."""
     global _ha_bridge_task
+    from .config import CONFIG
     if not CONFIG.ha_token or not CONFIG.fuseki_url:
         return
     try:
@@ -1333,6 +1334,7 @@ async def _start_ha_bridge(_app=None) -> None:
 async def ha_sync_handler(request):
     """POST /api/ha/sync — cancel and restart the HA→Fuseki bridge immediately."""
     from aiohttp import web
+    from .config import CONFIG
     global _ha_bridge_task
     if not CONFIG.ha_token:
         return web.json_response({"error": "HA_TOKEN not configured"}, status=400)
