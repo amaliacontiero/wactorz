@@ -2052,7 +2052,7 @@ export class CardDashboard {
         label: "Device catalog",
         icon: "⊡",
         sparql: `SELECT ?g ?entity ?label WHERE {
-  VALUES ?g { <urn:ha:devices> <urn:wactorz:devices> <urn:wactorz:agents> }
+  VALUES ?g { <urn:ha:devices> <urn:wactorz:devices> }
   GRAPH ?g {
     ?entity rdfs:label ?label .
     FILTER(?entity != <urn:ha:bridge:wactorz>)
@@ -2112,36 +2112,8 @@ export class CardDashboard {
       <a href="${base}" target="_blank" rel="noopener"
          style="font-size:11px;opacity:0.4;color:inherit;text-decoration:none;margin-left:2px;">${base} ↗</a>
       <div style="flex:1;"></div>
-      <button id="fsk-seed-demo" class="af-mini-btn" style="font-size:10px;">Seed Demo Data</button>
       <button id="fsk-reconfigure" class="af-mini-btn" style="font-size:10px;">⚙ Configure</button>
     `;
-    const demoSeedQuery = `INSERT DATA {
-  GRAPH <urn:ha:devices> {
-    <urn:ha:entity:demo_sensor_temperature> rdfs:label "Demo temperature sensor" .
-    <urn:ha:entity:demo_switch_lamp> rdfs:label "Demo lamp" .
-  }
-  GRAPH <urn:ha:current> {
-    <urn:ha:entity:demo_sensor_temperature>
-      a sosa:Sensor ;
-      syn:state "21.5" ;
-      syn:unit "degC" .
-    <urn:ha:entity:demo_switch_lamp>
-      a sosa:Actuator ;
-      syn:state "on" .
-  }
-  GRAPH <urn:ha:history> {
-    <urn:ha:observation:demo_sensor_temperature:1>
-      a sosa:Observation ;
-      sosa:madeBySensor <urn:ha:entity:demo_sensor_temperature> ;
-      sosa:hasSimpleResult "21.1" ;
-      sosa:resultTime "2026-04-17T12:00:00Z"^^xsd:dateTime .
-    <urn:ha:observation:demo_sensor_temperature:2>
-      a sosa:Observation ;
-      sosa:madeBySensor <urn:ha:entity:demo_sensor_temperature> ;
-      sosa:hasSimpleResult "21.5" ;
-      sosa:resultTime "2026-04-17T12:15:00Z"^^xsd:dateTime .
-  }
-}`;
     hdr.querySelector("#fsk-reconfigure")?.addEventListener("click", () => {
       wrapper.innerHTML = "";
       wrapper.appendChild(this._buildFusekiConfigForm());
@@ -2152,7 +2124,7 @@ export class CardDashboard {
     hint.style.cssText =
       "font-size:12px;line-height:1.45;color:rgba(255,255,255,0.6);padding:10px 12px;border:1px solid rgba(255,255,255,0.08);border-radius:10px;background:rgba(255,255,255,0.03);";
     hint.innerHTML =
-      "This panel only shows data already stored in Fuseki. If the dataset is empty, all presets return 0 rows even when the endpoint is reachable. Use Seed Demo Data if you want to verify the graph view without Home Assistant.";
+      "This panel only shows data already stored in Fuseki. If the dataset is empty, all presets return 0 rows even when the endpoint is reachable.";
     wrapper.appendChild(hint);
 
     // ── Presets + editor row ───────────────────────────────────────────────
@@ -2362,13 +2334,6 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
         results.innerHTML = `<pre class="af-fuseki-error">${String(err)}</pre>`;
       }
     };
-
-    hdr.querySelector("#fsk-seed-demo")?.addEventListener("click", async () => {
-      editor.value = demoSeedQuery;
-      await runQuery(demoSeedQuery);
-      editor.value = PRESETS[4]?.sparql ?? PRESETS[0]?.sparql ?? "";
-      await runQuery(editor.value);
-    });
 
     runBtn.addEventListener("click", () => void runQuery(editor.value));
     editor.addEventListener("keydown", (e) => {
