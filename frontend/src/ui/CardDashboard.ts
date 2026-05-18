@@ -70,19 +70,6 @@ function stateLabel(state: AgentState): string {
   return state as string;
 }
 
-function agentTypeColor(agentType?: string): string {
-  switch (agentType) {
-    case "orchestrator":
-      return "#f59e0b";
-    case "monitor":
-      return "#34d399";
-    case "synapse":
-      return "#8b5cf6";
-    default:
-      return "#93c5fd";
-  }
-}
-
 function relTime(ms: number): string {
   const s = Math.round((Date.now() - ms) / 1000);
   if (s < 5) return "now";
@@ -714,7 +701,6 @@ export class CardDashboard {
     const hbMs = this.lastHb.get(agent.id) ?? 0;
     const color = stateColor(agent.state);
     const status = stateLabel(agent.state);
-    const typeColor = agentTypeColor(agent.agentType);
     const msgs = agent.messagesProcessed ?? 0;
 
     const card = document.createElement("div");
@@ -725,12 +711,6 @@ export class CardDashboard {
     dot.className = "af-card-state-dot";
     dot.style.background = color;
     dot.style.boxShadow = `0 0 8px ${color}`;
-
-    const badge = document.createElement("div");
-    badge.className = "af-card-type-badge";
-    badge.style.color = typeColor;
-    badge.style.borderColor = `${typeColor}55`;
-    badge.textContent = agent.agentType ?? "wactor";
 
     const name = document.createElement("div");
     name.className = "af-card-name";
@@ -752,7 +732,6 @@ export class CardDashboard {
     `;
 
     card.appendChild(dot);
-    card.appendChild(badge);
     card.appendChild(name);
     card.appendChild(stateLbl);
     card.appendChild(meta);
@@ -1305,7 +1284,34 @@ export class CardDashboard {
     sendBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M1 13L13 7 1 1v4.5l8.5 1.5-8.5 1.5V13z" fill="currentColor"/></svg>`;
     sendBtn.addEventListener("click", () => this._sendMessage(input, select));
 
-    bar.append(select, input, sendBtn);
+    const wakeBtn = document.createElement("button");
+    wakeBtn.className = "af-voice-btn";
+    wakeBtn.id = "af-wake-btn-cd";
+    wakeBtn.title = "Wake word — click to enable";
+    wakeBtn.textContent = "👂";
+    wakeBtn.addEventListener("click", () =>
+      document.dispatchEvent(new CustomEvent("af-wake-toggle")),
+    );
+
+    const micBtn = document.createElement("button");
+    micBtn.className = "af-voice-btn";
+    micBtn.id = "af-mic-btn-cd";
+    micBtn.title = "Hold to speak";
+    micBtn.textContent = "🎙";
+    micBtn.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      micBtn.setPointerCapture(e.pointerId);
+      document.dispatchEvent(new CustomEvent("af-mic-start"));
+    });
+    micBtn.addEventListener("pointerup",     () => document.dispatchEvent(new CustomEvent("af-mic-stop")));
+    micBtn.addEventListener("pointercancel", () => document.dispatchEvent(new CustomEvent("af-mic-stop")));
+
+    if ((document.body as any).__voiceUnavailable) {
+      wakeBtn.style.display = "none";
+      micBtn.style.display  = "none";
+    }
+
+    bar.append(wakeBtn, micBtn, select, input, sendBtn);
     return bar;
   }
 

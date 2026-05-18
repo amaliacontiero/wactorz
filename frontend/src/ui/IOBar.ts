@@ -50,6 +50,7 @@ export class IOBar {
     if (!this.voiceInput.isAvailable) {
       this.micBtn.style.display  = "none";
       this.wakeBtn.style.display = "none";
+      (document.body as any).__voiceUnavailable = true;
     }
 
     // Restore persistent wake-word state across page loads
@@ -105,17 +106,31 @@ export class IOBar {
       this.textInput.placeholder = "Talk to io-agent… (type @name to target)";
     });
 
-    // PTT transcript → text input → auto-send on final
+    // PTT transcript → fill the active input → auto-send on final
     this.voiceInput.onTranscript = (text, final) => {
-      this.textInput.value = text;
-      this.autoGrow();
-      if (final) void this.send();
+      const cdInput = document.getElementById("af-iobar-input") as HTMLInputElement | null;
+      if (cdInput) {
+        cdInput.value = text;
+        if (final) {
+          const sel = document.getElementById("af-target-select") as HTMLSelectElement | null;
+          document.dispatchEvent(new CustomEvent("af-send-message", {
+            detail: { content: text, target: sel?.value ?? "main" },
+          }));
+          cdInput.value = "";
+        }
+      } else {
+        this.textInput.value = text;
+        this.autoGrow();
+        if (final) void this.send();
+      }
     };
 
     // Sync mic button when PTT ends
     this.voiceInput.onStop = () => {
       this.micBtn.classList.remove("recording");
       this.micBtn.title = "Hold to speak";
+      const cdMic = document.getElementById("af-mic-btn-cd");
+      if (cdMic) { cdMic.classList.remove("recording"); cdMic.title = "Hold to speak"; }
     };
 
     this.voiceInput.onError = (message) => {
@@ -124,22 +139,31 @@ export class IOBar {
       if (!this.voiceInput.isAvailable) {
         this.micBtn.style.display  = "none";
         this.wakeBtn.style.display = "none";
+        const cdMic  = document.getElementById("af-mic-btn-cd");
+        const cdWake = document.getElementById("af-wake-btn-cd");
+        if (cdMic)  cdMic.style.display  = "none";
+        if (cdWake) cdWake.style.display = "none";
       } else {
         setTimeout(() => { this.micBtn.title = "Voice input"; }, 5000);
       }
     };
 
-    // Wake-word detected: fill + send, or open PTT for the command
+    // Wake-word detected: fill + send the active input, or open PTT
     this.voiceInput.onWakeWord = (textAfter) => {
-      this.wakeBtn.classList.add("triggered");
-      setTimeout(() => this.wakeBtn.classList.remove("triggered"), 700);
-
+      this._syncWakeTriggered();
+      const cdInput = document.getElementById("af-iobar-input") as HTMLInputElement | null;
       if (textAfter) {
-        this.textInput.value = textAfter;
-        this.autoGrow();
-        void this.send();
+        if (cdInput) {
+          const sel = document.getElementById("af-target-select") as HTMLSelectElement | null;
+          document.dispatchEvent(new CustomEvent("af-send-message", {
+            detail: { content: textAfter, target: sel?.value ?? "main" },
+          }));
+        } else {
+          this.textInput.value = textAfter;
+          this.autoGrow();
+          void this.send();
+        }
       } else {
-        // No command in the same utterance — activate PTT to capture it
         void this.startMic();
       }
     };
@@ -150,7 +174,21 @@ export class IOBar {
       this.wakeBtn.classList.remove("ambient");
       this.wakeBtn.title = "Wake word (unavailable — requires HTTPS)";
       this.wakeBtn.style.display = "none";
+      const cdWake = document.getElementById("af-wake-btn-cd");
+      if (cdWake) cdWake.style.display = "none";
     };
+  }
+
+  toggleWake(): void { this._toggleWake(); }
+
+  private _syncWakeTriggered(): void {
+    this.wakeBtn.classList.add("triggered");
+    setTimeout(() => this.wakeBtn.classList.remove("triggered"), 700);
+    const cdWake = document.getElementById("af-wake-btn-cd");
+    if (cdWake) {
+      cdWake.classList.add("triggered");
+      setTimeout(() => cdWake.classList.remove("triggered"), 700);
+    }
   }
 
   private _toggleWake(): void {
@@ -159,12 +197,16 @@ export class IOBar {
       localStorage.setItem(LS_WAKE_ACTIVE, "0");
       this.wakeBtn.classList.remove("ambient");
       this.wakeBtn.title = "Wake word — click to enable";
+      const cdWake = document.getElementById("af-wake-btn-cd");
+      if (cdWake) { cdWake.classList.remove("ambient"); cdWake.title = "Wake word — click to enable"; }
     } else {
       const word = localStorage.getItem(LS_WAKE_WORD) ?? "wactorz";
       if (this.voiceInput.startAmbient(word)) {
         localStorage.setItem(LS_WAKE_ACTIVE, "1");
         this.wakeBtn.classList.add("ambient");
         this.wakeBtn.title = `Listening for "${word}" — click to disable`;
+        const cdWake = document.getElementById("af-wake-btn-cd");
+        if (cdWake) { cdWake.classList.add("ambient"); cdWake.title = `Listening for "${word}" — click to disable`; }
       }
     }
   }
@@ -218,7 +260,7 @@ export class IOBar {
     }
   }
 
-  private async startMic(): Promise<void> {
+  async startMic(): Promise<void> {
     if (this.voiceInput.isRecording) return;
     const started = await this.voiceInput.start();
     if (started) {
@@ -227,7 +269,7 @@ export class IOBar {
     }
   }
 
-  private stopMic(): void {
+  stopMic(): void {
     if (!this.voiceInput.isRecording) return;
     this.voiceInput.stop();
   }

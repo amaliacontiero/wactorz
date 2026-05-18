@@ -115,6 +115,10 @@ const voice = new VoiceInput();
 const ioManager = new IOManager(mqtt, chatPanel);
 const ioBar = new IOBar(voice, ioManager);
 
+document.addEventListener("af-wake-toggle", () => ioBar.toggleWake());
+document.addEventListener("af-mic-start",   () => void ioBar.startMic());
+document.addEventListener("af-mic-stop",    () => ioBar.stopMic());
+
 const feed = new ActivityFeed();
 
 // ── Direct WebSocket chat (bypasses MQTT/IOAgent when server has registry) ────
