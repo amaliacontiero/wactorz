@@ -2153,10 +2153,11 @@ export class CardDashboard {
         label: "Device catalog",
         icon: "⊡",
         sparql: `SELECT ?g ?entity ?label WHERE {
-  VALUES ?g { <urn:ha:devices> <urn:wactorz:devices> }
+  VALUES ?g { <urn:ha:devices> <urn:wactorz:agents> }
   GRAPH ?g {
     ?entity rdfs:label ?label .
-    FILTER(?entity != <urn:ha:bridge:wactorz>)
+    FILTER(!STRSTARTS(STR(?entity), "urn:ha:bridge:"))
+    FILTER(!STRSTARTS(STR(?entity), "urn:wactorz:bridge:"))
   }
 } ORDER BY ?label LIMIT 200`,
       },
