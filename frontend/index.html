@@ -1900,7 +1900,7 @@
     <canvas id="renderCanvas"></canvas>
 
     <!-- HUD: agent count + health badge + page links -->
-    <div id="hud" class="glass">
+    <div id="hud" class="glass" style="display:none">
       <div class="hud-title">Wactorz</div>
       <div class="hud-count" id="hud-count">0</div>
       <div class="hud-label">Active Agents</div>
@@ -1922,7 +1922,7 @@
     </div>
 
     <!-- Activity feed toggle (below theme switcher) -->
-    <button id="feed-toggle" title="Toggle activity feed">
+    <button id="feed-toggle" style="display:none" title="Toggle activity feed">
       Feed <span id="feed-badge"></span>
     </button>
 
@@ -1954,7 +1954,7 @@
     <div id="node-tooltip"></div>
 
     <!-- IO bar: wake + mic + multiline textarea + send -->
-    <div id="io-bar">
+    <div id="io-bar" style="display:none">
       <button id="wake-btn" title="Wake word — click to enable">👂</button>
       <button id="mic-btn" title="Hold to speak">🎙</button>
       <textarea
