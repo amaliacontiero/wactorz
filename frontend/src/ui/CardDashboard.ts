@@ -150,6 +150,38 @@ export class CardDashboard {
     this.root = this.buildRoot();
     document.body.appendChild(this.root);
     this._initHAClient();
+    void this._loadServerConfig();
+  }
+
+  private async _loadServerConfig(): Promise<void> {
+    try {
+      const ingress: string = (window as any).__WACTORZ_INGRESS_PATH ?? "";
+      const resp = await fetch(`${ingress}/api/config`);
+      if (!resp.ok) return;
+      const cfg = await resp.json() as {
+        ha?:     { url?: string; token?: string };
+        fuseki?: { url?: string; dataset?: string; user?: string; password?: string };
+      };
+      let changed = false;
+      const seed = (key: string, val: string | undefined | null) => {
+        if (val && !localStorage.getItem(key)) {
+          localStorage.setItem(key, val);
+          changed = true;
+        }
+      };
+      seed("wactorz-fuseki-url",     cfg.fuseki?.url);
+      seed("wactorz-fuseki-dataset", cfg.fuseki?.dataset);
+      seed("wactorz-fuseki-user",    cfg.fuseki?.user);
+      seed("wactorz-fuseki-pass",    cfg.fuseki?.password);
+      seed("wactorz-ha-url",         cfg.ha?.url);
+      seed("wactorz-ha-token",       cfg.ha?.token);
+      if (changed) {
+        if (!this.haClient) this._initHAClient();
+        if (this.root.classList.contains("cd-visible")) this._renderView();
+      }
+    } catch {
+      // best-effort — server may not be ready yet
+    }
   }
 
   private _initHAClient(): void {
@@ -2100,9 +2132,6 @@ export class CardDashboard {
 
     const base = this.fusekiUrl;
     const ds = this.fusekiDataset;
-    const auth = this.fusekiUser
-      ? `Basic ${btoa(`${this.fusekiUser}:${this.fusekiPass}`)}`
-      : "";
 
     // ── Preset queries ─────────────────────────────────────────────────────
     const PRESETS: { label: string; icon: string; sparql: string }[] = [
@@ -2336,7 +2365,6 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
         );
       const full = withPrefixes(trimmed);
       const headers: Record<string, string> = {};
-      if (auth) headers["Authorization"] = auth;
 
       try {
         let resp: Response;

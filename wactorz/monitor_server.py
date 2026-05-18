@@ -1430,8 +1430,10 @@ async def config_handler(request):
             "token": CONFIG.ha_token,
         },
         "fuseki": {
-            "url":     CONFIG.fuseki_url,
-            "dataset": CONFIG.fuseki_dataset,
+            "url":      CONFIG.fuseki_url,
+            "dataset":  CONFIG.fuseki_dataset,
+            "user":     CONFIG.fuseki_user,
+            "password": CONFIG.fuseki_password,
         },
         "mqtt": {
             "host": MQTT_BROKER,
