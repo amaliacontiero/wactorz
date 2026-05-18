@@ -200,13 +200,17 @@ export class IOBar {
       const cdWake = document.getElementById("af-wake-btn-cd");
       if (cdWake) { cdWake.classList.remove("ambient"); cdWake.title = "Wake word — click to enable"; }
     } else {
-      const word = localStorage.getItem(LS_WAKE_WORD) ?? "wactorz";
+      const word = localStorage.getItem(LS_WAKE_WORD) ?? "computer";
       if (this.voiceInput.startAmbient(word)) {
         localStorage.setItem(LS_WAKE_ACTIVE, "1");
         this.wakeBtn.classList.add("ambient");
         this.wakeBtn.title = `Listening for "${word}" — click to disable`;
         const cdWake = document.getElementById("af-wake-btn-cd");
         if (cdWake) { cdWake.classList.add("ambient"); cdWake.title = `Listening for "${word}" — click to disable`; }
+      } else {
+        localStorage.setItem(LS_WAKE_ACTIVE, "0");
+        this.wakeBtn.title = "Wake word unavailable (requires HTTPS + Chrome/Edge)";
+        setTimeout(() => { this.wakeBtn.title = "Wake word — click to enable"; }, 4000);
       }
     }
   }

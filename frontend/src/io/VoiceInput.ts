@@ -188,8 +188,8 @@ export class VoiceInput {
    * Start always-on wake-word listening.
    * Returns false if the API is unavailable or already in ambient mode.
    */
-  startAmbient(wakeWord = "wactorz"): boolean {
-    if (!this._API || !this.recognition || this._isAmbient) return false;
+  startAmbient(wakeWord = "computer"): boolean {
+    if (!this._API || this._isAmbient) return false;
     this._wakeWord = wakeWord.toLowerCase().trim();
     this._isAmbient = true;
     this._launchAmbient();
