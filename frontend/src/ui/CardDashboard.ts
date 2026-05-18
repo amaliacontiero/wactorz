@@ -829,6 +829,7 @@ export class CardDashboard {
       const task = document.createElement("div");
       task.className = "af-card-task";
       task.textContent = agent.task;
+      task.title = agent.task;
       card.appendChild(task);
     }
 
@@ -1353,14 +1354,21 @@ export class CardDashboard {
     select.id = "af-target-select";
     this._populateSelect(select);
 
-    const input = document.createElement("input");
+    const input = document.createElement("textarea");
     input.className = "af-iobar-input";
     input.id = "af-iobar-input";
+    input.rows = 1;
     input.placeholder = `Message @${this.chatTarget}…`;
+    const autoGrow = () => {
+      input.style.height = "auto";
+      input.style.height = Math.min(input.scrollHeight, 140) + "px";
+    };
+    input.addEventListener("input", autoGrow);
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         this._sendMessage(input, select);
+        input.style.height = "auto";
       }
     });
     select.addEventListener("change", () => {
@@ -1430,12 +1438,12 @@ export class CardDashboard {
     const select =
       this.root.querySelector<HTMLSelectElement>("#af-target-select");
     if (select) this._populateSelect(select);
-    const input = this.root.querySelector<HTMLInputElement>("#af-iobar-input");
+    const input = this.root.querySelector<HTMLTextAreaElement>("#af-iobar-input");
     if (input) input.placeholder = `Message @${this.chatTarget}…`;
   }
 
   private _sendMessage(
-    input: HTMLInputElement,
+    input: HTMLTextAreaElement,
     select: HTMLSelectElement,
   ): void {
     const content = input.value.trim();
@@ -1459,6 +1467,7 @@ export class CardDashboard {
       this._scrollThread();
     }
     input.value = "";
+    input.style.height = "auto";
     document.dispatchEvent(
       new CustomEvent("af-send-message", { detail: { content, target } }),
     );

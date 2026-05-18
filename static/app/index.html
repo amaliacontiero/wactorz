@@ -816,7 +816,7 @@
 
       /* ── IO Bar (embedded in af-root) ── */
       .af-iobar {
-        display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+        display: flex; align-items: flex-end; gap: 8px; padding: 8px 12px;
         border-top: 1px solid rgba(37,99,235,0.15); background: rgba(4,8,16,0.9); flex-shrink: 0;
       }
       .af-target-select {
@@ -829,6 +829,8 @@
         flex: 1; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
         border-radius: 8px; padding: 7px 12px; font-size: 13px; color: rgba(255,255,255,0.9);
         outline: none; transition: border-color 0.15s; font-family: inherit;
+        resize: none; overflow: hidden; min-height: 34px; line-height: 1.4;
+        scrollbar-width: none;
       }
       .af-iobar-input:focus { border-color: rgba(37,99,235,0.55); background: rgba(255,255,255,0.07); }
       .af-send-btn {
@@ -1911,7 +1913,7 @@
         .fin-metric-val { font-size: 15px; }
       }
     </style>
-    <script type="module" crossorigin src="./assets/index-CV7FndNL.js"></script>
+    <script type="module" crossorigin src="./assets/index-js_A7akX.js"></script>
     <link rel="modulepreload" crossorigin href="./assets/rolldown-runtime-lhHHWwHU.js">
     <link rel="modulepreload" crossorigin href="./assets/babylon-core-wJ5bR-LE.js">
     <link rel="modulepreload" crossorigin href="./assets/vendor-DuCOOrkg.js">
