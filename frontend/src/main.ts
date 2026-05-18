@@ -205,6 +205,7 @@ wsChat.onStatePatch((agents, deletedId, stats) => {
   if (stats?.totalMessages !== undefined) scene.setTotalMessages(stats.totalMessages);
   agents.forEach((a) => {
     if (!a.agent_id) return;
+    if (deletedAgentIds.has(a.agent_id)) return;
     const rawState = (a.state ?? a.status ?? "running") as string;
     const state: AgentState =
       rawState === "paused"
@@ -375,6 +376,7 @@ mqtt.on("heartbeat", (payload) => {
 });
 
 mqtt.on("spawn", (payload) => {
+  if (deletedAgentIds.has(payload.agentId)) return;
   scene.onSpawn(payload);
   syncAgentViews();
   pushFeed({

@@ -69,6 +69,8 @@ state = {
 
 ws_clients: set = set()
 mqtt_client_ref = None
+# IDs that have been explicitly deleted — block re-admission from stale heartbeats
+_deleted_agent_ids: set = set()
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -89,6 +91,8 @@ def _parse_mention(content: str) -> tuple[str, str]:
 
 
 def update_agent(agent_id: str, key: str, data):
+    if agent_id in _deleted_agent_ids:
+        return
     if agent_id not in state["agents"]:
         state["agents"][agent_id] = {
             "agent_id":   agent_id,
@@ -600,7 +604,13 @@ async def handle_command(cmd: dict):
             )
             await broadcast({"type": "patch", "state": _snapshot()})
         elif command == "delete":
+            _deleted_agent_ids.add(agent_id)
             state["agents"].pop(agent_id, None)
+            # Stop and unregister via registry immediately so heartbeats cease
+            if registry is not None:
+                actor = registry.get(agent_id)
+                if actor and not getattr(actor, "protected", False):
+                    asyncio.create_task(actor.stop())
             await broadcast({"type": "delete_agent", "agent_id": agent_id, "state": _snapshot()})
     except Exception as e:
         logger.error(f"[cmd] Publish failed: {e}")
@@ -1154,11 +1164,10 @@ async def delete_actor_handler(request):
         return web.json_response({"error": "actor not found"}, status=404)
     if getattr(actor, "protected", False):
         return web.json_response({"error": "actor is protected"}, status=403)
-    if mqtt_client_ref:
-        await mqtt_client_ref.publish(
-            f"agents/{actor_id}/commands",
-            json.dumps({"command": "stop", "sender": "api", "timestamp": time.time()}),
-        )
+    _deleted_agent_ids.add(actor.actor_id)
+    state["agents"].pop(actor.actor_id, None)
+    asyncio.create_task(actor.stop())
+    await broadcast({"type": "delete_agent", "agent_id": actor.actor_id, "state": _snapshot()})
     return web.Response(status=200, text="stopping")
 
 
