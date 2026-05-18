@@ -206,10 +206,13 @@ pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </s
 cp<span class="w"> </span>.env.template<span class="w"> </span>.env
 <span class="c1"># edit .env and set LLM_API_KEY (or whichever provider you use)</span>
 
-<span class="c1"># 2. Start Wactorz (starts everything including the broker)</span>
+<span class="c1"># 2. Get/run MQTT broker (if you don&#39;t have already) and open ports 1883, 9001</span>
+docker<span class="w"> </span>run<span class="w"> </span>-d<span class="w"> </span>--name<span class="w"> </span>mosquitto<span class="w"> </span>-p<span class="w"> </span><span class="m">1883</span>:1883<span class="w"> </span>-p<span class="w"> </span><span class="m">9001</span>:9001<span class="w"> </span>eclipse-mosquitto
+
+<span class="c1"># 3. Start Wactorz</span>
 wactorz
 
-<span class="c1"># 3. Open the web dashboard</span>
+<span class="c1"># 4. Open the web dashboard</span>
 <span class="c1"># http://localhost:8888</span>
 </code></pre></div>
 
@@ -267,6 +270,7 @@ HA_STATE_BRIDGE_PER_ENTITY=0 # 0 = flat topic (default), 1 = per-entity topics
 <div class="highlight"><pre><span></span><code><span class="gh">#</span> Only needed if using an external broker instead of the embedded one
 MQTT_HOST=localhost
 MQTT_PORT=1883
+MQTT_WS_PORT=9001
 </code></pre></div>
 
 <h4 id="web-dashboard">Web dashboard</h4>
@@ -274,16 +278,8 @@ MQTT_PORT=1883
 </code></pre></div>
 
 <hr />
-<h2 id="mqtt-broker_1">MQTT broker</h2>
-<p>Wactorz ships with an embedded MQTT broker that starts automatically — no separate installation needed for basic use. If you prefer to use an external Mosquitto instance (e.g. for multi-machine setups or when you already have a broker running), point Wactorz at it:</p>
-<div class="highlight"><pre><span></span><code>wactorz<span class="w"> </span>--mqtt-broker<span class="w"> </span><span class="m">192</span>.168.1.10<span class="w"> </span>--mqtt-port<span class="w"> </span><span class="m">1883</span>
-</code></pre></div>
-
-<h4 id="running-mosquitto-via-docker">Running Mosquitto via Docker</h4>
-<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>run<span class="w"> </span>-d<span class="w"> </span>--name<span class="w"> </span>mosquitto<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-p<span class="w"> </span><span class="m">1883</span>:1883<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>eclipse-mosquitto:latest<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>mosquitto<span class="w"> </span>-c<span class="w"> </span>/mosquitto/config/mosquitto.conf
+<h2 id="running-mosquitto-via-docker">Running Mosquitto via Docker</h2>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>run<span class="w"> </span>-d<span class="w"> </span>--name<span class="w"> </span>mosquitto<span class="w"> </span>-p<span class="w"> </span><span class="m">1883</span>:1883<span class="w"> </span>-p<span class="w"> </span><span class="m">9001</span>:9001<span class="w"> </span>eclipse-mosquitto
 </code></pre></div>
 
 <blockquote>
@@ -519,6 +515,9 @@ Then rebuild: <code>docker compose --profile python-full up -d --build fuseki</c
 │   ├── <span class="n">core</span>/
 │   │   ├── <span class="n">actor</span>.<span class="n">py</span>             ← <span class="n">Actor</span> <span class="nb">base</span> <span class="k">class</span>, <span class="n">Supervisor</span>, <span class="n">persistence</span>
 │   │   └── <span class="n">registry</span>.<span class="n">py</span>          ← <span class="n">ActorSystem</span>, <span class="n">ActorRegistry</span>, <span class="n">MQTT</span> <span class="n">publisher</span>
+│   │   ├── <span class="n">persistence</span>.<span class="n">py</span>       ← <span class="n">Actor</span> <span class="n">storage</span> <span class="nb">to</span> <span class="n">SQlite</span>
+│   │   └── <span class="n">migrations</span>.<span class="n">py</span>        ← <span class="n">Migration</span> <span class="nb">to</span> <span class="n">nodes</span>
+│   │   ├── <span class="n">topic_bus</span>.<span class="n">py</span>         ← <span class="n">Reactive</span> <span class="n">Pub</span><span class="o">/</span><span class="nb">Sub</span> <span class="n">Coordination</span> <span class="n">Layer</span>
 │   ├── <span class="n">agents</span>/
 │   │   ├── <span class="n">main_actor</span>.<span class="n">py</span>        ← <span class="n">LLM</span> <span class="n">orchestrator</span>
 │   │   ├── <span class="n">llm_agent</span>.<span class="n">py</span>         ← <span class="n">LLM</span> <span class="nb">base</span> + <span class="nb">all</span> <span class="n">providers</span>

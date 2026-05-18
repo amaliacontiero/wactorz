@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'docs/**'
+      - 'static/docs/**'
       - 'scripts/build_docs.py'
       - 'wactorz/**'
       - 'rust/**'

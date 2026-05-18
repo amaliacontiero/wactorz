@@ -489,7 +489,7 @@
         border-top: 1px solid rgba(37, 99, 235, 0.15);
         z-index: 400;
       }
-      #mic-btn {
+      #mic-btn, #wake-btn {
         flex-shrink: 0; width: 36px; height: 36px; border-radius: 8px;
         background: rgba(37, 99, 235, 0.12);
         border: 1px solid rgba(37, 99, 235, 0.3);
@@ -497,7 +497,7 @@
         display: flex; align-items: center; justify-content: center;
         transition: all 0.2s ease;
       }
-      #mic-btn:hover { background: rgba(37, 99, 235, 0.22); }
+      #mic-btn:hover, #wake-btn:hover { background: rgba(37, 99, 235, 0.22); }
       #mic-btn.recording {
         background: rgba(251, 113, 133, 0.2);
         border-color: rgba(251, 113, 133, 0.5);
@@ -507,6 +507,22 @@
       @keyframes mic-pulse {
         0%, 100% { box-shadow: 0 0 0 0 rgba(251,113,133,0.3); }
         50% { box-shadow: 0 0 0 8px rgba(251,113,133,0); }
+      }
+      #wake-btn.ambient {
+        background: rgba(34, 197, 94, 0.15);
+        border-color: rgba(34, 197, 94, 0.4);
+        color: #4ade80;
+        animation: wake-pulse 2s ease-in-out infinite;
+      }
+      #wake-btn.triggered {
+        background: rgba(234, 179, 8, 0.2);
+        border-color: rgba(234, 179, 8, 0.5);
+        color: #facc15;
+        animation: none;
+      }
+      @keyframes wake-pulse {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(34,197,94,0.3); }
+        50% { box-shadow: 0 0 0 6px rgba(34,197,94,0); }
       }
       #text-input {
         flex: 1;
@@ -823,6 +839,16 @@
       }
       .af-send-btn:hover:not(:disabled) { background: #3b82f6; transform: scale(1.05); }
       .af-send-btn:disabled { background: rgba(37,99,235,0.3); cursor: not-allowed; }
+      .af-voice-btn {
+        width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0;
+        display: flex; align-items: center; justify-content: center; font-size: 15px;
+        background: rgba(37,99,235,0.12); border: 1px solid rgba(37,99,235,0.3);
+        color: #93c5fd; cursor: pointer; transition: background 0.15s;
+      }
+      .af-voice-btn:hover { background: rgba(37,99,235,0.22); }
+      .af-voice-btn.recording { background: rgba(239,68,68,0.2); border-color: rgba(239,68,68,0.5); animation: mic-pulse 1s ease-in-out infinite; }
+      .af-voice-btn.ambient { background: rgba(34,197,94,0.15); border-color: rgba(34,197,94,0.4); animation: wake-pulse 2s ease-in-out infinite; }
+      .af-voice-btn.triggered { background: rgba(251,191,36,0.2); border-color: rgba(251,191,36,0.5); animation: none; }
 
       @media (max-width: 1100px) {
         .af-stats-grid { grid-template-columns: repeat(2, minmax(0,1fr)); }
@@ -907,6 +933,8 @@
         display: flex; gap: 10px; flex-wrap: wrap;
         font-size: 11px; color: rgba(255,255,255,0.4); margin-top: 2px;
       }
+      .af-card-cpu { color: rgba(251,191,36,0.75); }
+      .af-card-mem { color: rgba(129,140,248,0.75); }
       .af-card-footer { display: flex; gap: 5px; margin-top: 6px; flex-wrap: wrap; }
       .af-card-btn {
         font-size: 11px; padding: 4px 10px; border-radius: 6px;
@@ -1397,7 +1425,7 @@
           min-height: 58px;
         }
         /* 44px touch targets — minimum recommended by Apple HIG */
-        #mic-btn, #send-btn { width: 44px; height: 44px; font-size: 16px; }
+        #wake-btn, #mic-btn, #send-btn { width: 44px; height: 44px; font-size: 16px; }
         #text-input { font-size: 16px; } /* 16px prevents iOS auto-zoom on focus */
       }
 
@@ -1889,7 +1917,7 @@
     <canvas id="renderCanvas"></canvas>
 
     <!-- HUD: agent count + health badge + page links -->
-    <div id="hud" class="glass">
+    <div id="hud" class="glass" style="display:none">
       <div class="hud-title">Wactorz</div>
       <div class="hud-count" id="hud-count">0</div>
       <div class="hud-label">Active Agents</div>
@@ -1911,7 +1939,7 @@
     </div>
 
     <!-- Activity feed toggle (below theme switcher) -->
-    <button id="feed-toggle" title="Toggle activity feed">
+    <button id="feed-toggle" style="display:none" title="Toggle activity feed">
       Feed <span id="feed-badge"></span>
     </button>
 
@@ -1942,8 +1970,9 @@
     <!-- Node hover tooltip -->
     <div id="node-tooltip"></div>
 
-    <!-- IO bar: mic + multiline textarea + send -->
-    <div id="io-bar">
+    <!-- IO bar: wake + mic + multiline textarea + send -->
+    <div id="io-bar" style="display:none">
+      <button id="wake-btn" title="Wake word — click to enable">👂</button>
       <button id="mic-btn" title="Hold to speak">🎙</button>
       <textarea
         id="text-input"
