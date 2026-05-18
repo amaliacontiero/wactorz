@@ -666,6 +666,22 @@ Every LLM call across every agent accumulates token usage into three counters: `
 
 Cost is tracked for all five providers (Anthropic, OpenAI, Ollama free, NIM free/paid, Google Gemini). The `HomeAssistantAgent` tracks costs across all of its internal LLM calls: classification, hardware selection, correction retry, automation generation, delete confirmation, edit identification, edit generation, and the `other`-action tool-call loop (up to 3 rounds).
 
+### Spend Limits
+
+A hard cap can be set to block further LLM calls once a budget is reached for the current period.
+
+**Via env vars** (startup default):
+```env
+LLM_COST_LIMIT_USD=0.70     # 0 = disabled
+LLM_COST_LIMIT_PERIOD=daily  # daily | weekly | monthly
+```
+
+**Via the dashboard** (Settings tab → LLM Spend Limit): changes take effect immediately without a restart and persist in SQLite across restarts. GUI value takes priority over the env var.
+
+When the limit is reached, LLM calls are blocked and a "limit reached" message is sent as a chat reply. Spend counters auto-reset when the period rolls over (midnight for daily, Monday for weekly, 1st of month for monthly). Use the **Reset spend** button in Settings to manually zero all counters.
+
+REST API: `GET /api/cost`, `POST /api/cost/limit`, `POST /api/cost/reset` — see [API reference](docs/api.md).
+
 ### Google Gemini Pricing (per 1M tokens, standard context ≤200K)
 
 | Model | Input | Output | Notes |

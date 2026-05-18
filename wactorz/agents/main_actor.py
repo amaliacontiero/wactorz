@@ -1713,14 +1713,17 @@ class MainActor(LLMAgent):
 
     async def chat_stream(self, user_message: str):
         full_response = []
+        got_usage = False
         async for chunk in super().chat_stream(user_message):
             if isinstance(chunk, dict):
+                got_usage = True
                 yield chunk
             else:
                 full_response.append(chunk)
                 yield chunk
-        # Extract facts from completed response — strip auto-injected context first
-        if full_response:
+        # Only extract facts when a real LLM response was received (usage dict present).
+        # Skips early-exit cases like cost-limit errors so no extra LLM call is made.
+        if full_response and got_usage:
             clean_msg = self._strip_live_context(user_message)
             asyncio.create_task(
                 self._extract_and_save_facts(clean_msg, "".join(full_response))

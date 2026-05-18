@@ -38,6 +38,8 @@ export LLM_PROVIDER=$(get_config_safe 'llm_provider' 'anthropic')
 export LLM_MODEL=$(get_config_safe 'llm_model' 'claude-sonnet-4-6')
 export LLM_API_KEY=$(get_config_safe 'llm_api_key' '')
 export OLLAMA_URL=$(get_config_safe 'ollama_url' 'http://localhost:11434')
+export LLM_COST_LIMIT_USD=$(get_config_safe 'llm_cost_limit_usd' '0')
+export LLM_COST_LIMIT_PERIOD=$(get_config_safe 'llm_cost_limit_period' 'monthly')
 
 # Map generic LLM_API_KEY to provider-specific env vars expected by the Python app
 case "$LLM_PROVIDER" in

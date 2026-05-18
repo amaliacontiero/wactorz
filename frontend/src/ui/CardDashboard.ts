@@ -112,6 +112,8 @@ export class CardDashboard {
   private _historyLoaded: Set<string> = new Set();
   private _totalCostUsd: number | null = null;
   private _totalMessages: number | null = null;
+  private _costLimitInfo: Record<string, any> | null = null;
+  private _costPollTimer: ReturnType<typeof setInterval> | null = null;
 
   // Event listeners (stored for cleanup)
   private _evFeed: ((e: Event) => void) | null = null;
@@ -210,6 +212,8 @@ export class CardDashboard {
     this._wireEvents();
     this._renderView();
     this.tickTimer = setInterval(() => this._refreshTimestamps(), 5000);
+    void this._fetchCostInfo();
+    this._costPollTimer = setInterval(() => void this._fetchCostInfo(), 30_000);
     // Connect HA once for the session — stays connected across sub-view changes
     // so state_changed events flow to the activity feed at all times.
     if (this.haClient && !this.haClient.connected) {
@@ -230,6 +234,10 @@ export class CardDashboard {
       clearInterval(this.tickTimer);
       this.tickTimer = null;
     }
+    if (this._costPollTimer) {
+      clearInterval(this._costPollTimer);
+      this._costPollTimer = null;
+    }
   }
 
   destroy(): void {
@@ -240,6 +248,34 @@ export class CardDashboard {
   setTotalCostUsd(usd: number): void {
     this._totalCostUsd = usd;
     if (this.view === "overview") this._renderStats();
+  }
+
+  private async _fetchCostInfo(): Promise<void> {
+    const ingress: string = (window as any).__WACTORZ_INGRESS_PATH ?? "";
+    try {
+      const res = await fetch(`${ingress}/api/cost`);
+      if (res.ok) {
+        this._costLimitInfo = await res.json();
+        if (this.view === "overview") this._renderStats();
+        else if (this.view === "settings") this._renderView();
+      }
+    } catch { /* ignore — server may not be ready */ }
+  }
+
+  private async _saveCostLimit(limit_usd: number, period: string): Promise<void> {
+    const ingress: string = (window as any).__WACTORZ_INGRESS_PATH ?? "";
+    await fetch(`${ingress}/api/cost/limit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ limit_usd, period }),
+    });
+    await this._fetchCostInfo();
+  }
+
+  private async _resetCost(): Promise<void> {
+    const ingress: string = (window as any).__WACTORZ_INGRESS_PATH ?? "";
+    await fetch(`${ingress}/api/cost/reset`, { method: "POST" });
+    await this._fetchCostInfo();
   }
 
   setTotalMessages(count: number): void {
@@ -637,32 +673,52 @@ export class CardDashboard {
       : agents.reduce((s, a) => s + (a.costUsd ?? 0), 0);
     const events = this.feedItems.length;
 
+    const lim = this._costLimitInfo;
+    const hasLimit = lim && typeof lim.limit_usd === "number" && lim.limit_usd > 0;
+    const barColor = lim?.limit_reached ? "#ef4444" : lim?.warning ? "#f59e0b" : "#22d3a0";
+    const pct = hasLimit ? Math.min(lim!.pct_used ?? 0, 100) : 0;
+    const periodLabel =
+      lim?.period === "daily"  ? "today"
+    : lim?.period === "weekly" ? "this week"
+    :                            "this month";
+    const costDetail = hasLimit
+      ? `$${lim!.spend_usd.toFixed(4)} / $${lim!.limit_usd.toFixed(2)} ${periodLabel}`
+      : "reported by actors";
+    const costExtra = hasLimit ? `
+      <div style="margin-top:8px;background:rgba(255,255,255,0.08);border-radius:4px;height:6px;overflow:hidden">
+        <div style="width:${pct}%;height:100%;background:${barColor};border-radius:4px;transition:width 0.4s"></div>
+      </div>` : "";
+
     [
       {
         label: "Wactorz",
         value: String(total),
         detail: `${healthy} running`,
         accent: "#60a5fa",
+        extra: "",
       },
       {
         label: "Messages",
         value: String(msgs),
         detail: "processed across actors",
         accent: "#22d3a0",
+        extra: "",
       },
       {
         label: "Cost",
         value: `$${cost.toFixed(4)}`,
-        detail: "reported by actors",
-        accent: "#f59e0b",
+        detail: costDetail,
+        accent: lim?.limit_reached ? "#ef4444" : "#f59e0b",
+        extra: costExtra,
       },
       {
         label: "Feed Events",
         value: String(events),
         detail: "since dashboard loaded",
         accent: "#8b5cf6",
+        extra: "",
       },
-    ].forEach(({ label, value, detail, accent }) => {
+    ].forEach(({ label, value, detail, accent, extra }: any) => {
       const card = document.createElement("div");
       card.className = "af-stat-card";
       card.style.borderColor = `${accent}44`;
@@ -670,6 +726,7 @@ export class CardDashboard {
         <div class="af-stat-label">${label}</div>
         <div class="af-stat-value" style="color:${accent}">${value}</div>
         <div class="af-stat-detail">${detail}</div>
+        ${extra}
       `;
       container.appendChild(card);
     });
@@ -2600,6 +2657,8 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
     title.textContent = "Settings";
     el.appendChild(title);
 
+    el.appendChild(this._buildCostLimitSection());
+
     el.appendChild(
       this._buildSettingsSection("🏠 Home Assistant", [
         {
@@ -2662,6 +2721,111 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
     );
 
     return el;
+  }
+
+  private _buildCostLimitSection(): HTMLElement {
+    const section = document.createElement("div");
+    section.className = "af-settings-section";
+
+    const h = document.createElement("h3");
+    h.className = "af-settings-section-heading";
+    h.textContent = "🪙 LLM Spend Limit";
+    section.appendChild(h);
+
+    const grid = document.createElement("div");
+    grid.className = "af-settings-grid";
+
+    const lim = this._costLimitInfo;
+    const currentLimit = lim?.limit_usd ?? 0;
+    const currentPeriod = lim?.period ?? "monthly";
+
+    // Limit input
+    const limitLbl = document.createElement("label");
+    limitLbl.className = "af-settings-field";
+    const limitSpan = document.createElement("span");
+    limitSpan.className = "af-settings-label";
+    limitSpan.textContent = "Limit (USD, 0 to disable)";
+    const limitInput = document.createElement("input");
+    limitInput.type = "number";
+    limitInput.min = "0";
+    limitInput.step = "0.01";
+    limitInput.className = "af-cfg-input";
+    limitInput.placeholder = "0.00";
+    limitInput.value = currentLimit ? String(currentLimit) : "";
+    limitLbl.append(limitSpan, limitInput);
+    grid.appendChild(limitLbl);
+
+    // Period select
+    const periodLbl = document.createElement("label");
+    periodLbl.className = "af-settings-field";
+    const periodSpan = document.createElement("span");
+    periodSpan.className = "af-settings-label";
+    periodSpan.textContent = "Period";
+    const periodSelect = document.createElement("select");
+    periodSelect.className = "af-cfg-input";
+    ["daily", "weekly", "monthly"].forEach((p) => {
+      const opt = document.createElement("option");
+      opt.value = p;
+      opt.textContent = p.charAt(0).toUpperCase() + p.slice(1);
+      if (p === currentPeriod) opt.selected = true;
+      periodSelect.appendChild(opt);
+    });
+    periodLbl.append(periodSpan, periodSelect);
+    grid.appendChild(periodLbl);
+
+    section.appendChild(grid);
+
+    // Status line
+    const status = document.createElement("p");
+    status.className = "af-settings-note";
+    const spend = lim?.spend_usd ?? 0;
+    const periodLabel =
+      currentPeriod === "daily"  ? "today"
+    : currentPeriod === "weekly" ? "this week"
+    :                              "this month";
+    status.textContent = currentLimit > 0
+      ? `Current spend: $${spend.toFixed(4)} / $${Number(currentLimit).toFixed(2)} ${periodLabel}`
+      : `Current spend: $${spend.toFixed(4)} ${periodLabel} (no limit set)`;
+    section.appendChild(status);
+
+    // Actions
+    const actions = document.createElement("div");
+    actions.className = "af-settings-actions";
+
+    const saveBtn = document.createElement("button");
+    saveBtn.className = "af-mini-btn";
+    saveBtn.textContent = "Save limit";
+    saveBtn.addEventListener("click", async () => {
+      const v = parseFloat(limitInput.value || "0");
+      if (isNaN(v) || v < 0) return;
+      saveBtn.disabled = true;
+      try {
+        await this._saveCostLimit(v, periodSelect.value);
+        if (this.view === "settings") this._renderView();
+      } finally {
+        saveBtn.disabled = false;
+      }
+    });
+    actions.appendChild(saveBtn);
+
+    const resetBtn = document.createElement("button");
+    resetBtn.className = "af-mini-btn danger";
+    resetBtn.textContent = "Reset spend";
+    resetBtn.title = "Clears the accumulated spend counter for the current period.";
+    resetBtn.addEventListener("click", async () => {
+      if (!window.confirm("Reset accumulated spend for the current period?")) return;
+      resetBtn.disabled = true;
+      try {
+        await this._resetCost();
+        if (this.view === "settings") this._renderView();
+      } finally {
+        resetBtn.disabled = false;
+      }
+    });
+    actions.appendChild(resetBtn);
+
+    section.appendChild(actions);
+    return section;
   }
 
   private _buildSettingsSection(

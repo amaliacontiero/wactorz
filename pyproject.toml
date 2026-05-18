@@ -127,6 +127,10 @@ exclude = [
 [tool.hatch.build.targets.wheel.force-include]
 "static"       = "static"
 
+# ── pytest ─────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 # ── sdist (source distribution for PyPI) ──────────────────────────────────────
 [tool.hatch.build.targets.sdist]
 exclude = [

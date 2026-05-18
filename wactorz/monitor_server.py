@@ -14,9 +14,18 @@ import asyncio
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+    # Force UTF-8 on the real Windows console only. Skip when stdio has been
+    # replaced (pytest capture, test runners, etc.) since re-wrapping a
+    # capture stream breaks the harness on Python 3.13.
+    _need_wrap = (
+        (getattr(sys.stdout, "encoding", "") or "").lower() != "utf-8"
+        and hasattr(sys.stdout, "buffer")
+        and hasattr(sys.stderr, "buffer")
+    )
+    if _need_wrap:
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 import json
 import logging
@@ -1085,6 +1094,37 @@ async def health_handler(request):
     return web.json_response({"status": "ok"})
 
 
+async def cost_handler(request):
+    from aiohttp import web
+    from .agents.llm_agent import get_global_cost_info
+    return web.json_response(get_global_cost_info())
+
+
+async def cost_limit_handler(request):
+    from aiohttp import web
+    from .agents.llm_agent import set_cost_limit
+    try:
+        body = await request.json()
+        limit_usd = float(body.get("limit_usd", 0))
+        period = body.get("period", "monthly")
+        if period not in ("daily", "weekly", "monthly"):
+            return web.json_response({"error": "period must be daily, weekly, or monthly"}, status=400)
+        set_cost_limit(limit_usd, period)
+        return web.json_response({"ok": True, "limit_usd": limit_usd, "period": period})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=400)
+
+
+async def cost_reset_handler(request):
+    from aiohttp import web
+    from .agents.llm_agent import reset_global_cost
+    try:
+        info = reset_global_cost()
+        return web.json_response({"ok": True, **info})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=400)
+
+
 async def send_message_handler(request):
     from aiohttp import web
     actor_id = request.match_info["actor_id"]
@@ -1551,6 +1591,12 @@ async def main(exit_on_failure: bool = False):
     app = web.Application()
     app.router.add_get("/",                      index_handler)
     app.router.add_get("/health",                health_handler)
+    app.router.add_get("/api/cost",              cost_handler)
+    app.router.add_get("/cost",                  cost_handler)
+    app.router.add_post("/api/cost/limit",       cost_limit_handler)
+    app.router.add_post("/cost/limit",           cost_limit_handler)
+    app.router.add_post("/api/cost/reset",       cost_reset_handler)
+    app.router.add_post("/cost/reset",           cost_reset_handler)
     app.router.add_get("/ws",                    ws_handler)
     app.router.add_get("/mqtt",                  mqtt_proxy_handler)
 
