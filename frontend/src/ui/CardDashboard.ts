@@ -1385,7 +1385,7 @@ export class CardDashboard {
     wakeBtn.className = "af-voice-btn";
     wakeBtn.id = "af-wake-btn-cd";
     wakeBtn.title = "Wake word — click to enable";
-    wakeBtn.textContent = "👂";
+    wakeBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 15 15" fill="currentColor" aria-hidden="true"><rect x="1" y="6" width="2" height="3" rx="1"/><rect x="4.5" y="4" width="2" height="7" rx="1"/><rect x="8" y="2" width="2" height="11" rx="1"/><rect x="11.5" y="4" width="2" height="7" rx="1"/></svg>`;
     wakeBtn.addEventListener("click", () =>
       document.dispatchEvent(new CustomEvent("af-wake-toggle")),
     );
@@ -1394,7 +1394,7 @@ export class CardDashboard {
     micBtn.className = "af-voice-btn";
     micBtn.id = "af-mic-btn-cd";
     micBtn.title = "Hold to speak";
-    micBtn.textContent = "🎙";
+    micBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true"><path d="M7.5 1.5a2.5 2.5 0 0 0-2.5 2.5v4a2.5 2.5 0 0 0 5 0V4a2.5 2.5 0 0 0-2.5-2.5Z" fill="currentColor"/><path d="M3 7.5a4.5 4.5 0 0 0 9 0" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/><line x1="7.5" y1="12" x2="7.5" y2="13.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/><line x1="5" y1="13.5" x2="10" y2="13.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg>`;
     micBtn.addEventListener("pointerdown", (e) => {
       e.preventDefault();
       micBtn.setPointerCapture(e.pointerId);

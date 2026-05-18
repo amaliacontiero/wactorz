@@ -493,7 +493,7 @@
         flex-shrink: 0; width: 36px; height: 36px; border-radius: 8px;
         background: rgba(37, 99, 235, 0.12);
         border: 1px solid rgba(37, 99, 235, 0.3);
-        color: #93c5fd; font-size: 16px; cursor: pointer;
+        color: #93c5fd; cursor: pointer;
         display: flex; align-items: center; justify-content: center;
         transition: all 0.2s ease;
       }
@@ -843,7 +843,7 @@
       .af-send-btn:disabled { background: rgba(37,99,235,0.3); cursor: not-allowed; }
       .af-voice-btn {
         width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0;
-        display: flex; align-items: center; justify-content: center; font-size: 15px;
+        display: flex; align-items: center; justify-content: center;
         background: rgba(37,99,235,0.12); border: 1px solid rgba(37,99,235,0.3);
         color: #93c5fd; cursor: pointer; transition: background 0.15s;
       }
@@ -1427,7 +1427,7 @@
           min-height: 58px;
         }
         /* 44px touch targets — minimum recommended by Apple HIG */
-        #wake-btn, #mic-btn, #send-btn { width: 44px; height: 44px; font-size: 16px; }
+        #wake-btn, #mic-btn, #send-btn { width: 44px; height: 44px; }
         #text-input { font-size: 16px; } /* 16px prevents iOS auto-zoom on focus */
       }
 
@@ -1913,7 +1913,7 @@
         .fin-metric-val { font-size: 15px; }
       }
     </style>
-    <script type="module" crossorigin src="./assets/index-Dip3WfTM.js"></script>
+    <script type="module" crossorigin src="./assets/index-BwO3ei2e.js"></script>
     <link rel="modulepreload" crossorigin href="./assets/rolldown-runtime-lhHHWwHU.js">
     <link rel="modulepreload" crossorigin href="./assets/babylon-core-wJ5bR-LE.js">
     <link rel="modulepreload" crossorigin href="./assets/vendor-DuCOOrkg.js">
@@ -1978,8 +1978,22 @@
 
     <!-- IO bar: wake + mic + multiline textarea + send -->
     <div id="io-bar" style="display:none">
-      <button id="wake-btn" title="Wake word — click to enable">👂</button>
-      <button id="mic-btn" title="Hold to speak">🎙</button>
+      <button id="wake-btn" title="Wake word — click to enable">
+        <svg width="15" height="15" viewBox="0 0 15 15" fill="currentColor" aria-hidden="true">
+          <rect x="1" y="6" width="2" height="3" rx="1"/>
+          <rect x="4.5" y="4" width="2" height="7" rx="1"/>
+          <rect x="8" y="2" width="2" height="11" rx="1"/>
+          <rect x="11.5" y="4" width="2" height="7" rx="1"/>
+        </svg>
+      </button>
+      <button id="mic-btn" title="Hold to speak">
+        <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
+          <path d="M7.5 1.5a2.5 2.5 0 0 0-2.5 2.5v4a2.5 2.5 0 0 0 5 0V4a2.5 2.5 0 0 0-2.5-2.5Z" fill="currentColor"/>
+          <path d="M3 7.5a4.5 4.5 0 0 0 9 0" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+          <line x1="7.5" y1="12" x2="7.5" y2="13.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+          <line x1="5" y1="13.5" x2="10" y2="13.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+        </svg>
+      </button>
       <textarea
         id="text-input"
         rows="1"
