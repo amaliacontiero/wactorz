@@ -217,19 +217,6 @@ async def handle_slash(text: str, reply_fn) -> bool:
     parts = text.split()
     cmd   = parts[0].lower()
 
-    if cmd in ("/help", "/h"):
-        await reply_fn(
-            "Commands:\n"
-            "  /agents                        list all active agents\n"
-            "  /nodes                         list remote nodes\n"
-            "  /migrate <agent> <node>        move an agent to a different node\n"
-            "  /deploy <node> [host [user [pw [broker]]]]\n"
-            "                                 deploy a remote Wactorz node\n"
-            "  /clear-plans                   clear the plan cache\n\n"
-            "Everything else goes to the main orchestrator."
-        )
-        return True
-
     if cmd == "/clear-plans":
         main = _find_main()
         if main and hasattr(main, "persist"):
@@ -303,34 +290,41 @@ async def _route_chat(content: str, reply_fn, stream_fn=None, stream_end_fn=None
     stream_fn(chunk)      — send one streaming chunk (optional; falls back to reply_fn)
     stream_end_fn()       — signal that streaming is done (optional)
     """
-    logger.warning(f"[io-gateway DEBUG] _route_chat called: content={content!r}")
-
     _chunk_fn = stream_fn or reply_fn
     _end_fn   = stream_end_fn or (lambda: None)
 
     if content.startswith("/"):
         handled = await handle_slash(content, reply_fn)
         if not handled:
-            await reply_fn("Unknown command. Type /help for available commands.")
+            # Forward unrecognized slash commands to main actor.
+            # main_actor.process_user_input handles the full command set
+            # (/help, /plans, /delete, /stop, /memory, /rules, /topics, etc.)
+            main = _find_main()
+            if main and hasattr(main, "process_user_input_stream"):
+                _chunk_fn = stream_fn or reply_fn
+                async for chunk in main.process_user_input_stream(content):
+                    if isinstance(chunk, dict):
+                        continue
+                    await _chunk_fn(str(chunk))
+                if stream_end_fn:
+                    await stream_end_fn()
+            elif main and hasattr(main, "process_user_input"):
+                result = await main.process_user_input(content)
+                await reply_fn(str(result))
+                if stream_end_fn:
+                    await stream_end_fn()
+            else:
+                await reply_fn("Unknown command. Type /help for available commands.")
         return
 
     target_name, text = _parse_mention(content)
-    logger.warning(f"[io-gateway DEBUG] parsed: target_name={target_name!r} text={text[:60]!r} registry_set={registry is not None}")
 
     target = registry.find_by_name(target_name) if registry else None
-    logger.warning(f"[io-gateway DEBUG] find_by_name({target_name!r}) -> {target!r}")
 
     if target is None:
         await reply_fn(f"Agent @{target_name} not found.")
         return
 
-    logger.warning(
-        f"[io-gateway DEBUG] target={target.name!r} "
-        f"has_process_stream={hasattr(target, 'process_user_input_stream')} "
-        f"has_chat_stream={hasattr(target, 'chat_stream')} "
-        f"has_process_user_input={hasattr(target, 'process_user_input')} "
-        f"has_chat={hasattr(target, 'chat')}"
-    )
     logger.info(f"[io-gateway] → {target.name}: {text[:60]!r}")
 
     gen_fn = (
@@ -539,7 +533,6 @@ async def ws_handler(request):
 
                     elif msg_type == "chat":
                         content = (data.get("content") or "").strip()
-                        logger.warning(f"[io-gateway DEBUG] ws chat msg received: content={content!r} registry_set={registry is not None}")
                         if content and registry is not None:
                             # Persist the user's turn first so chat_log has the
                             # request even if the assistant reply errors out.
