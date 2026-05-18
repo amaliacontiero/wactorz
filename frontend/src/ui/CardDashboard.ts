@@ -110,6 +110,7 @@ export class CardDashboard {
 
   private haClient: HAClient | null = null;
   private _haEntities: import("../io/HAClient").HAEntity[] = [];
+  private _haRegistries: import("../io/HAClient").HARegistries | null = null;
 
   private _remoteNodes = new Map<string, { agents: string[]; lastSeen: number }>();
   private _removingIds = new Set<string>();
@@ -169,8 +170,15 @@ export class CardDashboard {
     const token = this.haToken;
     if (url && token) {
       this.haClient = new HAClient(url, token);
+      this.haClient.onRegistriesUpdate = (r) => {
+        this._haRegistries = r;
+        if (this.view === "ha" && this._haEntities.length) {
+          this._renderHADevices(this._haEntities);
+        }
+      };
     } else {
       this.haClient = null;
+      this._haRegistries = null;
     }
   }
 
@@ -1396,7 +1404,7 @@ export class CardDashboard {
             <button id="ha-reconfigure-btn" class="af-mini-btn" style="font-size:10px;">⚙ Configure</button>
           </div>
         </div>
-        <div id="ha-devices-container" style="flex:1;overflow-y:auto;overflow-x:hidden;margin-top:12px;display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;">
+        <div id="ha-devices-container" style="flex:1;overflow-y:auto;overflow-x:hidden;">
           <div style="color:rgba(255,255,255,0.4);text-align:center;grid-column:1/-1;margin-top:40px;">
             Connecting to Home Assistant...
           </div>
@@ -1494,148 +1502,231 @@ export class CardDashboard {
   }
 
   private _renderHADevices(entities: HAEntity[]): void {
-    const container = this.root.querySelector<HTMLElement>(
-      "#ha-devices-container",
-    );
+    const container = this.root.querySelector<HTMLElement>("#ha-devices-container");
     if (!container) return;
-
     container.innerHTML = "";
+    container.style.display = "flex";
+    container.style.flexDirection = "column";
+    container.style.gap = "0";
 
-    // Sort by domain then friendly name
-    const sorted = [...entities].sort((a, b) => {
-      const domA = a.entity_id.split(".")[0] || "";
-      const domB = b.entity_id.split(".")[0] || "";
-      if (domA !== domB) return domA.localeCompare(domB);
-      return (a.attributes.friendly_name || a.entity_id).localeCompare(
-        b.attributes.friendly_name || b.entity_id,
-      );
-    });
+    // ── Domain classification ────────────────────────────────────────────────
+    const DEVICE_DOMAINS = new Set([
+      "light", "switch", "fan", "climate", "cover", "lock",
+      "media_player", "vacuum", "camera", "alarm_control_panel",
+      "remote", "humidifier", "siren", "water_heater", "valve",
+      "lawn_mower", "button", "number", "select",
+    ]);
+    const CAP_DOMAINS = new Set(["sensor", "binary_sensor"]);
+    const domainOf = (e: HAEntity) => e.entity_id.split(".")[0] || "";
 
-    if (sorted.length === 0) {
-      container.innerHTML = `<div style="color: rgba(255,255,255,0.4); text-align: center; grid-column: 1/-1; margin-top: 40px;">No entities found.</div>`;
+    // ── Build registry maps ──────────────────────────────────────────────────
+    const reg = this._haRegistries;
+    const areaById = new Map<string, import("../io/HAClient").HAArea>();
+    const entityDeviceId = new Map<string, string>();  // entity_id → device_id
+    const entityAreaId   = new Map<string, string>();  // entity_id → area_id (direct)
+    const deviceAreaId   = new Map<string, string>();  // device_id → area_id
+
+    if (reg) {
+      reg.areas.forEach((a) => areaById.set(a.area_id, a));
+      reg.deviceEntries.forEach((d) => { if (d.area_id) deviceAreaId.set(d.id, d.area_id); });
+      reg.entityEntries.forEach((entry) => {
+        if (entry.device_id) entityDeviceId.set(entry.entity_id, entry.device_id);
+        if (entry.area_id)   entityAreaId.set(entry.entity_id, entry.area_id);
+      });
+    }
+
+    const getAreaId = (entityId: string): string => {
+      if (entityAreaId.has(entityId)) return entityAreaId.get(entityId)!;
+      const devId = entityDeviceId.get(entityId);
+      if (devId && deviceAreaId.has(devId)) return deviceAreaId.get(devId)!;
+      return "";
+    };
+
+    // ── Group capability entities by device_id ───────────────────────────────
+    const capsByDevice = new Map<string, HAEntity[]>();
+    entities
+      .filter((e) => CAP_DOMAINS.has(domainOf(e)))
+      .forEach((e) => {
+        const devId = entityDeviceId.get(e.entity_id);
+        if (!devId) return;
+        if (!capsByDevice.has(devId)) capsByDevice.set(devId, []);
+        capsByDevice.get(devId)!.push(e);
+      });
+
+    // ── Filter to device-domain entities and group by area ──────────────────
+    const deviceEntities = entities.filter((e) => DEVICE_DOMAINS.has(domainOf(e)));
+
+    if (deviceEntities.length === 0) {
+      container.innerHTML = `<div style="color:rgba(255,255,255,0.4);text-align:center;padding:40px;">No devices found.</div>`;
       return;
     }
 
-    sorted.forEach((e) => {
-      const domain = e.entity_id.split(".")[0] || "";
-      const card = document.createElement("div");
-      card.className = "af-card";
-      card.style.cursor = "default";
-      card.style.minHeight = "130px";
-      card.style.display = "flex";
-      card.style.flexDirection = "column";
-
-      // ── Header: Avatar + Name + ID ──
-      const headerRow = document.createElement("div");
-      headerRow.style.display = "flex";
-      headerRow.style.alignItems = "center";
-      headerRow.style.gap = "8px";
-      headerRow.style.marginBottom = "8px";
-
-      if (e.attributes.entity_picture) {
-        const img = document.createElement("img");
-        img.src = (this.haUrl ?? "") + e.attributes.entity_picture;
-        img.style.width = "28px";
-        img.style.height = "28px";
-        img.style.borderRadius = "4px";
-        img.style.objectFit = "cover";
-        headerRow.appendChild(img);
-      } else {
-        const iconPlaceholder = document.createElement("div");
-        iconPlaceholder.style.width = "28px";
-        iconPlaceholder.style.height = "28px";
-        iconPlaceholder.style.borderRadius = "4px";
-        iconPlaceholder.style.background = "rgba(255,255,255,0.05)";
-        iconPlaceholder.style.display = "flex";
-        iconPlaceholder.style.alignItems = "center";
-        iconPlaceholder.style.justifyContent = "center";
-        iconPlaceholder.style.fontSize = "14px";
-        iconPlaceholder.textContent = this._getDomainIcon(domain);
-        headerRow.appendChild(iconPlaceholder);
-      }
-
-      const nameCol = document.createElement("div");
-      nameCol.style.flex = "1";
-      nameCol.style.minWidth = "0";
-
-      const name = document.createElement("div");
-      name.className = "af-card-name";
-      name.textContent = e.attributes.friendly_name || e.entity_id;
-      name.style.fontSize = "12px";
-
-      const idMeta = document.createElement("div");
-      idMeta.className = "af-card-meta";
-      idMeta.style.fontSize = "9px";
-      idMeta.style.opacity = "0.6";
-      idMeta.textContent = e.entity_id;
-
-      nameCol.append(name, idMeta);
-      headerRow.appendChild(nameCol);
-      card.appendChild(headerRow);
-
-      // ── State Display ──
-      const stateRow = document.createElement("div");
-      stateRow.style.display = "flex";
-      stateRow.style.alignItems = "baseline";
-      stateRow.style.gap = "4px";
-      stateRow.style.marginBottom = "10px";
-
-      const stateVal = document.createElement("div");
-      stateVal.className = "af-card-state-label";
-      stateVal.textContent = e.state;
-      stateVal.style.fontSize = "16px";
-      stateVal.style.fontWeight = "700";
-
-      const isActive = [
-        "on",
-        "playing",
-        "cool",
-        "heat",
-        "open",
-        "active",
-        "detected",
-        "home",
-      ].includes(e.state);
-      const isAlert = [
-        "problem",
-        "error",
-        "critical",
-        "warning",
-        "emergency",
-      ].includes(e.state);
-      stateVal.style.color = isAlert
-        ? "#f87171"
-        : isActive
-          ? "#34d399"
-          : "rgba(255,255,255,0.4)";
-
-      stateRow.appendChild(stateVal);
-
-      if (e.attributes.unit_of_measurement) {
-        const unit = document.createElement("span");
-        unit.style.fontSize = "11px";
-        unit.style.color = "rgba(255,255,255,0.3)";
-        unit.textContent = e.attributes.unit_of_measurement;
-        stateRow.appendChild(unit);
-      }
-      card.appendChild(stateRow);
-
-      // ── Controls Section ──
-      const controls = document.createElement("div");
-      controls.className = "af-card-controls";
-      controls.style.marginTop = "auto";
-      controls.style.display = "flex";
-      controls.style.flexDirection = "column";
-      controls.style.gap = "8px";
-
-      this._appendEntityControls(controls, e, isActive);
-
-      if (controls.children.length > 0) {
-        card.appendChild(controls);
-      }
-
-      container.appendChild(card);
+    const byArea = new Map<string, HAEntity[]>();
+    deviceEntities.forEach((e) => {
+      const aId = getAreaId(e.entity_id);
+      if (!byArea.has(aId)) byArea.set(aId, []);
+      byArea.get(aId)!.push(e);
     });
+
+    // Named areas first (sorted by name), no-room section last
+    const sortedAreaIds = [...byArea.keys()].sort((a, b) => {
+      if (!a && !b) return 0;
+      if (!a) return 1;
+      if (!b) return -1;
+      return (areaById.get(a)?.name ?? a).localeCompare(areaById.get(b)?.name ?? b);
+    });
+
+    // ── Render sections ──────────────────────────────────────────────────────
+    sortedAreaIds.forEach((areaId) => {
+      const area = areaById.get(areaId);
+      const sectionEntities = (byArea.get(areaId) ?? []).sort((a, b) =>
+        (a.attributes.friendly_name ?? a.entity_id).localeCompare(
+          b.attributes.friendly_name ?? b.entity_id,
+        ),
+      );
+
+      const section = document.createElement("div");
+      section.style.marginBottom = "4px";
+
+      // Room header
+      const header = document.createElement("div");
+      header.style.cssText =
+        "padding:8px 16px 6px;font-size:10px;font-weight:700;letter-spacing:0.08em;" +
+        "color:rgba(255,255,255,0.35);text-transform:uppercase;display:flex;align-items:center;gap:6px;" +
+        "border-bottom:1px solid rgba(255,255,255,0.06);";
+      const roomIcon = area?.icon ? String.fromCodePoint(parseInt(area.icon.replace(/^mdi:/, ""), 16)) : "🏠";
+      header.innerHTML = `<span>${area ? roomIcon : "📦"}</span><span>${area?.name ?? "Other"}</span>` +
+        `<span style="opacity:0.4;font-weight:400">${sectionEntities.length}</span>`;
+      section.appendChild(header);
+
+      // Device rows
+      sectionEntities.forEach((e) => {
+        const devId = entityDeviceId.get(e.entity_id);
+        const caps = devId ? (capsByDevice.get(devId) ?? []) : [];
+        section.appendChild(this._buildHADeviceRow(e, caps));
+      });
+
+      container.appendChild(section);
+    });
+  }
+
+  private _buildHADeviceRow(e: HAEntity, capabilities: HAEntity[]): HTMLElement {
+    const domain = e.entity_id.split(".")[0] || "";
+    const isActive = ["on","playing","cool","heat","open","active","detected","home","locked"].includes(e.state);
+    const isAlert  = ["problem","error","critical","warning","emergency"].includes(e.state);
+    const stateColor = isAlert ? "#f87171" : isActive ? "#34d399" : "rgba(255,255,255,0.35)";
+
+    const wrapper = document.createElement("div");
+
+    // ── Row ──────────────────────────────────────────────────────────────────
+    const row = document.createElement("div");
+    row.style.cssText =
+      "display:flex;align-items:center;gap:10px;padding:9px 16px;" +
+      "border-bottom:1px solid rgba(255,255,255,0.04);transition:background 0.12s;";
+    row.addEventListener("mouseenter", () => { row.style.background = "rgba(255,255,255,0.04)"; });
+    row.addEventListener("mouseleave", () => { row.style.background = ""; });
+
+    // Icon
+    const iconEl = document.createElement("span");
+    iconEl.textContent = this._getDomainIcon(domain);
+    iconEl.style.cssText = "font-size:16px;width:22px;text-align:center;flex-shrink:0;";
+
+    // Name
+    const nameEl = document.createElement("div");
+    nameEl.style.cssText = "flex:1;min-width:0;font-size:13px;font-weight:500;" +
+      "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+    nameEl.textContent = e.attributes.friendly_name || e.entity_id;
+
+    // State
+    const stateEl = document.createElement("span");
+    stateEl.style.cssText = `font-size:11px;font-weight:600;white-space:nowrap;color:${stateColor};flex-shrink:0;`;
+    stateEl.textContent = e.state + (e.attributes.unit_of_measurement ? " " + e.attributes.unit_of_measurement : "");
+
+    row.append(iconEl, nameEl, stateEl);
+
+    // Quick toggle (for toggleable domains)
+    const TOGGLEABLE = new Set(["light","switch","fan","humidifier","vacuum","input_boolean"]);
+    if (TOGGLEABLE.has(domain)) {
+      const toggle = document.createElement("button");
+      toggle.title = isActive ? "Turn off" : "Turn on";
+      toggle.style.cssText =
+        `width:28px;height:16px;border-radius:8px;border:none;cursor:pointer;flex-shrink:0;position:relative;` +
+        `background:${isActive ? "#34d399" : "rgba(255,255,255,0.15)"};transition:background 0.2s;`;
+      const thumb = document.createElement("div");
+      thumb.style.cssText =
+        `position:absolute;top:2px;width:12px;height:12px;border-radius:50%;background:#fff;transition:left 0.2s;` +
+        `left:${isActive ? "14px" : "2px"};`;
+      toggle.appendChild(thumb);
+      toggle.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        this.haClient?.toggleEntity(e.entity_id);
+      });
+      row.appendChild(toggle);
+    }
+
+    // Expand chevron (shown when there's a detail panel)
+    const hasControls = this._entityHasControls(e, domain);
+    const hasDetail = hasControls || capabilities.length > 0;
+
+    if (hasDetail) {
+      const chevron = document.createElement("span");
+      chevron.textContent = "›";
+      chevron.style.cssText = "color:rgba(255,255,255,0.25);font-size:18px;flex-shrink:0;transition:transform 0.18s;line-height:1;";
+      row.appendChild(chevron);
+      row.style.cursor = "pointer";
+
+      // ── Detail panel (lazy-rendered on first expand) ─────────────────────
+      const detail = document.createElement("div");
+      detail.style.cssText =
+        "display:none;padding:10px 16px 14px 48px;" +
+        "background:rgba(255,255,255,0.02);border-bottom:1px solid rgba(255,255,255,0.05);";
+      let detailRendered = false;
+
+      row.addEventListener("click", () => {
+        const open = detail.style.display !== "none";
+        detail.style.display = open ? "none" : "block";
+        chevron.style.transform = open ? "rotate(0deg)" : "rotate(90deg)";
+
+        if (!open && !detailRendered) {
+          detailRendered = true;
+
+          // Controls
+          if (hasControls) {
+            const ctrlDiv = document.createElement("div");
+            ctrlDiv.style.cssText = "display:flex;flex-direction:column;gap:8px;margin-bottom:capabilities.length > 0 ? '10px' : '0';";
+            this._appendEntityControls(ctrlDiv, e, isActive);
+            if (ctrlDiv.children.length > 0) detail.appendChild(ctrlDiv);
+          }
+
+          // Capability badges
+          if (capabilities.length > 0) {
+            const capWrap = document.createElement("div");
+            capWrap.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;";
+            capabilities.forEach((cap) => {
+              const badge = document.createElement("span");
+              const capName = cap.attributes.friendly_name || cap.entity_id.split(".").pop() || cap.entity_id;
+              const capState = cap.state + (cap.attributes.unit_of_measurement ? " " + cap.attributes.unit_of_measurement : "");
+              badge.style.cssText =
+                "font-size:10px;padding:2px 8px;border-radius:4px;" +
+                "background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.45);white-space:nowrap;";
+              badge.textContent = `${capName}: ${capState}`;
+              capWrap.appendChild(badge);
+            });
+            detail.appendChild(capWrap);
+          }
+        }
+      });
+
+      wrapper.appendChild(detail);
+    }
+
+    wrapper.insertBefore(row, wrapper.firstChild);
+    return wrapper;
+  }
+
+  private _entityHasControls(e: HAEntity, domain: string): boolean {
+    if (["light","switch","fan","humidifier","vacuum","input_boolean","climate","cover","media_player"].includes(domain)) return true;
+    return false;
   }
 
   private _getDomainIcon(domain: string): string {
