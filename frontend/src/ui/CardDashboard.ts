@@ -273,7 +273,7 @@ export class CardDashboard {
     if (this.view === "overview") this._renderNodes();
   }
 
-  onHeartbeat(agentId: string, timestampMs: number): void {
+  onHeartbeat(agentId: string, timestampMs: number, cpu?: number, mem?: number): void {
     this.lastHb.set(agentId, timestampMs);
     if (!this.root.classList.contains("cd-visible")) return;
     if (this._removingIds.has(agentId)) return;
@@ -288,6 +288,14 @@ export class CardDashboard {
       dot.classList.remove("af-card-pulse");
       void dot.offsetWidth;
       dot.classList.add("af-card-pulse");
+    }
+    if (cpu !== undefined) {
+      const cpuEl = card.querySelector<HTMLElement>(".af-card-cpu");
+      if (cpuEl) { cpuEl.textContent = `CPU ${cpu.toFixed(1)}%`; cpuEl.style.display = ""; }
+    }
+    if (mem !== undefined) {
+      const memEl = card.querySelector<HTMLElement>(".af-card-mem");
+      if (memEl) { memEl.textContent = `${mem.toFixed(0)} MB`; memEl.style.display = ""; }
     }
   }
 
@@ -739,6 +747,8 @@ export class CardDashboard {
       <span>♥ <span class="af-card-hb-time">${hbMs ? relTime(hbMs) : "—"}</span></span>
       <span>${msgs} msgs</span>
       ${agent.costUsd != null ? `<span>$${agent.costUsd.toFixed(4)}</span>` : ""}
+      ${agent.cpu != null ? `<span class="af-card-cpu" title="CPU usage">${agent.cpu.toFixed(1)}%</span>` : `<span class="af-card-cpu" style="display:none"></span>`}
+      ${agent.mem != null ? `<span class="af-card-mem" title="Memory">${agent.mem.toFixed(0)} MB</span>` : `<span class="af-card-mem" style="display:none"></span>`}
     `;
 
     card.appendChild(dot);

@@ -238,7 +238,7 @@ export class SceneManager {
       if (payload.memory_mb !== undefined) agent.mem = payload.memory_mb;
       if (payload.task !== undefined) agent.task = payload.task;
       if (this.cardDashboard)
-        this.cardDashboard.onHeartbeat(payload.agentId, payload.timestampMs);
+        this.cardDashboard.onHeartbeat(payload.agentId, payload.timestampMs, payload.cpu, payload.memory_mb);
       else if (this.socialDashboard)
         this.socialDashboard.onHeartbeat(payload.agentId, payload.timestampMs);
       else this.activeTheme.onHeartbeat(payload.agentId);
