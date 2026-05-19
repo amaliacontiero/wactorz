@@ -1360,8 +1360,10 @@ export class CardDashboard {
     input.rows = 1;
     input.placeholder = `Message @${this.chatTarget}…`;
     const autoGrow = () => {
-      input.style.height = "auto";
-      input.style.height = Math.min(input.scrollHeight, 140) + "px";
+      input.style.height = "1px";
+      const h = Math.min(input.scrollHeight, 140);
+      input.style.height = h + "px";
+      input.style.overflowY = h >= 140 ? "auto" : "hidden";
     };
     input.addEventListener("input", autoGrow);
     input.addEventListener("keydown", (e) => {

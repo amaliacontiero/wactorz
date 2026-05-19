@@ -217,8 +217,10 @@ export class IOBar {
 
   private autoGrow(): void {
     const el = this.textInput;
-    el.style.height = "auto";
-    el.style.height = Math.min(el.scrollHeight, 120) + "px";
+    el.style.height = "1px";
+    const h = Math.min(el.scrollHeight, 120);
+    el.style.height = h + "px";
+    el.style.overflowY = h >= 120 ? "auto" : "hidden";
   }
 
   private historyUp(): void {
