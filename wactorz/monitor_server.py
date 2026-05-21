@@ -69,8 +69,64 @@ state = {
 
 ws_clients: set = set()
 mqtt_client_ref = None
-# IDs that have been explicitly deleted — block re-admission from stale heartbeats
-_deleted_agent_ids: set = set()
+# IDs that have been explicitly deleted — block re-admission from stale heartbeats.
+# Bounded so a long-running monitor doesn't leak memory across many deletions.
+# Stored as a list of (agent_id, deleted_at_ts) tuples so we can re-admit on
+# a NEWER status event (which is what a deliberate respawn produces) while
+# still ignoring stale retained messages from the deleted instance.
+_deleted_agent_ids: list = []
+_DELETED_IDS_MAX   = 1024
+
+
+def _mark_deleted(agent_id: str) -> None:
+    """Add an agent_id to the deleted list with FIFO eviction. If already
+    present, refresh its deleted-at timestamp so any in-flight retained
+    messages from the previous incarnation stay blocked."""
+    _undelete(agent_id)   # remove any prior entry so the new timestamp wins
+    _deleted_agent_ids.append((agent_id, time.time()))
+    if len(_deleted_agent_ids) > _DELETED_IDS_MAX:
+        del _deleted_agent_ids[0:len(_deleted_agent_ids) - _DELETED_IDS_MAX]
+
+
+def _is_deleted(agent_id: str, newer_than: float = 0.0) -> bool:
+    """Was this agent_id deleted? When newer_than is given, return False if
+    the caller has evidence (a message timestamp) that's strictly later than
+    the deletion — that means the agent was respawned and we should re-admit
+    it on the next update_agent() call. The actual un-delete happens there;
+    this function stays a pure query."""
+    for aid, ts in _deleted_agent_ids:
+        if aid == agent_id:
+            if newer_than > ts:
+                return False
+            return True
+    return False
+
+
+def _undelete(agent_id: str) -> bool:
+    """Remove agent_id from the deleted list. Returns True if it was there."""
+    global _deleted_agent_ids
+    before = len(_deleted_agent_ids)
+    _deleted_agent_ids = [(a, t) for (a, t) in _deleted_agent_ids if a != agent_id]
+    return len(_deleted_agent_ids) < before
+
+
+async def _purge_agent_retained(agent_id: str) -> None:
+    """Clear retained MQTT messages for a deleted agent so the broker stops
+    re-delivering them after a monitor reconnect or a fresh subscribe.
+
+    Without this, every reconnect re-fires the agent's retained status /
+    heartbeat / metrics, each of which would otherwise crash parse_topic
+    with KeyError on an entry that update_agent now refuses to recreate.
+    """
+    if not mqtt_client_ref:
+        return
+    for metric in ("status", "heartbeat", "metrics", "logs", "spawned",
+                   "manifest", "errors", "detections", "results", "completed"):
+        topic = f"agents/{agent_id}/{metric}"
+        try:
+            await mqtt_client_ref.publish(topic, b"", retain=True)
+        except Exception as e:
+            logger.debug(f"[purge] Failed to clear retained {topic}: {e}")
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -91,7 +147,7 @@ def _parse_mention(content: str) -> tuple[str, str]:
 
 
 def update_agent(agent_id: str, key: str, data):
-    if agent_id in _deleted_agent_ids:
+    if _is_deleted(agent_id):
         return
     if agent_id not in state["agents"]:
         state["agents"][agent_id] = {
@@ -666,13 +722,16 @@ async def handle_command(cmd: dict):
             )
             await broadcast({"type": "patch", "state": _snapshot()})
         elif command == "delete":
-            _deleted_agent_ids.add(agent_id)
+            _mark_deleted(agent_id)
             state["agents"].pop(agent_id, None)
             # Stop and unregister via registry immediately so heartbeats cease
             if registry is not None:
                 actor = registry.get(agent_id)
                 if actor and not getattr(actor, "protected", False):
                     asyncio.create_task(actor.stop())
+            # Clear retained MQTT messages so the broker stops re-delivering
+            # them on reconnect (which would otherwise crash parse_topic).
+            asyncio.create_task(_purge_agent_retained(agent_id))
             await broadcast({"type": "delete_agent", "agent_id": agent_id, "state": _snapshot()})
     except Exception as e:
         logger.error(f"[cmd] Publish failed: {e}")
@@ -699,9 +758,39 @@ def parse_topic(topic: str, payload_str: str):
         agent_id = parts[1]
         metric   = parts[2]
 
+        # Re-admit a deleted agent on a FRESH status event. Every actor
+        # publishes its first status from on_start(), with uptime ≈ 0; that's
+        # the unambiguous "I just started" signal. A stale retained status
+        # from the previous (deleted) incarnation would carry the uptime it
+        # had at the moment of deletion (typically large), so we don't
+        # confuse it with a respawn.
+        #
+        # Without this, deleting an agent and respawning it under the same
+        # name produces the same deterministic actor_id (uuid5 of the name),
+        # the deleted guard fires, and the new instance is invisible in the
+        # dashboard even though it's actually running.
+        if metric == "status" and isinstance(data, dict) and _is_deleted(agent_id):
+            uptime = data.get("uptime", 0)
+            try:
+                uptime = float(uptime)
+            except (TypeError, ValueError):
+                uptime = 0.0
+            if uptime < 10.0:
+                _undelete(agent_id)
+                logger.info(
+                    f"[MQTT] Re-admitting respawned agent {agent_id[:8]} "
+                    f"(uptime={uptime:.1f}s, previously deleted)"
+                )
+
+        # If the agent was just deleted, update_agent() refuses to recreate
+        # the entry — so any direct state["agents"][agent_id] access below
+        # would KeyError. Skip the whole branch; the agent is gone.
+        if _is_deleted(agent_id):
+            return {"type": "agent", "subtype": metric, "agent_id": agent_id, "data": data}
+
         if metric == "status":
             update_agent(agent_id, "status", data)
-            if isinstance(data, dict):
+            if isinstance(data, dict) and agent_id in state["agents"]:
                 if "name"      in data: state["agents"][agent_id]["name"]      = data["name"]
                 if "state"     in data: state["agents"][agent_id]["state"]     = data["state"]
                 if "protected" in data: state["agents"][agent_id]["protected"] = data["protected"]
@@ -709,18 +798,19 @@ def parse_topic(topic: str, payload_str: str):
 
         elif metric == "heartbeat":
             update_agent(agent_id, "heartbeat", data)
-            if isinstance(data, dict):
+            if isinstance(data, dict) and agent_id in state["agents"]:
                 ag = state["agents"][agent_id]
                 ag["name"]  = data.get("name",      agent_id[:8])
                 ag["cpu"]   = data.get("cpu",        0)
                 ag["mem"]   = data.get("memory_mb",  0)
                 ag["task"]  = data.get("task",       "idle")
                 ag["state"] = data.get("state",      "unknown")
-            logger.info(f"[MQTT] Heartbeat: {state['agents'][agent_id].get('name', agent_id[:8])}")
+            if agent_id in state["agents"]:
+                logger.info(f"[MQTT] Heartbeat: {state['agents'][agent_id].get('name', agent_id[:8])}")
 
         elif metric == "metrics":
             update_agent(agent_id, "metrics", data)
-            if isinstance(data, dict):
+            if isinstance(data, dict) and agent_id in state["agents"]:
                 state["agents"][agent_id]["messages_processed"] = data.get("messages_processed", 0)
                 if "cost_usd" in data:
                     state["agents"][agent_id]["cost_usd"]      = data.get("cost_usd", 0.0)
@@ -1226,9 +1316,10 @@ async def delete_actor_handler(request):
         return web.json_response({"error": "actor not found"}, status=404)
     if getattr(actor, "protected", False):
         return web.json_response({"error": "actor is protected"}, status=403)
-    _deleted_agent_ids.add(actor.actor_id)
+    _mark_deleted(actor.actor_id)
     state["agents"].pop(actor.actor_id, None)
     asyncio.create_task(actor.stop())
+    asyncio.create_task(_purge_agent_retained(actor.actor_id))
     await broadcast({"type": "delete_agent", "agent_id": actor.actor_id, "state": _snapshot()})
     return web.Response(status=200, text="stopping")
 
