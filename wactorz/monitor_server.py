@@ -335,6 +335,68 @@ async def _route_chat(content: str, reply_fn, stream_fn=None, stream_end_fn=None
     target = registry.find_by_name(target_name) if registry else None
 
     if target is None:
+        # ── Remote agent fallback ─────────────────────────────────────────────
+        # Agent not in local registry — check if it's running on a remote node.
+        # If so, route the message via MQTT and stream the reply back.
+        main = registry.find_by_name("main") if registry else None
+        if main and hasattr(main, "_known_nodes"):
+            import time as _rt
+            remote_node = None
+            for node_name, nd in main._known_nodes.items():
+                if _rt.time() - nd.get("last_seen", 0) < 30:
+                    if target_name in nd.get("agents", []):
+                        remote_node = node_name
+                        break
+
+            if remote_node:
+                import uuid as _uuid, json as _json
+                import aiomqtt
+                reply_topic = f"main/reply/io-gateway/{_uuid.uuid4().hex[:8]}"
+                payload = {
+                    "text":          text,
+                    "payload":       text,
+                    "_reply_topic":  reply_topic,
+                    "_remote_task":  True,
+                }
+                try:
+                    async with aiomqtt.Client(
+                        getattr(main, "_mqtt_broker", "localhost"),
+                        getattr(main, "_mqtt_port",   1883),
+                    ) as client:
+                        # Subscribe first, then publish — avoids race condition
+                        await client.subscribe(reply_topic)
+                        await main._mqtt_publish(
+                            f"agents/by-name/{target_name}/task",
+                            payload,
+                        )
+                        logger.info(f"[io-gateway] Routed @{target_name} → {remote_node} via MQTT")
+                        try:
+                            async def _get_reply():
+                                async for msg in client.messages:
+                                    try:
+                                        data = _json.loads(msg.payload.decode())
+                                        text_out = (
+                                            data.get("result") or data.get("reply")
+                                            or data.get("text") or data.get("message")
+                                            or data.get("content") or str(data)
+                                        )
+                                    except Exception:
+                                        text_out = msg.payload.decode()
+                                    return str(text_out)
+                            text_out = await asyncio.wait_for(_get_reply(), timeout=150.0)
+                            await reply_fn(text_out)
+                            await _end_fn()
+                            return
+                        except asyncio.TimeoutError:
+                            await reply_fn(f"[error] @{target_name} on {remote_node} did not reply within 150s.")
+                            await _end_fn()
+                            return
+                except Exception as exc:
+                    logger.error(f"[io-gateway] Remote @{target_name} routing failed: {exc}", exc_info=True)
+                    await reply_fn(f"[error] Could not reach @{target_name} on {remote_node}: {exc}")
+                    await _end_fn()
+                    return
+
         await reply_fn(f"Agent @{target_name} not found.")
         return
 
