@@ -340,7 +340,7 @@ export class CardDashboard {
     if (hbEl) hbEl.textContent = relTime(timestampMs);
     const dot = card.querySelector<HTMLElement>(".af-card-state-dot");
     if (dot) {
-      dot.classList.remove("af-card-pulse");
+      dot.classList.remove("af-card-pulse", "af-card-stale");
       void dot.offsetWidth;
       dot.classList.add("af-card-pulse");
     }
@@ -797,7 +797,10 @@ export class CardDashboard {
     card.dataset.id = agent.id;
 
     const dot = document.createElement("div");
-    dot.className = "af-card-state-dot";
+    // Pre-apply af-card-pulse when we already know this agent's heartbeat —
+    // prevents the infinite blink that would otherwise last until the next
+    // MQTT heartbeat (~10s) on view-switch rebuilds.
+    dot.className = hbMs > 0 ? "af-card-state-dot af-card-pulse" : "af-card-state-dot";
     dot.style.background = color;
     dot.style.boxShadow = `0 0 8px ${color}`;
 
@@ -2074,11 +2077,15 @@ export class CardDashboard {
   // ── Private: timestamp refresh ────────────────────────────────────────────
 
   private _refreshTimestamps(): void {
+    const now = Date.now();
+    const STALE_MS = 90_000; // matches nodes panel threshold
     this.lastHb.forEach((ms, id) => {
-      const el = this.root.querySelector<HTMLElement>(
-        `[data-id="${CSS.escape(id)}"] .af-card-hb-time`,
-      );
+      const card = this.root.querySelector<HTMLElement>(`[data-id="${CSS.escape(id)}"]`);
+      if (!card) return;
+      const el = card.querySelector<HTMLElement>(".af-card-hb-time");
       if (el) el.textContent = relTime(ms);
+      const dot = card.querySelector<HTMLElement>(".af-card-state-dot");
+      if (dot) dot.classList.toggle("af-card-stale", now - ms > STALE_MS);
     });
   }
 
