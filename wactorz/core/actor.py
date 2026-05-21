@@ -158,6 +158,15 @@ class Actor(ABC):
         # Background tasks
         self._tasks: list[asyncio.Task] = []
 
+        # Cached process handle for heartbeat metrics — one per actor so each
+        # has an independent cpu_percent baseline (interval=None, non-blocking).
+        self._proc: Optional[Any] = None
+        try:
+            self._proc = psutil.Process()
+            self._proc.cpu_percent(interval=None)  # prime the baseline
+        except Exception:
+            pass
+
         logger.info(f"[{self.name}] Actor created with id={self.actor_id}")
 
     # ─── Lifecycle ────────────────────────────────────────────────────────────
@@ -335,14 +344,20 @@ class Actor(ABC):
                 logger.warning(f"[{self.name}] Heartbeat error: {e}")
 
     def _build_heartbeat(self) -> dict:
-        proc = psutil.Process()
+        cpu = mem = 0.0
+        try:
+            if self._proc is not None:
+                cpu = self._proc.cpu_percent(interval=None)
+                mem = self._proc.memory_info().rss / 1024 / 1024
+        except Exception:
+            pass
         return {
             "actor_id":  self.actor_id,
             "name":      self.name,
             "timestamp": time.time(),
             "state":     self.state.value,
-            "cpu":       proc.cpu_percent(interval=0.1),
-            "memory_mb": proc.memory_info().rss / 1024 / 1024,
+            "cpu":       cpu,
+            "memory_mb": mem,
             "task":      self._current_task_description(),
             "protected": self.protected,
         }
