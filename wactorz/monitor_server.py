@@ -724,11 +724,20 @@ async def handle_command(cmd: dict):
         elif command == "delete":
             _mark_deleted(agent_id)
             state["agents"].pop(agent_id, None)
-            # Stop and unregister via registry immediately so heartbeats cease
             if registry is not None:
                 actor = registry.get(agent_id)
                 if actor and not getattr(actor, "protected", False):
-                    asyncio.create_task(actor.stop())
+                    # Release from supervision before stopping so the watch_loop
+                    # doesn't race to restart the actor while we're tearing it down.
+                    sv = getattr(registry, "_supervisor_ref", None)
+                    if sv is not None:
+                        sv.release(actor.name)
+                    # Stop the actor then unregister it so actors_handler stops
+                    # returning it on the next REST poll (the ghost-card fix).
+                    async def _stop_and_unregister(a=actor, aid=agent_id):
+                        await a.stop()
+                        await registry.unregister(aid)
+                    asyncio.create_task(_stop_and_unregister())
             # Clear retained MQTT messages so the broker stops re-delivering
             # them on reconnect (which would otherwise crash parse_topic).
             asyncio.create_task(_purge_agent_retained(agent_id))
@@ -1414,6 +1423,8 @@ async def actors_handler(request):
     if registry is not None:
         result = []
         for actor in registry.all_actors():
+            if _is_deleted(actor.actor_id):
+                continue
             ag = state["agents"].get(actor.actor_id, {})
             result.append({
                 "id":                actor.actor_id,
