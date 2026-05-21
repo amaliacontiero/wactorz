@@ -1216,8 +1216,8 @@ async def _run_with_retry(coro_factory: Any, label: str) -> None:
     _last_exc_str: str | None = None
     while True:
         try:
-            _last_exc_str = None
             await coro_factory()
+            _last_exc_str = None  # reset only after a successful run
         except KeyboardInterrupt:
             log.info("%s shutting down.", label)
             break
