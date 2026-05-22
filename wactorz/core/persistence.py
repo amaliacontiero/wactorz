@@ -341,6 +341,28 @@ class WactorzDB:
         )
         self._conn.commit()
 
+    def clear_chat_log(self, agent_name: Optional[str] = None) -> int:
+        """Delete chat_log rows. Pass agent_name to limit to one agent."""
+        if agent_name:
+            cur = self._conn.execute(
+                "DELETE FROM chat_log WHERE agent_name=?", (agent_name,)
+            )
+        else:
+            cur = self._conn.execute("DELETE FROM chat_log")
+        self._conn.commit()
+        return cur.rowcount
+
+    def clear_spawn_registry(self, agent_name: Optional[str] = None) -> int:
+        """Delete spawn_registry rows. Pass agent_name to limit to one agent."""
+        if agent_name:
+            cur = self._conn.execute(
+                "DELETE FROM spawn_registry WHERE name=?", (agent_name,)
+            )
+        else:
+            cur = self._conn.execute("DELETE FROM spawn_registry")
+        self._conn.commit()
+        return cur.rowcount
+
     def query_chat_log(self, agent_name: Optional[str] = None,
                        role: Optional[str] = None,
                        since: Optional[float] = None,
