@@ -204,7 +204,6 @@ wactorz --interface discord --discord-token $DISCORD_BOT_TOKEN
 
 ```bash
 DISCORD_BOT_TOKEN=MTI4...
-DISCORD_PREFIX=!        # optional command prefix, default: none (mention or DM)
 ```
 
 > **💡 Webhook notifications** — Pipelines can post to Discord independently of the bot using webhook URLs. Store a webhook with `/webhook discord https://discord.com/api/webhooks/...` and the planner will inject it into generated notification agents automatically.
@@ -268,7 +267,7 @@ wactorz --interface telegram --telegram-token $TELEGRAM_BOT_TOKEN
 
 ```bash
 TELEGRAM_BOT_TOKEN=1234567890:AAF...
-TELEGRAM_ALLOWED_USERS=123456789,987654321   # optional: restrict to user IDs
+TELEGRAM_ALLOWED_USER_ID=123456789   # optional: restrict to a single user ID
 ```
 
 ---

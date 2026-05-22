@@ -47,7 +47,7 @@ If you have a Discord webhook stored, the planner injects it automatically. Stor
 
 ## Canonical patterns
 
-PlannerAgent uses five canonical wiring patterns. Every pipeline request maps to one of these.
+PlannerAgent uses six canonical wiring patterns. Every pipeline request maps to one of these.
 
 ---
 
@@ -151,20 +151,22 @@ Agent 2  (dynamic)  name: <slug>-notify
 
 ---
 
-### Pattern 5 — Timer → HA action
+### Pattern 5 — Scheduled trigger → HA action or notification
 
-A scheduled trigger fires a Home Assistant service call at a fixed time or interval.
+A scheduled trigger fires a Home Assistant service call (or notification) at a fixed time or interval. Always uses `type: scheduled` for the trigger — never a `dynamic` agent polling `datetime.now()`.
 
 ```
-Agent 1  (dynamic)  name: <slug>-timer
-  process(): check current time against schedule
-             if match: publish custom/triggers/<slug> {"triggered": true}
-  poll_interval: 60s
+Agent 1  (scheduled)  name: <slug>-trigger
+  schedule: {"type": "daily",    "at": "17:00"}
+         or {"type": "weekly",   "at": "07:00", "days": ["mon","tue","wed","thu","fri"]}
+         or {"type": "interval", "seconds": 1800}
+         or {"type": "once",     "at": "<ISO8601-timestamp>"}
+  publish_topic: 'schedule/<slug>-trigger/fired'
 
-Agent 2  (ha_actuator)  name: <slug>-actuator
-  mqtt_topics: ["custom/triggers/<slug>"]
-  detection_filter: {"triggered": true}
-  actions: [HA service call]
+Agent 2  (ha_actuator OR dynamic)  name: <slug>-action
+  subscribes to 'schedule/<slug>-trigger/fired'
+  ha_actuator: detection_filter null, actions = [HA service call]
+  dynamic:     setup() agent.subscribe(...), callback does HTTP/work
 ```
 
 #### Examples
@@ -172,6 +174,44 @@ Agent 2  (ha_actuator)  name: <slug>-actuator
 ```
 "turn off all lights every day at midnight"
 "turn on the coffee maker at 07:30 on weekdays"
+"remind me tomorrow at 9am to call the dentist"
+```
+
+> **⚠ Never poll for clock time** — the planner prompt explicitly forbids `while True: sleep(60)` waiting for a time. Always use `type: scheduled`.
+
+---
+
+### Pattern 6 — MQTT sensor + condition → HA action
+
+Combines multiple MQTT data sources, evaluates a condition across them, and triggers an HA action when the condition is met. Used for "if X and Y then Z" style rules.
+
+```
+Agent 1  (dynamic)  name: <slug>-monitor
+  setup(agent):
+      agent.state['lamp_on'] = False
+      agent.state['temp'] = 0
+      async def on_temp(payload):
+          agent.state['temp'] = payload.get('temp', 0)
+          await check_and_trigger()
+      async def on_lamp(payload):
+          agent.state['lamp_on'] = payload.get('state') == 'on'
+          await check_and_trigger()
+      async def check_and_trigger():
+          if agent.state['lamp_on'] and agent.state['temp'] > 20:
+              await agent.publish('custom/triggers/<slug>', {'triggered': True})
+      agent.subscribe('custom/sensors/temp_humidity', on_temp)
+      agent.subscribe('lamp/status', on_lamp)
+
+Agent 2  (ha_actuator)  name: <slug>-actuator
+  mqtt_topics: ["custom/triggers/<slug>"]
+  detection_filter: {"triggered": true}
+  actions: [HA service call]
+```
+
+#### Example
+
+```
+"if the lamp is on and the temperature goes above 20, turn off the lamp"
 ```
 
 ---

@@ -1,6 +1,6 @@
 # Installation
 
-Wactorz requires Python 3.10+ and a running MQTT broker. The `wactorz` command starts everything — the actor system, the embedded broker, and the web dashboard.
+Wactorz requires Python 3.10+ and a running MQTT broker (Mosquitto). The `wactorz` command starts the actor system and the web dashboard — start Mosquitto first with `docker compose up -d`.
 
 ---
 
@@ -444,23 +444,48 @@ mosquitto_sub -h localhost -t 'agents/+/logs' -v
 
 #### Read persistence state
 
+The spawn registry, user facts, and pipeline rules now live in SQLite (`state/wactorz.db`), routed automatically by `PersistenceAPI`. Read them with:
+
 ```python
 python3 -c "
-import pickle
-data = pickle.load(open('state/main/state.pkl', 'rb'))
-print('Spawn registry:', list(data.get('_spawned_agents', {}).keys()))
-print('User facts:', data.get('_user_facts', {}))
+import sqlite3, json
+conn = sqlite3.connect('state/wactorz.db')
+row = conn.execute(
+    \"SELECT value FROM kv_store WHERE agent='main' AND key='_spawned_agents'\"
+).fetchone()
+spawned = json.loads(row[0]) if row else {}
+print('Spawn registry:', list(spawned.keys()))
+
+row = conn.execute(
+    \"SELECT value FROM kv_store WHERE agent='main' AND key='_user_facts'\"
+).fetchone()
+print('User facts:', json.loads(row[0]) if row else {})
 "
+```
+
+The `spawn_registry` table also holds spawn configs in a structured form:
+
+```bash
+sqlite3 state/wactorz.db "SELECT name, node FROM spawn_registry;"
 ```
 
 #### Remove a stuck agent from the spawn registry
 
 ```python
 python3 -c "
-import pickle
-data = pickle.load(open('state/main/state.pkl', 'rb'))
-data['_spawned_agents'].pop('my-stuck-agent', None)
-pickle.dump(data, open('state/main/state.pkl', 'wb'))
-print('Done. Remaining:', list(data['_spawned_agents'].keys()))
+import sqlite3, json
+conn = sqlite3.connect('state/wactorz.db')
+row = conn.execute(
+    \"SELECT value FROM kv_store WHERE agent='main' AND key='_spawned_agents'\"
+).fetchone()
+spawned = json.loads(row[0]) if row else {}
+spawned.pop('my-stuck-agent', None)
+conn.execute(
+    \"UPDATE kv_store SET value=? WHERE agent='main' AND key='_spawned_agents'\",
+    (json.dumps(spawned),),
+)
+conn.execute(\"DELETE FROM spawn_registry WHERE name='my-stuck-agent'\")
+conn.commit()
+print('Done. Remaining:', list(spawned.keys()))
 "
 ```

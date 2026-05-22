@@ -474,7 +474,7 @@ Base class for all LLM-backed agents. Manages conversation history, rolling summ
 | Class | Flag | Env var | Notes |
 |-------|------|---------|-------|
 | `AnthropicProvider` | `--llm anthropic` | `ANTHROPIC_API_KEY` | Default. Streaming supported. |
-| `OpenAIProvider` | `--llm openai` | `OPENAI_API_KEY` | Any OpenAI-compatible endpoint via `--openai-base-url`. |
+| `OpenAIProvider` | `--llm openai` | `OPENAI_API_KEY` | Any OpenAI-compatible endpoint. |
 | `OllamaProvider` | `--llm ollama --ollama-model llama3` | — | Local. No cost tracking. |
 | `NIMProvider` | `--llm nim --nim-model meta/llama-3.3-70b-instruct` | `NIM_API_KEY` | NVIDIA NIM. Free tier: 1000 req/month per model. |
 | `GeminiProvider` | `--llm gemini --gemini-model gemini-2.5-flash` | `GEMINI_API_KEY` | Google Gemini via `google-generativeai` SDK. Free tier available. |

@@ -31,7 +31,7 @@ The framework is built on three ideas: every agent is an independent **actor** w
 └────────────────────────────┬───────────────────────────────────────────┘
                              │  pub / sub
                              ▼
-                    MQTT broker  (embedded, starts with wactorz)
+                    MQTT broker  (separate process — Mosquitto)
                     :1883 TCP  (default)
                              │
               ┌──────────────┴──────────────┐
@@ -40,7 +40,7 @@ The framework is built on three ideas: every agent is an independent **actor** w
    WebSocket API               custom topics, any device or service
 ```
 
-> **💡 One command to start** — Running `wactorz` starts everything — the actor system, and the web dashboard. Note a separate MQTT broker process needed.
+> **💡 One command to start** — Running `wactorz` starts the actor system and the web dashboard. A separate MQTT broker (Mosquitto) must be running first — start it with `docker compose up -d` from the repo root.
 
 ---
 
@@ -143,10 +143,11 @@ User types:  "@my-agent {"action": "status"}"
 Interface (CLIInterface / DiscordInterface / RESTInterface / WhatsAppInterface / TelegramInterface)
   │  calls main_actor.process_user_input(text)
   ▼
-MainActor._classify_intent()     ← one LLM call: HA | PIPELINE | OTHER
+MainActor._classify_intent()     ← one LLM call: ACTUATE | HA | PIPELINE | OTHER
   │
-  ├── OTHER  →  main.chat()       ← conversational reply
-  ├── HA     →  send to home-assistant-agent
+  ├── ACTUATE → OneOffActuatorAgent (ephemeral) ← immediate HA device control
+  ├── OTHER   → main.chat()       ← conversational reply
+  ├── HA      → send to home-assistant-agent
   └── @mention detected  →  send directly to named actor
           │
           ▼
@@ -210,13 +211,13 @@ system.supervisor
   # ... etc
 ```
 
-Dynamic agents (spawned by main or planner) are **not** in the supervision tree — they are managed by the spawn registry. On restart, main re-spawns them from the saved code in `state/main/state.pkl`.
+Dynamic agents (spawned by main or planner) are **not** in the supervision tree — they are managed by the spawn registry. On restart, main re-spawns them from the `spawn_registry` table in `state/wactorz.db` (SQLite).
 
 ---
 
 ## Running Wactorz
 
-The `wactorz` command starts everything — the actor system, an embedded MQTT broker, and the web dashboard. No separate broker process is needed.
+The `wactorz` command starts the actor system and the web dashboard. It connects to an **external MQTT broker** (Mosquitto) that must already be running. The simplest way is `docker compose up -d` from the repo, which starts Mosquitto on `:1883`.
 
 ```bash
 # Start with Anthropic Claude (default interface: CLI)

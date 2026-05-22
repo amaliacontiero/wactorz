@@ -213,12 +213,21 @@ Every agent publishes to its own namespace: `agents/{actor_id}/...`
 ```json
 {
   "timestamp":    1740000000.0,
-  "total_agents": 5,
+  "total_actors": 5,
   "running":      4,
-  "paused":       0,
   "stopped":      1,
   "failed":       0,
-  "alerts":       []
+  "degraded":     0,
+  "actors": [
+    {
+      "id":                 "8070c998-...",
+      "name":               "main",
+      "state":              "running",
+      "last_seen_ago":      4.2,
+      "consecutive_errors": 0,
+      "error_phase":        ""
+    }
+  ]
 }
 ```
 
