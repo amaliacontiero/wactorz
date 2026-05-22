@@ -70,19 +70,6 @@ function stateLabel(state: AgentState): string {
   return state as string;
 }
 
-function agentTypeColor(agentType?: string): string {
-  switch (agentType) {
-    case "orchestrator":
-      return "#f59e0b";
-    case "monitor":
-      return "#34d399";
-    case "synapse":
-      return "#8b5cf6";
-    default:
-      return "#93c5fd";
-  }
-}
-
 function relTime(ms: number): string {
   const s = Math.round((Date.now() - ms) / 1000);
   if (s < 5) return "now";
@@ -110,6 +97,7 @@ export class CardDashboard {
 
   private haClient: HAClient | null = null;
   private _haEntities: import("../io/HAClient").HAEntity[] = [];
+  private _haRegistries: import("../io/HAClient").HARegistries | null = null;
 
   private _remoteNodes = new Map<string, { agents: string[]; lastSeen: number }>();
   private _removingIds = new Set<string>();
@@ -124,6 +112,8 @@ export class CardDashboard {
   private _historyLoaded: Set<string> = new Set();
   private _totalCostUsd: number | null = null;
   private _totalMessages: number | null = null;
+  private _costLimitInfo: Record<string, any> | null = null;
+  private _costPollTimer: ReturnType<typeof setInterval> | null = null;
 
   // Event listeners (stored for cleanup)
   private _evFeed: ((e: Event) => void) | null = null;
@@ -131,6 +121,7 @@ export class CardDashboard {
   private _evChunk: ((e: Event) => void) | null = null;
   private _evEnd: ((e: Event) => void) | null = null;
   private _evConn: ((e: Event) => void) | null = null;
+  private _evResetChat: ((e: Event) => void) | null = null;
 
   private get haUrl(): string | null {
     return localStorage.getItem("wactorz-ha-url") || null;
@@ -162,6 +153,38 @@ export class CardDashboard {
     this.root = this.buildRoot();
     document.body.appendChild(this.root);
     this._initHAClient();
+    void this._loadServerConfig();
+  }
+
+  private async _loadServerConfig(): Promise<void> {
+    try {
+      const ingress: string = (window as any).__WACTORZ_INGRESS_PATH ?? "";
+      const resp = await fetch(`${ingress}/api/config`);
+      if (!resp.ok) return;
+      const cfg = await resp.json() as {
+        ha?:     { url?: string; token?: string };
+        fuseki?: { url?: string; dataset?: string; user?: string; password?: string };
+      };
+      let changed = false;
+      const seed = (key: string, val: string | undefined | null) => {
+        if (val && !localStorage.getItem(key)) {
+          localStorage.setItem(key, val);
+          changed = true;
+        }
+      };
+      seed("wactorz-fuseki-url",     cfg.fuseki?.url);
+      seed("wactorz-fuseki-dataset", cfg.fuseki?.dataset);
+      seed("wactorz-fuseki-user",    cfg.fuseki?.user);
+      seed("wactorz-fuseki-pass",    cfg.fuseki?.password);
+      seed("wactorz-ha-url",         cfg.ha?.url);
+      seed("wactorz-ha-token",       cfg.ha?.token);
+      if (changed) {
+        if (!this.haClient) this._initHAClient();
+        if (this.root.classList.contains("cd-visible")) this._renderView();
+      }
+    } catch {
+      // best-effort — server may not be ready yet
+    }
   }
 
   private _initHAClient(): void {
@@ -169,8 +192,15 @@ export class CardDashboard {
     const token = this.haToken;
     if (url && token) {
       this.haClient = new HAClient(url, token);
+      this.haClient.onRegistriesUpdate = (r) => {
+        this._haRegistries = r;
+        if (this.view === "ha" && this._haEntities.length) {
+          this._renderHADevices(this._haEntities);
+        }
+      };
     } else {
       this.haClient = null;
+      this._haRegistries = null;
     }
   }
 
@@ -183,6 +213,8 @@ export class CardDashboard {
     this._wireEvents();
     this._renderView();
     this.tickTimer = setInterval(() => this._refreshTimestamps(), 5000);
+    void this._fetchCostInfo();
+    this._costPollTimer = setInterval(() => void this._fetchCostInfo(), 30_000);
     // Connect HA once for the session — stays connected across sub-view changes
     // so state_changed events flow to the activity feed at all times.
     if (this.haClient && !this.haClient.connected) {
@@ -203,6 +235,10 @@ export class CardDashboard {
       clearInterval(this.tickTimer);
       this.tickTimer = null;
     }
+    if (this._costPollTimer) {
+      clearInterval(this._costPollTimer);
+      this._costPollTimer = null;
+    }
   }
 
   destroy(): void {
@@ -213,6 +249,34 @@ export class CardDashboard {
   setTotalCostUsd(usd: number): void {
     this._totalCostUsd = usd;
     if (this.view === "overview") this._renderStats();
+  }
+
+  private async _fetchCostInfo(): Promise<void> {
+    const ingress: string = (window as any).__WACTORZ_INGRESS_PATH ?? "";
+    try {
+      const res = await fetch(`${ingress}/api/cost`);
+      if (res.ok) {
+        this._costLimitInfo = await res.json();
+        if (this.view === "overview") this._renderStats();
+        else if (this.view === "settings") this._renderView();
+      }
+    } catch { /* ignore — server may not be ready */ }
+  }
+
+  private async _saveCostLimit(limit_usd: number, period: string): Promise<void> {
+    const ingress: string = (window as any).__WACTORZ_INGRESS_PATH ?? "";
+    await fetch(`${ingress}/api/cost/limit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ limit_usd, period }),
+    });
+    await this._fetchCostInfo();
+  }
+
+  private async _resetCost(): Promise<void> {
+    const ingress: string = (window as any).__WACTORZ_INGRESS_PATH ?? "";
+    await fetch(`${ingress}/api/cost/reset`, { method: "POST" });
+    await this._fetchCostInfo();
   }
 
   setTotalMessages(count: number): void {
@@ -265,7 +329,7 @@ export class CardDashboard {
     if (this.view === "overview") this._renderNodes();
   }
 
-  onHeartbeat(agentId: string, timestampMs: number): void {
+  onHeartbeat(agentId: string, timestampMs: number, cpu?: number, mem?: number): void {
     this.lastHb.set(agentId, timestampMs);
     if (!this.root.classList.contains("cd-visible")) return;
     if (this._removingIds.has(agentId)) return;
@@ -277,9 +341,17 @@ export class CardDashboard {
     if (hbEl) hbEl.textContent = relTime(timestampMs);
     const dot = card.querySelector<HTMLElement>(".af-card-state-dot");
     if (dot) {
-      dot.classList.remove("af-card-pulse");
+      dot.classList.remove("af-card-pulse", "af-card-stale");
       void dot.offsetWidth;
       dot.classList.add("af-card-pulse");
+    }
+    if (cpu !== undefined) {
+      const cpuEl = card.querySelector<HTMLElement>(".af-card-cpu");
+      if (cpuEl) { cpuEl.textContent = `CPU ${cpu.toFixed(1)}%`; cpuEl.style.display = ""; }
+    }
+    if (mem !== undefined) {
+      const memEl = card.querySelector<HTMLElement>(".af-card-mem");
+      if (memEl) { memEl.textContent = `${mem.toFixed(0)} MB`; memEl.style.display = ""; }
     }
   }
 
@@ -394,6 +466,16 @@ export class CardDashboard {
     document.addEventListener("af-stream-chunk", this._evChunk);
     document.addEventListener("af-stream-end", this._evEnd);
     document.addEventListener("af-connection-status", this._evConn);
+
+    this._evResetChat = (e: Event) => {
+      const agent = (e as CustomEvent).detail?.agent as string | null;
+      this.chatMessages = agent
+        ? this.chatMessages.filter((m) => m.from !== agent && m.from !== "user")
+        : [];
+      this._historyLoaded.clear();
+      if (this.view === "chat") this._renderChatThread();
+    };
+    document.addEventListener("af-reset-chat", this._evResetChat);
   }
 
   private _unwireEvents(): void {
@@ -416,6 +498,10 @@ export class CardDashboard {
     if (this._evConn) {
       document.removeEventListener("af-connection-status", this._evConn);
       this._evConn = null;
+    }
+    if (this._evResetChat) {
+      document.removeEventListener("af-reset-chat", this._evResetChat);
+      this._evResetChat = null;
     }
   }
 
@@ -602,32 +688,52 @@ export class CardDashboard {
       : agents.reduce((s, a) => s + (a.costUsd ?? 0), 0);
     const events = this.feedItems.length;
 
+    const lim = this._costLimitInfo;
+    const hasLimit = lim && typeof lim.limit_usd === "number" && lim.limit_usd > 0;
+    const barColor = lim?.limit_reached ? "#ef4444" : lim?.warning ? "#f59e0b" : "#22d3a0";
+    const pct = hasLimit ? Math.min(lim!.pct_used ?? 0, 100) : 0;
+    const periodLabel =
+      lim?.period === "daily"  ? "today"
+    : lim?.period === "weekly" ? "this week"
+    :                            "this month";
+    const costDetail = hasLimit
+      ? `$${lim!.spend_usd.toFixed(4)} / $${lim!.limit_usd.toFixed(2)} ${periodLabel}`
+      : "reported by actors";
+    const costExtra = hasLimit ? `
+      <div style="margin-top:8px;background:rgba(255,255,255,0.08);border-radius:4px;height:6px;overflow:hidden">
+        <div style="width:${pct}%;height:100%;background:${barColor};border-radius:4px;transition:width 0.4s"></div>
+      </div>` : "";
+
     [
       {
         label: "Wactorz",
         value: String(total),
         detail: `${healthy} running`,
         accent: "#60a5fa",
+        extra: "",
       },
       {
         label: "Messages",
         value: String(msgs),
         detail: "processed across actors",
         accent: "#22d3a0",
+        extra: "",
       },
       {
         label: "Cost",
         value: `$${cost.toFixed(4)}`,
-        detail: "reported by actors",
-        accent: "#f59e0b",
+        detail: costDetail,
+        accent: lim?.limit_reached ? "#ef4444" : "#f59e0b",
+        extra: costExtra,
       },
       {
         label: "Feed Events",
         value: String(events),
         detail: "since dashboard loaded",
         accent: "#8b5cf6",
+        extra: "",
       },
-    ].forEach(({ label, value, detail, accent }) => {
+    ].forEach(({ label, value, detail, accent, extra }: any) => {
       const card = document.createElement("div");
       card.className = "af-stat-card";
       card.style.borderColor = `${accent}44`;
@@ -635,6 +741,7 @@ export class CardDashboard {
         <div class="af-stat-label">${label}</div>
         <div class="af-stat-value" style="color:${accent}">${value}</div>
         <div class="af-stat-detail">${detail}</div>
+        ${extra}
       `;
       container.appendChild(card);
     });
@@ -698,7 +805,6 @@ export class CardDashboard {
     const hbMs = this.lastHb.get(agent.id) ?? 0;
     const color = stateColor(agent.state);
     const status = stateLabel(agent.state);
-    const typeColor = agentTypeColor(agent.agentType);
     const msgs = agent.messagesProcessed ?? 0;
 
     const card = document.createElement("div");
@@ -706,15 +812,12 @@ export class CardDashboard {
     card.dataset.id = agent.id;
 
     const dot = document.createElement("div");
-    dot.className = "af-card-state-dot";
+    // Pre-apply af-card-pulse when we already know this agent's heartbeat —
+    // prevents the infinite blink that would otherwise last until the next
+    // MQTT heartbeat (~10s) on view-switch rebuilds.
+    dot.className = hbMs > 0 ? "af-card-state-dot af-card-pulse" : "af-card-state-dot";
     dot.style.background = color;
     dot.style.boxShadow = `0 0 8px ${color}`;
-
-    const badge = document.createElement("div");
-    badge.className = "af-card-type-badge";
-    badge.style.color = typeColor;
-    badge.style.borderColor = `${typeColor}55`;
-    badge.textContent = agent.agentType ?? "wactor";
 
     const name = document.createElement("div");
     name.className = "af-card-name";
@@ -731,10 +834,11 @@ export class CardDashboard {
       <span>♥ <span class="af-card-hb-time">${hbMs ? relTime(hbMs) : "—"}</span></span>
       <span>${msgs} msgs</span>
       ${agent.costUsd != null ? `<span>$${agent.costUsd.toFixed(4)}</span>` : ""}
+      ${agent.cpu != null ? `<span class="af-card-cpu" title="CPU usage">${agent.cpu.toFixed(1)}%</span>` : `<span class="af-card-cpu" style="display:none"></span>`}
+      ${agent.mem != null ? `<span class="af-card-mem" title="Memory">${agent.mem.toFixed(0)} MB</span>` : `<span class="af-card-mem" style="display:none"></span>`}
     `;
 
     card.appendChild(dot);
-    card.appendChild(badge);
     card.appendChild(name);
     card.appendChild(stateLbl);
     card.appendChild(meta);
@@ -743,6 +847,7 @@ export class CardDashboard {
       const task = document.createElement("div");
       task.className = "af-card-task";
       task.textContent = agent.task;
+      task.title = agent.task;
       card.appendChild(task);
     }
 
@@ -1267,14 +1372,23 @@ export class CardDashboard {
     select.id = "af-target-select";
     this._populateSelect(select);
 
-    const input = document.createElement("input");
+    const input = document.createElement("textarea");
     input.className = "af-iobar-input";
     input.id = "af-iobar-input";
+    input.rows = 1;
     input.placeholder = `Message @${this.chatTarget}…`;
+    const autoGrow = () => {
+      input.style.height = "1px";
+      const h = Math.min(input.scrollHeight, 140);
+      input.style.height = h + "px";
+      input.style.overflowY = h >= 140 ? "auto" : "hidden";
+    };
+    input.addEventListener("input", autoGrow);
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         this._sendMessage(input, select);
+        input.style.height = "auto";
       }
     });
     select.addEventListener("change", () => {
@@ -1287,7 +1401,34 @@ export class CardDashboard {
     sendBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M1 13L13 7 1 1v4.5l8.5 1.5-8.5 1.5V13z" fill="currentColor"/></svg>`;
     sendBtn.addEventListener("click", () => this._sendMessage(input, select));
 
-    bar.append(select, input, sendBtn);
+    const wakeBtn = document.createElement("button");
+    wakeBtn.className = "af-voice-btn";
+    wakeBtn.id = "af-wake-btn-cd";
+    wakeBtn.title = "Wake word — click to enable";
+    wakeBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 15 15" fill="currentColor" aria-hidden="true"><rect x="1" y="6" width="2" height="3" rx="1"/><rect x="4.5" y="4" width="2" height="7" rx="1"/><rect x="8" y="2" width="2" height="11" rx="1"/><rect x="11.5" y="4" width="2" height="7" rx="1"/></svg>`;
+    wakeBtn.addEventListener("click", () =>
+      document.dispatchEvent(new CustomEvent("af-wake-toggle")),
+    );
+
+    const micBtn = document.createElement("button");
+    micBtn.className = "af-voice-btn";
+    micBtn.id = "af-mic-btn-cd";
+    micBtn.title = "Hold to speak";
+    micBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true"><path d="M7.5 1.5a2.5 2.5 0 0 0-2.5 2.5v4a2.5 2.5 0 0 0 5 0V4a2.5 2.5 0 0 0-2.5-2.5Z" fill="currentColor"/><path d="M3 7.5a4.5 4.5 0 0 0 9 0" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/><line x1="7.5" y1="12" x2="7.5" y2="13.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/><line x1="5" y1="13.5" x2="10" y2="13.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg>`;
+    micBtn.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      micBtn.setPointerCapture(e.pointerId);
+      document.dispatchEvent(new CustomEvent("af-mic-start"));
+    });
+    micBtn.addEventListener("pointerup",     () => document.dispatchEvent(new CustomEvent("af-mic-stop")));
+    micBtn.addEventListener("pointercancel", () => document.dispatchEvent(new CustomEvent("af-mic-stop")));
+
+    if ((document.body as any).__voiceUnavailable) {
+      wakeBtn.style.display = "none";
+      micBtn.style.display  = "none";
+    }
+
+    bar.append(wakeBtn, micBtn, select, input, sendBtn);
     return bar;
   }
 
@@ -1317,12 +1458,12 @@ export class CardDashboard {
     const select =
       this.root.querySelector<HTMLSelectElement>("#af-target-select");
     if (select) this._populateSelect(select);
-    const input = this.root.querySelector<HTMLInputElement>("#af-iobar-input");
+    const input = this.root.querySelector<HTMLTextAreaElement>("#af-iobar-input");
     if (input) input.placeholder = `Message @${this.chatTarget}…`;
   }
 
   private _sendMessage(
-    input: HTMLInputElement,
+    input: HTMLTextAreaElement,
     select: HTMLSelectElement,
   ): void {
     const content = input.value.trim();
@@ -1346,6 +1487,7 @@ export class CardDashboard {
       this._scrollThread();
     }
     input.value = "";
+    input.style.height = "auto";
     document.dispatchEvent(
       new CustomEvent("af-send-message", { detail: { content, target } }),
     );
@@ -1396,7 +1538,7 @@ export class CardDashboard {
             <button id="ha-reconfigure-btn" class="af-mini-btn" style="font-size:10px;">⚙ Configure</button>
           </div>
         </div>
-        <div id="ha-devices-container" style="flex:1;overflow-y:auto;overflow-x:hidden;margin-top:12px;display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;">
+        <div id="ha-devices-container" style="flex:1;overflow-y:auto;overflow-x:hidden;">
           <div style="color:rgba(255,255,255,0.4);text-align:center;grid-column:1/-1;margin-top:40px;">
             Connecting to Home Assistant...
           </div>
@@ -1494,148 +1636,231 @@ export class CardDashboard {
   }
 
   private _renderHADevices(entities: HAEntity[]): void {
-    const container = this.root.querySelector<HTMLElement>(
-      "#ha-devices-container",
-    );
+    const container = this.root.querySelector<HTMLElement>("#ha-devices-container");
     if (!container) return;
-
     container.innerHTML = "";
+    container.style.display = "flex";
+    container.style.flexDirection = "column";
+    container.style.gap = "0";
 
-    // Sort by domain then friendly name
-    const sorted = [...entities].sort((a, b) => {
-      const domA = a.entity_id.split(".")[0] || "";
-      const domB = b.entity_id.split(".")[0] || "";
-      if (domA !== domB) return domA.localeCompare(domB);
-      return (a.attributes.friendly_name || a.entity_id).localeCompare(
-        b.attributes.friendly_name || b.entity_id,
-      );
-    });
+    // ── Domain classification ────────────────────────────────────────────────
+    const DEVICE_DOMAINS = new Set([
+      "light", "switch", "fan", "climate", "cover", "lock",
+      "media_player", "vacuum", "camera", "alarm_control_panel",
+      "remote", "humidifier", "siren", "water_heater", "valve",
+      "lawn_mower", "button", "number", "select",
+    ]);
+    const CAP_DOMAINS = new Set(["sensor", "binary_sensor"]);
+    const domainOf = (e: HAEntity) => e.entity_id.split(".")[0] || "";
 
-    if (sorted.length === 0) {
-      container.innerHTML = `<div style="color: rgba(255,255,255,0.4); text-align: center; grid-column: 1/-1; margin-top: 40px;">No entities found.</div>`;
+    // ── Build registry maps ──────────────────────────────────────────────────
+    const reg = this._haRegistries;
+    const areaById = new Map<string, import("../io/HAClient").HAArea>();
+    const entityDeviceId = new Map<string, string>();  // entity_id → device_id
+    const entityAreaId   = new Map<string, string>();  // entity_id → area_id (direct)
+    const deviceAreaId   = new Map<string, string>();  // device_id → area_id
+
+    if (reg) {
+      reg.areas.forEach((a) => areaById.set(a.area_id, a));
+      reg.deviceEntries.forEach((d) => { if (d.area_id) deviceAreaId.set(d.id, d.area_id); });
+      reg.entityEntries.forEach((entry) => {
+        if (entry.device_id) entityDeviceId.set(entry.entity_id, entry.device_id);
+        if (entry.area_id)   entityAreaId.set(entry.entity_id, entry.area_id);
+      });
+    }
+
+    const getAreaId = (entityId: string): string => {
+      if (entityAreaId.has(entityId)) return entityAreaId.get(entityId)!;
+      const devId = entityDeviceId.get(entityId);
+      if (devId && deviceAreaId.has(devId)) return deviceAreaId.get(devId)!;
+      return "";
+    };
+
+    // ── Group capability entities by device_id ───────────────────────────────
+    const capsByDevice = new Map<string, HAEntity[]>();
+    entities
+      .filter((e) => CAP_DOMAINS.has(domainOf(e)))
+      .forEach((e) => {
+        const devId = entityDeviceId.get(e.entity_id);
+        if (!devId) return;
+        if (!capsByDevice.has(devId)) capsByDevice.set(devId, []);
+        capsByDevice.get(devId)!.push(e);
+      });
+
+    // ── Filter to device-domain entities and group by area ──────────────────
+    const deviceEntities = entities.filter((e) => DEVICE_DOMAINS.has(domainOf(e)));
+
+    if (deviceEntities.length === 0) {
+      container.innerHTML = `<div style="color:rgba(255,255,255,0.4);text-align:center;padding:40px;">No devices found.</div>`;
       return;
     }
 
-    sorted.forEach((e) => {
-      const domain = e.entity_id.split(".")[0] || "";
-      const card = document.createElement("div");
-      card.className = "af-card";
-      card.style.cursor = "default";
-      card.style.minHeight = "130px";
-      card.style.display = "flex";
-      card.style.flexDirection = "column";
-
-      // ── Header: Avatar + Name + ID ──
-      const headerRow = document.createElement("div");
-      headerRow.style.display = "flex";
-      headerRow.style.alignItems = "center";
-      headerRow.style.gap = "8px";
-      headerRow.style.marginBottom = "8px";
-
-      if (e.attributes.entity_picture) {
-        const img = document.createElement("img");
-        img.src = (this.haUrl ?? "") + e.attributes.entity_picture;
-        img.style.width = "28px";
-        img.style.height = "28px";
-        img.style.borderRadius = "4px";
-        img.style.objectFit = "cover";
-        headerRow.appendChild(img);
-      } else {
-        const iconPlaceholder = document.createElement("div");
-        iconPlaceholder.style.width = "28px";
-        iconPlaceholder.style.height = "28px";
-        iconPlaceholder.style.borderRadius = "4px";
-        iconPlaceholder.style.background = "rgba(255,255,255,0.05)";
-        iconPlaceholder.style.display = "flex";
-        iconPlaceholder.style.alignItems = "center";
-        iconPlaceholder.style.justifyContent = "center";
-        iconPlaceholder.style.fontSize = "14px";
-        iconPlaceholder.textContent = this._getDomainIcon(domain);
-        headerRow.appendChild(iconPlaceholder);
-      }
-
-      const nameCol = document.createElement("div");
-      nameCol.style.flex = "1";
-      nameCol.style.minWidth = "0";
-
-      const name = document.createElement("div");
-      name.className = "af-card-name";
-      name.textContent = e.attributes.friendly_name || e.entity_id;
-      name.style.fontSize = "12px";
-
-      const idMeta = document.createElement("div");
-      idMeta.className = "af-card-meta";
-      idMeta.style.fontSize = "9px";
-      idMeta.style.opacity = "0.6";
-      idMeta.textContent = e.entity_id;
-
-      nameCol.append(name, idMeta);
-      headerRow.appendChild(nameCol);
-      card.appendChild(headerRow);
-
-      // ── State Display ──
-      const stateRow = document.createElement("div");
-      stateRow.style.display = "flex";
-      stateRow.style.alignItems = "baseline";
-      stateRow.style.gap = "4px";
-      stateRow.style.marginBottom = "10px";
-
-      const stateVal = document.createElement("div");
-      stateVal.className = "af-card-state-label";
-      stateVal.textContent = e.state;
-      stateVal.style.fontSize = "16px";
-      stateVal.style.fontWeight = "700";
-
-      const isActive = [
-        "on",
-        "playing",
-        "cool",
-        "heat",
-        "open",
-        "active",
-        "detected",
-        "home",
-      ].includes(e.state);
-      const isAlert = [
-        "problem",
-        "error",
-        "critical",
-        "warning",
-        "emergency",
-      ].includes(e.state);
-      stateVal.style.color = isAlert
-        ? "#f87171"
-        : isActive
-          ? "#34d399"
-          : "rgba(255,255,255,0.4)";
-
-      stateRow.appendChild(stateVal);
-
-      if (e.attributes.unit_of_measurement) {
-        const unit = document.createElement("span");
-        unit.style.fontSize = "11px";
-        unit.style.color = "rgba(255,255,255,0.3)";
-        unit.textContent = e.attributes.unit_of_measurement;
-        stateRow.appendChild(unit);
-      }
-      card.appendChild(stateRow);
-
-      // ── Controls Section ──
-      const controls = document.createElement("div");
-      controls.className = "af-card-controls";
-      controls.style.marginTop = "auto";
-      controls.style.display = "flex";
-      controls.style.flexDirection = "column";
-      controls.style.gap = "8px";
-
-      this._appendEntityControls(controls, e, isActive);
-
-      if (controls.children.length > 0) {
-        card.appendChild(controls);
-      }
-
-      container.appendChild(card);
+    const byArea = new Map<string, HAEntity[]>();
+    deviceEntities.forEach((e) => {
+      const aId = getAreaId(e.entity_id);
+      if (!byArea.has(aId)) byArea.set(aId, []);
+      byArea.get(aId)!.push(e);
     });
+
+    // Named areas first (sorted by name), no-room section last
+    const sortedAreaIds = [...byArea.keys()].sort((a, b) => {
+      if (!a && !b) return 0;
+      if (!a) return 1;
+      if (!b) return -1;
+      return (areaById.get(a)?.name ?? a).localeCompare(areaById.get(b)?.name ?? b);
+    });
+
+    // ── Render sections ──────────────────────────────────────────────────────
+    sortedAreaIds.forEach((areaId) => {
+      const area = areaById.get(areaId);
+      const sectionEntities = (byArea.get(areaId) ?? []).sort((a, b) =>
+        (a.attributes.friendly_name ?? a.entity_id).localeCompare(
+          b.attributes.friendly_name ?? b.entity_id,
+        ),
+      );
+
+      const section = document.createElement("div");
+      section.style.marginBottom = "4px";
+
+      // Room header
+      const header = document.createElement("div");
+      header.style.cssText =
+        "padding:8px 16px 6px;font-size:10px;font-weight:700;letter-spacing:0.08em;" +
+        "color:rgba(255,255,255,0.35);text-transform:uppercase;display:flex;align-items:center;gap:6px;" +
+        "border-bottom:1px solid rgba(255,255,255,0.06);";
+      const roomIcon = area?.icon ? String.fromCodePoint(parseInt(area.icon.replace(/^mdi:/, ""), 16)) : "🏠";
+      header.innerHTML = `<span>${area ? roomIcon : "📦"}</span><span>${area?.name ?? "Other"}</span>` +
+        `<span style="opacity:0.4;font-weight:400">${sectionEntities.length}</span>`;
+      section.appendChild(header);
+
+      // Device rows
+      sectionEntities.forEach((e) => {
+        const devId = entityDeviceId.get(e.entity_id);
+        const caps = devId ? (capsByDevice.get(devId) ?? []) : [];
+        section.appendChild(this._buildHADeviceRow(e, caps));
+      });
+
+      container.appendChild(section);
+    });
+  }
+
+  private _buildHADeviceRow(e: HAEntity, capabilities: HAEntity[]): HTMLElement {
+    const domain = e.entity_id.split(".")[0] || "";
+    const isActive = ["on","playing","cool","heat","open","active","detected","home","locked"].includes(e.state);
+    const isAlert  = ["problem","error","critical","warning","emergency"].includes(e.state);
+    const stateColor = isAlert ? "#f87171" : isActive ? "#34d399" : "rgba(255,255,255,0.35)";
+
+    const wrapper = document.createElement("div");
+
+    // ── Row ──────────────────────────────────────────────────────────────────
+    const row = document.createElement("div");
+    row.style.cssText =
+      "display:flex;align-items:center;gap:10px;padding:9px 16px;" +
+      "border-bottom:1px solid rgba(255,255,255,0.04);transition:background 0.12s;";
+    row.addEventListener("mouseenter", () => { row.style.background = "rgba(255,255,255,0.04)"; });
+    row.addEventListener("mouseleave", () => { row.style.background = ""; });
+
+    // Icon
+    const iconEl = document.createElement("span");
+    iconEl.textContent = this._getDomainIcon(domain);
+    iconEl.style.cssText = "font-size:16px;width:22px;text-align:center;flex-shrink:0;";
+
+    // Name
+    const nameEl = document.createElement("div");
+    nameEl.style.cssText = "flex:1;min-width:0;font-size:13px;font-weight:500;" +
+      "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+    nameEl.textContent = e.attributes.friendly_name || e.entity_id;
+
+    // State
+    const stateEl = document.createElement("span");
+    stateEl.style.cssText = `font-size:11px;font-weight:600;white-space:nowrap;color:${stateColor};flex-shrink:0;`;
+    stateEl.textContent = e.state + (e.attributes.unit_of_measurement ? " " + e.attributes.unit_of_measurement : "");
+
+    row.append(iconEl, nameEl, stateEl);
+
+    // Quick toggle (for toggleable domains)
+    const TOGGLEABLE = new Set(["light","switch","fan","humidifier","vacuum","input_boolean"]);
+    if (TOGGLEABLE.has(domain)) {
+      const toggle = document.createElement("button");
+      toggle.title = isActive ? "Turn off" : "Turn on";
+      toggle.style.cssText =
+        `width:28px;height:16px;border-radius:8px;border:none;cursor:pointer;flex-shrink:0;position:relative;` +
+        `background:${isActive ? "#34d399" : "rgba(255,255,255,0.15)"};transition:background 0.2s;`;
+      const thumb = document.createElement("div");
+      thumb.style.cssText =
+        `position:absolute;top:2px;width:12px;height:12px;border-radius:50%;background:#fff;transition:left 0.2s;` +
+        `left:${isActive ? "14px" : "2px"};`;
+      toggle.appendChild(thumb);
+      toggle.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        this.haClient?.toggleEntity(e.entity_id);
+      });
+      row.appendChild(toggle);
+    }
+
+    // Expand chevron (shown when there's a detail panel)
+    const hasControls = this._entityHasControls(e, domain);
+    const hasDetail = hasControls || capabilities.length > 0;
+
+    if (hasDetail) {
+      const chevron = document.createElement("span");
+      chevron.textContent = "›";
+      chevron.style.cssText = "color:rgba(255,255,255,0.25);font-size:18px;flex-shrink:0;transition:transform 0.18s;line-height:1;";
+      row.appendChild(chevron);
+      row.style.cursor = "pointer";
+
+      // ── Detail panel (lazy-rendered on first expand) ─────────────────────
+      const detail = document.createElement("div");
+      detail.style.cssText =
+        "display:none;padding:10px 16px 14px 48px;" +
+        "background:rgba(255,255,255,0.02);border-bottom:1px solid rgba(255,255,255,0.05);";
+      let detailRendered = false;
+
+      row.addEventListener("click", () => {
+        const open = detail.style.display !== "none";
+        detail.style.display = open ? "none" : "block";
+        chevron.style.transform = open ? "rotate(0deg)" : "rotate(90deg)";
+
+        if (!open && !detailRendered) {
+          detailRendered = true;
+
+          // Controls
+          if (hasControls) {
+            const ctrlDiv = document.createElement("div");
+            ctrlDiv.style.cssText = "display:flex;flex-direction:column;gap:8px;margin-bottom:capabilities.length > 0 ? '10px' : '0';";
+            this._appendEntityControls(ctrlDiv, e, isActive);
+            if (ctrlDiv.children.length > 0) detail.appendChild(ctrlDiv);
+          }
+
+          // Capability badges
+          if (capabilities.length > 0) {
+            const capWrap = document.createElement("div");
+            capWrap.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;";
+            capabilities.forEach((cap) => {
+              const badge = document.createElement("span");
+              const capName = cap.attributes.friendly_name || cap.entity_id.split(".").pop() || cap.entity_id;
+              const capState = cap.state + (cap.attributes.unit_of_measurement ? " " + cap.attributes.unit_of_measurement : "");
+              badge.style.cssText =
+                "font-size:10px;padding:2px 8px;border-radius:4px;" +
+                "background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.45);white-space:nowrap;";
+              badge.textContent = `${capName}: ${capState}`;
+              capWrap.appendChild(badge);
+            });
+            detail.appendChild(capWrap);
+          }
+        }
+      });
+
+      wrapper.appendChild(detail);
+    }
+
+    wrapper.insertBefore(row, wrapper.firstChild);
+    return wrapper;
+  }
+
+  private _entityHasControls(e: HAEntity, domain: string): boolean {
+    if (["light","switch","fan","humidifier","vacuum","input_boolean","climate","cover","media_player"].includes(domain)) return true;
+    return false;
   }
 
   private _getDomainIcon(domain: string): string {
@@ -1867,11 +2092,15 @@ export class CardDashboard {
   // ── Private: timestamp refresh ────────────────────────────────────────────
 
   private _refreshTimestamps(): void {
+    const now = Date.now();
+    const STALE_MS = 90_000; // matches nodes panel threshold
     this.lastHb.forEach((ms, id) => {
-      const el = this.root.querySelector<HTMLElement>(
-        `[data-id="${CSS.escape(id)}"] .af-card-hb-time`,
-      );
+      const card = this.root.querySelector<HTMLElement>(`[data-id="${CSS.escape(id)}"]`);
+      if (!card) return;
+      const el = card.querySelector<HTMLElement>(".af-card-hb-time");
       if (el) el.textContent = relTime(ms);
+      const dot = card.querySelector<HTMLElement>(".af-card-state-dot");
+      if (dot) dot.classList.toggle("af-card-stale", now - ms > STALE_MS);
     });
   }
 
@@ -1959,14 +2188,27 @@ export class CardDashboard {
       if (!popover.contains(e.target as Node)) popover.classList.remove("open");
     });
 
-    // const btn3d = document.createElement("button");
-    // btn3d.className = "af-view-btn";
-    // btn3d.style.marginLeft = "8px";
-    // btn3d.textContent = "⊞ Social";
-    // btn3d.addEventListener("click", () => {
-    //   document.dispatchEvent(new CustomEvent("theme-change", { detail: { theme: "social" } }));
-    // });
-    // right.appendChild(btn3d);
+    // ↺ Reset button → popover with scope choices
+    const resetBtn = document.createElement("button");
+    resetBtn.className = "af-view-btn";
+    resetBtn.title = "Clear stored state";
+    resetBtn.textContent = "↺";
+    right.appendChild(resetBtn);
+
+    const resetPop = this._buildResetPopover();
+    document.body.appendChild(resetPop);
+    resetBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const open = resetPop.classList.toggle("open");
+      if (open) {
+        const r = resetBtn.getBoundingClientRect();
+        resetPop.style.top   = `${r.bottom + 6}px`;
+        resetPop.style.right = `${window.innerWidth - r.right}px`;
+      }
+    });
+    document.addEventListener("click", (e) => {
+      if (!resetPop.contains(e.target as Node)) resetPop.classList.remove("open");
+    });
 
     header.append(left, center, right);
 
@@ -1993,9 +2235,6 @@ export class CardDashboard {
 
     const base = this.fusekiUrl;
     const ds = this.fusekiDataset;
-    const auth = this.fusekiUser
-      ? `Basic ${btoa(`${this.fusekiUser}:${this.fusekiPass}`)}`
-      : "";
 
     // ── Preset queries ─────────────────────────────────────────────────────
     const PRESETS: { label: string; icon: string; sparql: string }[] = [
@@ -2051,13 +2290,14 @@ export class CardDashboard {
       {
         label: "Device catalog",
         icon: "⊡",
-        sparql: `SELECT ?g ?entity ?label WHERE {
-  VALUES ?g { <urn:ha:devices> <urn:wactorz:devices> <urn:wactorz:agents> }
-  GRAPH ?g {
-    ?entity rdfs:label ?label .
-    FILTER(?entity != <urn:ha:bridge:wactorz>)
+        sparql: `SELECT ?entity ?label ?state ?area WHERE {
+  GRAPH <urn:ha:devices> {
+    ?entity rdfs:label ?label ;
+            syn:state   ?state .
+    OPTIONAL { ?entity syn:areaName ?area . }
+    FILTER(!STRSTARTS(STR(?entity), "urn:ha:bridge:"))
   }
-} ORDER BY ?label LIMIT 200`,
+} ORDER BY ?area ?label LIMIT 500`,
       },
       {
         label: "Agents",
@@ -2112,36 +2352,8 @@ export class CardDashboard {
       <a href="${base}" target="_blank" rel="noopener"
          style="font-size:11px;opacity:0.4;color:inherit;text-decoration:none;margin-left:2px;">${base} ↗</a>
       <div style="flex:1;"></div>
-      <button id="fsk-seed-demo" class="af-mini-btn" style="font-size:10px;">Seed Demo Data</button>
       <button id="fsk-reconfigure" class="af-mini-btn" style="font-size:10px;">⚙ Configure</button>
     `;
-    const demoSeedQuery = `INSERT DATA {
-  GRAPH <urn:ha:devices> {
-    <urn:ha:entity:demo_sensor_temperature> rdfs:label "Demo temperature sensor" .
-    <urn:ha:entity:demo_switch_lamp> rdfs:label "Demo lamp" .
-  }
-  GRAPH <urn:ha:current> {
-    <urn:ha:entity:demo_sensor_temperature>
-      a sosa:Sensor ;
-      syn:state "21.5" ;
-      syn:unit "degC" .
-    <urn:ha:entity:demo_switch_lamp>
-      a sosa:Actuator ;
-      syn:state "on" .
-  }
-  GRAPH <urn:ha:history> {
-    <urn:ha:observation:demo_sensor_temperature:1>
-      a sosa:Observation ;
-      sosa:madeBySensor <urn:ha:entity:demo_sensor_temperature> ;
-      sosa:hasSimpleResult "21.1" ;
-      sosa:resultTime "2026-04-17T12:00:00Z"^^xsd:dateTime .
-    <urn:ha:observation:demo_sensor_temperature:2>
-      a sosa:Observation ;
-      sosa:madeBySensor <urn:ha:entity:demo_sensor_temperature> ;
-      sosa:hasSimpleResult "21.5" ;
-      sosa:resultTime "2026-04-17T12:15:00Z"^^xsd:dateTime .
-  }
-}`;
     hdr.querySelector("#fsk-reconfigure")?.addEventListener("click", () => {
       wrapper.innerHTML = "";
       wrapper.appendChild(this._buildFusekiConfigForm());
@@ -2152,7 +2364,7 @@ export class CardDashboard {
     hint.style.cssText =
       "font-size:12px;line-height:1.45;color:rgba(255,255,255,0.6);padding:10px 12px;border:1px solid rgba(255,255,255,0.08);border-radius:10px;background:rgba(255,255,255,0.03);";
     hint.innerHTML =
-      "This panel only shows data already stored in Fuseki. If the dataset is empty, all presets return 0 rows even when the endpoint is reachable. Use Seed Demo Data if you want to verify the graph view without Home Assistant.";
+      "This panel only shows data already stored in Fuseki. If the dataset is empty, all presets return 0 rows even when the endpoint is reachable.";
     wrapper.appendChild(hint);
 
     // ── Presets + editor row ───────────────────────────────────────────────
@@ -2256,7 +2468,6 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
         );
       const full = withPrefixes(trimmed);
       const headers: Record<string, string> = {};
-      if (auth) headers["Authorization"] = auth;
 
       try {
         let resp: Response;
@@ -2362,13 +2573,6 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
         results.innerHTML = `<pre class="af-fuseki-error">${String(err)}</pre>`;
       }
     };
-
-    hdr.querySelector("#fsk-seed-demo")?.addEventListener("click", async () => {
-      editor.value = demoSeedQuery;
-      await runQuery(demoSeedQuery);
-      editor.value = PRESETS[4]?.sparql ?? PRESETS[0]?.sparql ?? "";
-      await runQuery(editor.value);
-    });
 
     runBtn.addEventListener("click", () => void runQuery(editor.value));
     editor.addEventListener("keydown", (e) => {
@@ -2499,6 +2703,8 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
     title.textContent = "Settings";
     el.appendChild(title);
 
+    el.appendChild(this._buildCostLimitSection());
+
     el.appendChild(
       this._buildSettingsSection("🏠 Home Assistant", [
         {
@@ -2561,6 +2767,111 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
     );
 
     return el;
+  }
+
+  private _buildCostLimitSection(): HTMLElement {
+    const section = document.createElement("div");
+    section.className = "af-settings-section";
+
+    const h = document.createElement("h3");
+    h.className = "af-settings-section-heading";
+    h.textContent = "🪙 LLM Spend Limit";
+    section.appendChild(h);
+
+    const grid = document.createElement("div");
+    grid.className = "af-settings-grid";
+
+    const lim = this._costLimitInfo;
+    const currentLimit = lim?.limit_usd ?? 0;
+    const currentPeriod = lim?.period ?? "monthly";
+
+    // Limit input
+    const limitLbl = document.createElement("label");
+    limitLbl.className = "af-settings-field";
+    const limitSpan = document.createElement("span");
+    limitSpan.className = "af-settings-label";
+    limitSpan.textContent = "Limit (USD, 0 to disable)";
+    const limitInput = document.createElement("input");
+    limitInput.type = "number";
+    limitInput.min = "0";
+    limitInput.step = "0.01";
+    limitInput.className = "af-cfg-input";
+    limitInput.placeholder = "0.00";
+    limitInput.value = currentLimit ? String(currentLimit) : "";
+    limitLbl.append(limitSpan, limitInput);
+    grid.appendChild(limitLbl);
+
+    // Period select
+    const periodLbl = document.createElement("label");
+    periodLbl.className = "af-settings-field";
+    const periodSpan = document.createElement("span");
+    periodSpan.className = "af-settings-label";
+    periodSpan.textContent = "Period";
+    const periodSelect = document.createElement("select");
+    periodSelect.className = "af-cfg-input";
+    ["daily", "weekly", "monthly"].forEach((p) => {
+      const opt = document.createElement("option");
+      opt.value = p;
+      opt.textContent = p.charAt(0).toUpperCase() + p.slice(1);
+      if (p === currentPeriod) opt.selected = true;
+      periodSelect.appendChild(opt);
+    });
+    periodLbl.append(periodSpan, periodSelect);
+    grid.appendChild(periodLbl);
+
+    section.appendChild(grid);
+
+    // Status line
+    const status = document.createElement("p");
+    status.className = "af-settings-note";
+    const spend = lim?.spend_usd ?? 0;
+    const periodLabel =
+      currentPeriod === "daily"  ? "today"
+    : currentPeriod === "weekly" ? "this week"
+    :                              "this month";
+    status.textContent = currentLimit > 0
+      ? `Current spend: $${spend.toFixed(4)} / $${Number(currentLimit).toFixed(2)} ${periodLabel}`
+      : `Current spend: $${spend.toFixed(4)} ${periodLabel} (no limit set)`;
+    section.appendChild(status);
+
+    // Actions
+    const actions = document.createElement("div");
+    actions.className = "af-settings-actions";
+
+    const saveBtn = document.createElement("button");
+    saveBtn.className = "af-mini-btn";
+    saveBtn.textContent = "Save limit";
+    saveBtn.addEventListener("click", async () => {
+      const v = parseFloat(limitInput.value || "0");
+      if (isNaN(v) || v < 0) return;
+      saveBtn.disabled = true;
+      try {
+        await this._saveCostLimit(v, periodSelect.value);
+        if (this.view === "settings") this._renderView();
+      } finally {
+        saveBtn.disabled = false;
+      }
+    });
+    actions.appendChild(saveBtn);
+
+    const resetBtn = document.createElement("button");
+    resetBtn.className = "af-mini-btn danger";
+    resetBtn.textContent = "Reset spend";
+    resetBtn.title = "Clears the accumulated spend counter for the current period.";
+    resetBtn.addEventListener("click", async () => {
+      if (!window.confirm("Reset accumulated spend for the current period?")) return;
+      resetBtn.disabled = true;
+      try {
+        await this._resetCost();
+        if (this.view === "settings") this._renderView();
+      } finally {
+        resetBtn.disabled = false;
+      }
+    });
+    actions.appendChild(resetBtn);
+
+    section.appendChild(actions);
+    return section;
   }
 
   private _buildSettingsSection(
@@ -2842,6 +3153,52 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
 
     volRow.append(volIcon, volSlider);
     pop.appendChild(volRow);
+
+    return pop;
+  }
+
+  private _buildResetPopover(): HTMLElement {
+    const pop = document.createElement("div");
+    pop.className = "af-audio-popover glass";
+    pop.style.cssText = "min-width:180px;padding:10px 12px;";
+
+    const title = document.createElement("div");
+    title.textContent = "Clear stored state";
+    title.style.cssText = "font-size:11px;opacity:.55;margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em;";
+    pop.appendChild(title);
+
+    const scopes: { scope: string; label: string }[] = [
+      { scope: "chat",    label: "💬 Chat history" },
+      { scope: "metrics", label: "📊 Metrics & costs" },
+      { scope: "spawns",  label: "🚀 Spawn registry" },
+      { scope: "state",   label: "🗂 Agent state files" },
+      { scope: "all",     label: "🗑 Wipe everything" },
+    ];
+
+    for (const { scope, label } of scopes) {
+      const btn = document.createElement("button");
+      btn.className = "af-mini-btn";
+      btn.style.cssText = "display:block;width:100%;margin-bottom:4px;text-align:left;";
+      btn.textContent = label;
+      btn.addEventListener("click", async () => {
+        pop.classList.remove("open");
+        if (!confirm(`Reset scope "${scope}"?`)) return;
+        try {
+          const res = await fetch("/api/reset", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ scope }),
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            alert(`Reset failed: ${(err as any).error ?? res.status}`);
+          }
+        } catch (e) {
+          alert(`Reset failed: ${e}`);
+        }
+      });
+      pop.appendChild(btn);
+    }
 
     return pop;
   }

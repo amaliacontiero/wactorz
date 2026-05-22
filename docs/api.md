@@ -94,6 +94,52 @@ Send a message to an actor.
 
 ---
 
+### Cost Management
+
+#### `GET /api/cost`
+
+Return current LLM spend, the active period, and the configured limit.
+
+**Response** `200 OK`
+```json
+{
+  "period":        "daily",
+  "period_key":    "2026-05-12",
+  "spend_usd":     0.0067,
+  "limit_usd":     0.70,
+  "pct_used":      0.96,
+  "limit_reached": false,
+  "warning":       false
+}
+```
+
+`limit_usd` is `null` when no limit is set. `pct_used` is `null` when there is no limit.
+
+---
+
+#### `POST /api/cost/limit`
+
+Set or update the spend limit at runtime (persists across restarts, overrides env var).
+
+**Request body**
+```json
+{ "limit_usd": 0.70, "period": "daily" }
+```
+
+`period` must be `"daily"`, `"weekly"`, or `"monthly"`. Set `limit_usd` to `0` to disable enforcement.
+
+**Response** `200 OK` with the updated cost info object (same shape as `GET /api/cost`).
+
+---
+
+#### `POST /api/cost/reset`
+
+Clear accumulated spend for all periods (daily, weekly, monthly). Useful after changing the limit or correcting inflated counters.
+
+**Response** `200 OK` with the reset cost info object.
+
+---
+
 ### Home Assistant Map
 
 #### `GET /ha-map`

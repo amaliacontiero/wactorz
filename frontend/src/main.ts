@@ -115,6 +115,10 @@ const voice = new VoiceInput();
 const ioManager = new IOManager(mqtt, chatPanel);
 const ioBar = new IOBar(voice, ioManager);
 
+document.addEventListener("af-wake-toggle", () => ioBar.toggleWake());
+document.addEventListener("af-mic-start",   () => void ioBar.startMic());
+document.addEventListener("af-mic-stop",    () => ioBar.stopMic());
+
 const feed = new ActivityFeed();
 
 // ── Direct WebSocket chat (bypasses MQTT/IOAgent when server has registry) ────
@@ -201,6 +205,7 @@ wsChat.onStatePatch((agents, deletedId, stats) => {
   if (stats?.totalMessages !== undefined) scene.setTotalMessages(stats.totalMessages);
   agents.forEach((a) => {
     if (!a.agent_id) return;
+    if (deletedAgentIds.has(a.agent_id)) return;
     const rawState = (a.state ?? a.status ?? "running") as string;
     const state: AgentState =
       rawState === "paused"
@@ -371,6 +376,7 @@ mqtt.on("heartbeat", (payload) => {
 });
 
 mqtt.on("spawn", (payload) => {
+  if (deletedAgentIds.has(payload.agentId)) return;
   scene.onSpawn(payload);
   syncAgentViews();
   pushFeed({

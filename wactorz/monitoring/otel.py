@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 RegistryProvider = Callable[[], Any | None]
 
 _provider = None  # module-level handle so shutdown() can reach it
+_export_warned = False  # suppress repeated connection-error log spam
 
 
 def setup_otel(registry_provider: RegistryProvider) -> bool:
@@ -43,7 +44,10 @@ def setup_otel(registry_provider: RegistryProvider) -> bool:
         )
         from opentelemetry.metrics import Observation
         from opentelemetry.sdk.metrics import MeterProvider
-        from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+        from opentelemetry.sdk.metrics.export import (
+            MetricExportResult,
+            PeriodicExportingMetricReader,
+        )
         from opentelemetry.sdk.resources import SERVICE_NAME, Resource
     except ImportError:
         logger.warning(
@@ -56,7 +60,26 @@ def setup_otel(registry_provider: RegistryProvider) -> bool:
     export_interval_ms = int(os.getenv("OTEL_METRIC_EXPORT_INTERVAL", "60000"))
 
     resource = Resource({SERVICE_NAME: service_name})
-    exporter = OTLPMetricExporter(endpoint=f"{endpoint}/v1/metrics")
+    _base_exporter = OTLPMetricExporter(endpoint=f"{endpoint}/v1/metrics")
+
+    # Subclass the real exporter so SDK internals (e.g. _preferred_temporality)
+    # are inherited without needing to proxy each private attribute.
+    class _QuietExporter(OTLPMetricExporter):
+        def export(self, metrics_data, **kw) -> MetricExportResult:  # type: ignore[override]
+            global _export_warned
+            try:
+                return super().export(metrics_data, **kw)
+            except Exception as exc:
+                if not _export_warned:
+                    _export_warned = True
+                    logger.warning(
+                        "OTel export failed (further errors suppressed): %s — "
+                        "check OTEL_EXPORTER_OTLP_ENDPOINT in .env",
+                        exc,
+                    )
+                return MetricExportResult.FAILURE
+
+    exporter = _QuietExporter(endpoint=f"{endpoint}/v1/metrics")
     reader = PeriodicExportingMetricReader(
         exporter, export_interval_millis=export_interval_ms
     )

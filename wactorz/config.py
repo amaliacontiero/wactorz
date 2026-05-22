@@ -18,6 +18,16 @@ def _env_int(name: str, default: int) -> int:
     return int(value)
 
 
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    value = value.strip()
+    if not value:
+        return default
+    return float(value)
+
+
 DEV_MODE = _env_truthy("WACTORZ_DEV_MODE")
 
 _env_file = Path(__file__).parent / ".env"
@@ -59,6 +69,8 @@ class AppConfig:
     fuseki_dataset: str
     fuseki_user: str
     fuseki_password: str
+    llm_cost_limit_usd: float
+    llm_cost_limit_period: str
 
 
 CONFIG = AppConfig(
@@ -91,5 +103,7 @@ CONFIG = AppConfig(
     fuseki_url=os.getenv("FUSEKI_URL", "http://localhost:3030"),
     fuseki_dataset=os.getenv("FUSEKI_DATASET", "wactorz"),
     fuseki_user=os.getenv("FUSEKI_USER", "admin"),
-    fuseki_password=os.getenv("FUSEKI_PASSWORD", "admin")
+    fuseki_password=os.getenv("FUSEKI_PASSWORD", "admin"),
+    llm_cost_limit_usd=_env_float("LLM_COST_LIMIT_USD", 0.0),
+    llm_cost_limit_period=os.getenv("LLM_COST_LIMIT_PERIOD", "monthly"),
 )

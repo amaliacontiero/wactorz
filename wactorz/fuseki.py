@@ -1213,14 +1213,21 @@ def _parse_domains(raw: str | None) -> frozenset[str] | None:
 
 async def _run_with_retry(coro_factory: Any, label: str) -> None:
     """Run a bridge coroutine, reconnecting on error."""
+    _last_exc_str: str | None = None
     while True:
         try:
             await coro_factory()
+            _last_exc_str = None  # reset only after a successful run
         except KeyboardInterrupt:
             log.info("%s shutting down.", label)
             break
         except Exception as exc:
-            log.error("%s error: %s — reconnecting in 10 s …", label, exc)
+            exc_str = str(exc)
+            if exc_str != _last_exc_str:
+                log.warning("%s error: %s — will retry every 10 s", label, exc)
+                _last_exc_str = exc_str
+            else:
+                log.debug("%s still unavailable — retrying …", label)
             await asyncio.sleep(10)
 
 

@@ -1,5 +1,5 @@
 name: Wactorz
-version: "0.4.1"
+version: "0.4.2"
 slug: wactorz
 description: Actor-model multi-agent AI framework — spawn, coordinate and monitor AI agents at runtime.
 url: https://github.com/waldiez/wactorz
@@ -45,6 +45,10 @@ options:
   llm_provider: anthropic
   llm_model: claude-sonnet-4-6
   llm_api_key: ""
+
+  # Spend cap — set to 0 to disable. Period: daily, weekly, or monthly. Resets automatically.
+  llm_cost_limit_usd: 0
+  llm_cost_limit_period: monthly
 
   # Ollama (local LLM alternative — set llm_provider: ollama)
   ollama_url: "http://localhost:11434"
@@ -92,6 +96,8 @@ schema:
   llm_provider: list(anthropic|ollama|openai|gemini|nim)
   llm_model: str
   llm_api_key: str?
+  llm_cost_limit_usd: float
+  llm_cost_limit_period: list(daily|weekly|monthly)
   ollama_url: url
   mqtt_host: str
   mqtt_port: port

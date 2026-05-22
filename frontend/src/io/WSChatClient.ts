@@ -197,6 +197,25 @@ export class WSChatClient {
         return;
       }
 
+      // State reset broadcast — apply state patch then clear UI as needed
+      if (data["type"] === "reset") {
+        const patch = data["state"] as
+          | { agents?: StatePatchAgent[]; total_cost_usd?: number; total_messages?: number; log_feed?: LogFeedItem[] }
+          | undefined;
+        const stats: SnapshotStats = {};
+        if (patch?.total_cost_usd !== undefined) stats.totalCostUsd = patch.total_cost_usd;
+        if (patch?.total_messages !== undefined) stats.totalMessages = patch.total_messages;
+        this._onStatePatch?.(patch?.agents ?? [], undefined, stats);
+        if (patch?.log_feed?.length) this._onLogFeed?.(patch.log_feed);
+        const scope = String(data["scope"] ?? "");
+        if (scope === "chat" || scope === "all") {
+          document.dispatchEvent(new CustomEvent("af-reset-chat", {
+            detail: { agent: data["agent"] ?? null },
+          }));
+        }
+        return;
+      }
+
       // Server explicitly deleted an agent — remove it and apply rest of patch
       if (data["type"] === "delete_agent") {
         const patch = data["state"] as

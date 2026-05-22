@@ -1,11 +1,20 @@
 # Deployment
 
-Wactorz supports two deployment modes:
+Wactorz supports three deployment modes:
 
 | Mode | When to use |
 |---|---|
-| **Full Docker** | Simplest; everything in containers |
+| **Docker Hub** | New users; no repo clone needed — just Docker Desktop |
+| **Full Docker** | Full stack via `git clone`; everything in containers |
 | **Native binary** | Better SSH key access, faster cold start, smaller footprint |
+
+---
+
+## Docker Hub
+
+The fastest way to get started — no repo clone or Python needed. See the dedicated guide:
+
+→ **[Quickstart: Docker Hub](dockerhub.md)**
 
 ---
 
@@ -179,6 +188,8 @@ See `.env.example` for the full annotated list.  The most important ones:
 | `LLM_PROVIDER` | `anthropic` | `anthropic` / `openai` / `ollama` |
 | `LLM_MODEL` | `claude-sonnet-4-6` | Any model ID |
 | `LLM_API_KEY` | _(required for cloud providers)_ | API key — not needed for Ollama only |
+| `LLM_COST_LIMIT_USD` | `0` (disabled) | Hard spend cap per period — set `0` to disable |
+| `LLM_COST_LIMIT_PERIOD` | `monthly` | Reset period: `daily`, `weekly`, or `monthly` |
 | `MQTT_HOST` | `localhost` | Use `mosquitto` inside Docker |
 | `MQTT_PORT` | `1883` | |
 | `API_ADDR` | `0.0.0.0:8080` | REST listen address |

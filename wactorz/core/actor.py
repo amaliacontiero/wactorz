@@ -4,6 +4,7 @@ Every agent IS an actor. Actors communicate via message passing only.
 """
 
 import asyncio
+import sys
 import uuid
 import time
 import psutil
@@ -157,6 +158,15 @@ class Actor(ABC):
 
         # Background tasks
         self._tasks: list[asyncio.Task] = []
+
+        # Cached process handle for heartbeat metrics — one per actor so each
+        # has an independent cpu_percent baseline (interval=None, non-blocking).
+        self._proc: Optional[Any] = None
+        try:
+            self._proc = psutil.Process()
+            self._proc.cpu_percent(interval=None)  # prime the baseline
+        except Exception:
+            pass
 
         logger.info(f"[{self.name}] Actor created with id={self.actor_id}")
 
@@ -334,15 +344,48 @@ class Actor(ABC):
             except Exception as e:
                 logger.warning(f"[{self.name}] Heartbeat error: {e}")
 
+    def _estimate_memory_mb(self) -> float:
+        """Bounded deep-size walk over this actor's own data structures.
+        Uses only sys.getsizeof — no new deps, works on Windows."""
+        seen: set = set()
+
+        def _deep(obj: object, depth: int) -> int:
+            if depth > 5:
+                return 0
+            oid = id(obj)
+            if oid in seen:
+                return 0
+            seen.add(oid)
+            sz = sys.getsizeof(obj)
+            if isinstance(obj, dict):
+                sz += sum(_deep(k, depth + 1) + _deep(v, depth + 1) for k, v in obj.items())
+            elif isinstance(obj, (list, tuple, set, frozenset)):
+                sz += sum(_deep(item, depth + 1) for item in obj)
+            return sz
+
+        total = 0
+        for attr in ("_persistent_state", "_outbox", "metrics"):
+            val = getattr(self, attr, None)
+            if val is not None:
+                total += _deep(val, 0)
+        # Rough proxy for messages sitting in the mailbox (~512 B each)
+        total += self._mailbox.qsize() * 512
+        return total / (1024 * 1024)
+
     def _build_heartbeat(self) -> dict:
-        proc = psutil.Process()
+        cpu = 0.0
+        try:
+            if self._proc is not None:
+                cpu = self._proc.cpu_percent(interval=None)
+        except Exception:
+            pass
         return {
             "actor_id":  self.actor_id,
             "name":      self.name,
             "timestamp": time.time(),
             "state":     self.state.value,
-            "cpu":       proc.cpu_percent(interval=0.1),
-            "memory_mb": proc.memory_info().rss / 1024 / 1024,
+            "cpu":       cpu,
+            "memory_mb": self._estimate_memory_mb(),
             "task":      self._current_task_description(),
             "protected": self.protected,
         }
