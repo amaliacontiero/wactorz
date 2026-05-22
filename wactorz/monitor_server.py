@@ -1409,6 +1409,64 @@ async def delete_actor_handler(request):
     return web.Response(status=200, text=f"stopping ({routed})")
 
 
+async def reset_handler(request):
+    """POST /api/reset  —  clear stored state and broadcast a reset event.
+
+    Body (JSON):
+      scope   : "chat" | "state" | "metrics" | "spawns" | "all"  (required)
+      agent   : str  (optional — limit to one agent by name)
+    """
+    from aiohttp import web
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+
+    scope = body.get("scope", "")
+    agent = body.get("agent") or None
+
+    valid = {"chat", "state", "metrics", "spawns", "all"}
+    if scope not in valid:
+        return web.json_response(
+            {"error": f"scope must be one of {sorted(valid)}"}, status=400
+        )
+
+    from wactorz.reset import (
+        reset_chat, reset_agent_state, reset_metrics, reset_spawns,
+        reset_all, _reset_all_pickles,
+    )
+
+    if scope == "all":
+        reset_all(agent)
+    elif scope == "chat":
+        reset_chat(agent)
+    elif scope == "state":
+        if agent:
+            reset_agent_state(agent)
+        else:
+            _reset_all_pickles()
+    elif scope == "metrics":
+        reset_metrics(agent)
+    elif scope == "spawns":
+        reset_spawns(agent)
+
+    # Clear in-memory dashboard state for the affected agents
+    if scope in ("all", "chat", "metrics"):
+        if agent:
+            aid = next(
+                (k for k, v in state["agents"].items() if v.get("name") == agent), None
+            )
+            if aid:
+                state["agents"][aid].pop("cost_usd", None)
+                state["agents"][aid].pop("messages_processed", None)
+        else:
+            state["alerts"].clear()
+            state["log_feed"].clear()
+
+    await broadcast({"type": "reset", "scope": scope, "agent": agent, "state": _snapshot()})
+    return web.json_response({"status": "ok", "scope": scope, "agent": agent})
+
+
 async def pause_actor_handler(request):
     from aiohttp import web
     actor_id = request.match_info["actor_id"]
@@ -1886,6 +1944,7 @@ async def main(exit_on_failure: bool = False):
     app.router.add_get("/config",                config_handler)
     app.router.add_get("/api/feed",              feed_handler)
     app.router.add_get("/feed",                  feed_handler)
+    app.router.add_post("/api/reset",             reset_handler)
     app.router.add_post("/api/ha/sync",          ha_sync_handler)
     app.router.add_get("/favicon.svg",           index_handler)
     from .fuseki_proxy import fuseki_proxy_handler
