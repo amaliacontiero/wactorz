@@ -1,4 +1,38 @@
 """
+CATALOG AGENT — manual-agent
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Searches the internet for device manuals, downloads PDFs, extracts text,
+and answers questions about the device using the agent's LLM.
+
+SPAWN CONFIG
+────────────
+{
+  "name":        "manual-agent",
+  "type":        "dynamic",
+  "description": "Searches the internet for device manuals, downloads PDFs, extracts text, and answers questions using the agent's LLM.",
+  "capabilities": ["web_search", "pdf_extraction", "qa_assistant", "device_manuals"],
+  "install":     ["httpx", "pdfplumber", "duckduckgo-search"],
+  "input_schema": {
+    "action":   "str  — load_manual|ask|status|clear",
+    "device":   "str  — The device model name or query (for load_manual)",
+    "question": "str  — The question to ask about the loaded manual (for ask)"
+  },
+  "output_schema": {
+    "success":  "bool — True if operation succeeded",
+    "device":   "str  — Device model name",
+    "url":      "str  — URL of the downloaded manual PDF",
+    "pages":    "int  — Number of pages in the PDF",
+    "chars":    "int  — Character count of extracted text",
+    "preview":  "str  — Preview snippet of text",
+    "answer":   "str  — LLM generated answer to your question"
+  },
+  "poll_interval": 3600
+}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+
+AGENT_CODE = r'''
+"""
 ManualAgent — searches the internet for device manuals, downloads PDFs,
 extracts text, and answers questions using the agent's LLM.
 """
@@ -13,7 +47,7 @@ import time
 import urllib.parse
 from typing import Optional
 
-from ..core.actor import Actor, Message, MessageType
+from core.actor import Actor, Message, MessageType
 
 logger = logging.getLogger(__name__)
 
@@ -666,3 +700,4 @@ class ManualAgent(Actor):
             f"agents/{self.actor_id}/alerts",
             {"message": msg, "severity": severity, "timestamp": time.time()},
         )
+'''

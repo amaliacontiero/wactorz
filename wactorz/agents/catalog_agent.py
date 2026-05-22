@@ -223,14 +223,11 @@ def _build_catalog() -> dict:
                 "detection_active":    "bool",
                 "last_anomaly":        "dict|null",
             },
-            "poll_interval": 60,
+            "poll_interval": 3600,
             "code":          code,
         }
         logger.info("[catalog] Loaded anomaly-detector recipe")
 
-    return catalog
-    
-    
     # ── manual-agent ───────────────────────────────────────────────────
     code = _load_recipe("manual_agent.py")
     if code:
@@ -254,7 +251,7 @@ def _build_catalog() -> dict:
                 "preview":  "str  — Preview snippet of text",
                 "answer":   "str  — LLM generated answer to your question",
             },
-            "poll_interval": None, # Event-driven via direct actions/messages
+            "poll_interval": 3600, # Event-driven via direct actions/messages
             "code":          code,
         }
         logger.info("[catalog] Loaded manual-agent recipe")
