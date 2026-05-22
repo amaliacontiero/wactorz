@@ -129,6 +129,90 @@ async def _purge_agent_retained(agent_id: str) -> None:
             logger.debug(f"[purge] Failed to clear retained {topic}: {e}")
 
 
+async def _delete_agent(agent_id: str) -> str:
+    """Delete an agent properly regardless of whether it lives locally on this
+    process or on a remote node. Returns a short status string for logs.
+
+    Strategy:
+      1. Mark the actor_id deleted and pop the dashboard entry.
+      2. Try to route through main.delete_spawned_agent(name) — it owns the
+         spawn registry, knows the agent's node, updates desired_state, sends
+         the right MQTT stop signal, and clears the manifest. This is the
+         canonical path; it handles local + remote uniformly.
+      3. Fall back to direct MQTT if the registry isn't available (the monitor
+         is running in a separate process / MQTT-only mode):
+           - Remote → publish to nodes/<node>/stop using the node we captured
+             from heartbeats.
+           - Local → publish to agents/<id>/commands {"command": "stop"}.
+      4. Clear retained messages so old heartbeats don't come back on reconnect.
+    """
+    record = state["agents"].get(agent_id) or {}
+    name   = record.get("name") or agent_id
+    node   = (record.get("node") or "").strip()
+
+    _mark_deleted(agent_id)
+    state["agents"].pop(agent_id, None)
+
+    routed = "unknown"
+
+    if registry is not None:
+        # In-process: delegate to main, which owns the spawn registry and
+        # knows exactly how to clean up both local and remote agents.
+        main = registry.find_by_name("main")
+        if main is not None and hasattr(main, "delete_spawned_agent"):
+            try:
+                await main.delete_spawned_agent(name)
+                routed = f"via main.delete_spawned_agent({name!r})"
+            except Exception as e:
+                logger.warning(
+                    f"[delete] main.delete_spawned_agent('{name}') failed: {e}; "
+                    f"falling back to direct MQTT"
+                )
+                routed = "main path failed"
+
+        # If main wasn't reachable or the call failed, also try to stop a
+        # purely local actor through the registry directly. Useful for agents
+        # that exist in the registry but aren't in main's spawn registry yet
+        # (race window during startup).
+        if routed.startswith("via main") is False:
+            actor = registry.get(agent_id) or registry.find_by_name(name)
+            if actor is not None and not getattr(actor, "protected", False):
+                asyncio.create_task(actor.stop())
+                routed = "via local registry"
+
+    if routed in ("unknown", "main path failed"):
+        # MQTT-only mode (or main unavailable). Route by node if we have one.
+        if mqtt_client_ref:
+            if node:
+                try:
+                    await mqtt_client_ref.publish(
+                        f"nodes/{node}/stop",
+                        json.dumps({"name": name}),
+                    )
+                    routed = f"via nodes/{node}/stop"
+                except Exception as e:
+                    logger.warning(f"[delete] nodes/{node}/stop publish failed: {e}")
+            else:
+                try:
+                    await mqtt_client_ref.publish(
+                        f"agents/{agent_id}/commands",
+                        json.dumps({"command": "stop", "sender": "monitor",
+                                    "timestamp": time.time()}),
+                    )
+                    routed = f"via agents/{agent_id}/commands"
+                except Exception as e:
+                    logger.warning(f"[delete] commands publish failed: {e}")
+
+    # Always purge retained — even when main handled the delete, we want the
+    # dashboard's view to clear immediately rather than wait for tombstones.
+    asyncio.create_task(_purge_agent_retained(agent_id))
+
+    logger.info(
+        f"[delete] '{name}' (id={agent_id[:8]}, node={node or 'local'}) {routed}"
+    )
+    return routed
+
+
 # ── helpers ────────────────────────────────────────────────────────────────
 
 def _chat_mode() -> str:
@@ -722,25 +806,7 @@ async def handle_command(cmd: dict):
             )
             await broadcast({"type": "patch", "state": _snapshot()})
         elif command == "delete":
-            _mark_deleted(agent_id)
-            state["agents"].pop(agent_id, None)
-            if registry is not None:
-                actor = registry.get(agent_id)
-                if actor and not getattr(actor, "protected", False):
-                    # Release from supervision before stopping so the watch_loop
-                    # doesn't race to restart the actor while we're tearing it down.
-                    sv = getattr(registry, "_supervisor_ref", None)
-                    if sv is not None:
-                        sv.release(actor.name)
-                    # Stop the actor then unregister it so actors_handler stops
-                    # returning it on the next REST poll (the ghost-card fix).
-                    async def _stop_and_unregister(a=actor, aid=agent_id):
-                        await a.stop()
-                        await registry.unregister(aid)
-                    asyncio.create_task(_stop_and_unregister())
-            # Clear retained MQTT messages so the broker stops re-delivering
-            # them on reconnect (which would otherwise crash parse_topic).
-            asyncio.create_task(_purge_agent_retained(agent_id))
+            await _delete_agent(agent_id)
             await broadcast({"type": "delete_agent", "agent_id": agent_id, "state": _snapshot()})
     except Exception as e:
         logger.error(f"[cmd] Publish failed: {e}")
@@ -814,6 +880,11 @@ def parse_topic(topic: str, payload_str: str):
                 ag["mem"]   = data.get("memory_mb",  0)
                 ag["task"]  = data.get("task",       "idle")
                 ag["state"] = data.get("state",      "unknown")
+                # Remote agents' heartbeats include "node" — capture it so the
+                # dashboard delete path can route the stop to the right runner.
+                # Local agents don't set this field; absence means "local".
+                if data.get("node"):
+                    ag["node"] = data["node"]
             if agent_id in state["agents"]:
                 logger.info(f"[MQTT] Heartbeat: {state['agents'][agent_id].get('name', agent_id[:8])}")
 
@@ -1318,19 +1389,26 @@ async def send_message_handler(request):
 async def delete_actor_handler(request):
     from aiohttp import web
     actor_id = request.match_info["actor_id"]
-    if registry is None:
-        return web.json_response({"error": "registry not available"}, status=503)
-    actor = registry.get(actor_id) or registry.find_by_name(actor_id)
-    if actor is None:
-        return web.json_response({"error": "actor not found"}, status=404)
-    if getattr(actor, "protected", False):
+    # Resolve the dashboard's record first so remote agents (which aren't in
+    # the local registry) can still be deleted via this endpoint. The earlier
+    # 503/404 short-circuit made remote deletes impossible.
+    record = state["agents"].get(actor_id) or {}
+    if not record:
+        # Fall back to local-registry lookup so a name-based ID still works.
+        if registry is not None:
+            actor = registry.get(actor_id) or registry.find_by_name(actor_id)
+            if actor is None:
+                return web.json_response({"error": "actor not found"}, status=404)
+            if getattr(actor, "protected", False):
+                return web.json_response({"error": "actor is protected"}, status=403)
+            actor_id = actor.actor_id
+        else:
+            return web.json_response({"error": "actor not found"}, status=404)
+    if record.get("protected"):
         return web.json_response({"error": "actor is protected"}, status=403)
-    _mark_deleted(actor.actor_id)
-    state["agents"].pop(actor.actor_id, None)
-    asyncio.create_task(actor.stop())
-    asyncio.create_task(_purge_agent_retained(actor.actor_id))
-    await broadcast({"type": "delete_agent", "agent_id": actor.actor_id, "state": _snapshot()})
-    return web.Response(status=200, text="stopping")
+    routed = await _delete_agent(actor_id)
+    await broadcast({"type": "delete_agent", "agent_id": actor_id, "state": _snapshot()})
+    return web.Response(status=200, text=f"stopping ({routed})")
 
 
 async def pause_actor_handler(request):
@@ -1832,7 +1910,37 @@ async def main(exit_on_failure: bool = False):
 
 
 def cli_main() -> None:
-    asyncio.run(main(exit_on_failure=True))
+    if sys.platform == "win32":
+        # On Windows we manage the loop manually so paho-mqtt's __del__ doesn't
+        # race against a closed loop during interpreter shutdown, which would
+        # produce spurious "RuntimeError: Event loop is closed" noise from
+        # aiomqtt's _on_socket_close callback.
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(main(exit_on_failure=True))
+        except (KeyboardInterrupt, SystemExit):
+            pass
+        finally:
+            # Cancel all pending tasks so paho gets a chance to close its
+            # sockets while the loop is still alive.
+            try:
+                pending = asyncio.all_tasks(loop)
+                if pending:
+                    loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True)
+                    )
+            except Exception:
+                pass
+            # Brief sleep lets paho's internal socket-close callback fire
+            # before we seal the loop for good.
+            try:
+                loop.run_until_complete(asyncio.sleep(0.25))
+            except Exception:
+                pass
+            loop.close()
+    else:
+        asyncio.run(main(exit_on_failure=True))
 
 
 if __name__ == "__main__":
