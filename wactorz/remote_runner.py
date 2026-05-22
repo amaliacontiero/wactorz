@@ -951,6 +951,35 @@ class _RemoteAgent:
             except Exception:
                 pass
 
+    def _delete_state(self) -> bool:
+        """
+        Permanently remove the agent's on-disk JSON state file.
+
+        This is what makes a delete (vs a stop) actually irreversible — without
+        it, the next runner startup would reload state.json via _load_state()
+        and the agent's full state would silently come back even after the
+        spawn registry entry was cleared.
+
+        Also wipes in-memory state so any post-stop publishes can't accidentally
+        rewrite the file. Returns True iff the file existed and was removed.
+        """
+        # Wipe in-memory state first so a late _save_state() call (e.g. from
+        # the supervisor loop) can't re-create the file we're about to delete.
+        self._persistent_state = {}
+        removed = False
+        try:
+            if os.path.exists(self._state_path):
+                os.unlink(self._state_path)
+                removed = True
+                logger.info(
+                    f"[{self.name}] Deleted persistent state file: {self._state_path}"
+                )
+        except Exception as e:
+            logger.warning(
+                f"[{self.name}] Failed to delete state file {self._state_path}: {e}"
+            )
+        return removed
+
     # ── MQTT publish helper ───────────────────────────────────────────────────
 
     async def _publish(self, topic: str, data: Any):
@@ -1298,10 +1327,60 @@ class _RemoteRunner:
              "child_name": name, "node": self.node_name, "timestamp": time.time()},
         )
 
-    async def stop_agent(self, name: str):
+    async def stop_agent(self, name: str, delete: bool = False):
+        """
+        Stop an agent. When `delete=True`, also wipe everything that would
+        otherwise survive the stop:
+          - the JSON state file on disk (~/wactorz/state/<name>_state.json)
+          - the retained MQTT topics for this agent (status / heartbeat /
+            metrics / manifest / logs / errors / detections / results /
+            completed / spawned) so the broker stops re-delivering them on
+            reconnect.
+
+        Without delete=True, this is a plain stop: state is flushed to disk
+        by agent.stop() and the next spawn or runner restart picks it back up.
+        """
         agent = self._agents.pop(name, None)
-        if agent:
-            await agent.stop()
+        if not agent:
+            return
+        # Remember actor_id before stop() in case the agent clears attributes.
+        actor_id = agent.actor_id
+
+        await agent.stop()
+
+        if delete:
+            # agent.stop() already wrote the state file as part of its normal
+            # shutdown. Undo that here, AFTER the agent is fully stopped, so
+            # no later publish or supervisor restart can recreate it.
+            agent._delete_state()
+            await self._purge_agent_retained(actor_id)
+            logger.info(f"[runner] Agent '{name}' permanently deleted from this node.")
+
+    async def _purge_agent_retained(self, actor_id: str) -> None:
+        """
+        Clear retained MQTT messages for an agent that has just been deleted.
+
+        Empty-payload-with-retain is the MQTT idiom for "remove this retained
+        topic" — without it, the broker keeps re-delivering the agent's last
+        status / heartbeat / metrics / manifest etc. to every subscriber that
+        connects later (including a freshly restarted monitor or main), which
+        is what makes deleted agents reappear on restart.
+
+        The runner is the right place to do this because it has the broker
+        connection already open and knows the actor_id, so the purge is robust
+        even when main is offline or unreachable at delete time.
+        """
+        topics = (
+            "status", "heartbeat", "metrics", "logs", "spawned",
+            "manifest", "errors", "detections", "results", "completed",
+        )
+        for metric in topics:
+            try:
+                await self.publish(f"agents/{actor_id}/{metric}", b"", retain=True)
+            except Exception as e:
+                logger.debug(
+                    f"[runner] Failed to clear retained agents/{actor_id}/{metric}: {e}"
+                )
 
     async def stop_all(self):
         for name in list(self._agents):
@@ -1481,8 +1560,21 @@ class _RemoteRunner:
                             asyncio.create_task(self.publish(topic_str, b"", retain=True))
 
                         elif topic_str == f"nodes/{self.node_name}/stop":
-                            name = data.get("name") if isinstance(data, dict) else str(data)
-                            asyncio.create_task(self.stop_agent(name))
+                            # Payload formats accepted:
+                            #   {"name": "foo"}                → plain stop, state preserved
+                            #   {"name": "foo", "delete": true} → permanent delete:
+                            #     wipes state file + retained MQTT topics
+                            #   "foo"                          → legacy bare-name plain stop
+                            if isinstance(data, dict):
+                                name      = data.get("name")
+                                do_delete = bool(data.get("delete", False))
+                            else:
+                                name      = str(data)
+                                do_delete = False
+                            if name:
+                                asyncio.create_task(
+                                    self.stop_agent(name, delete=do_delete)
+                                )
 
                         elif topic_str == f"nodes/{self.node_name}/migrate":
                             # Migrate a running agent to another node

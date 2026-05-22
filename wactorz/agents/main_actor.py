@@ -2253,25 +2253,55 @@ class MainActor(LLMAgent):
 
                 return note_prefix + f"Agent '{agent_name}' {_verb}d."
 
-        # ── /agents stop|delete|pause <name> ───────────────────────────────
+        # ── /agents stop|delete|pause|remove <name> ─────────────────────────
+        # NOTE: stop and pause are reversible (state preserved, spawn registry
+        # entry kept if you ever want to /agents restart). delete and remove
+        # are PERMANENT — they go through delete_spawned_agent(), which wipes
+        # the on-disk state file, purges retained MQTT topics, and removes the
+        # entry from the spawn registry. Picking the wrong verb here is the
+        # difference between "the agent comes back on next runner restart" and
+        # "the agent is gone forever".
         for _cmd in ("/agents stop ", "/agents delete ", "/agents pause ", "/agents remove "):
             if stripped.startswith(_cmd):
                 agent_name = stripped[len(_cmd):].strip()
-                reg        = self._get_spawn_registry()
-                node       = reg.get(agent_name, {}).get("node", "").strip()
+                verb       = _cmd.strip().split()[-1]   # "stop" | "delete" | "pause" | "remove"
+                is_delete  = verb in ("delete", "remove")
 
-                # Remove from spawn registry so it doesn't restore on restart
-                self._remove_from_spawn_registry(agent_name)
+                if is_delete:
+                    # Delegate to the canonical permanent-delete helper so the
+                    # chat path and the LLM <delete> path behave identically.
+                    try:
+                        await self.delete_spawned_agent(agent_name)
+                    except Exception as e:
+                        logger.exception(f"[{self.name}] delete_spawned_agent('{agent_name}') failed")
+                        return note_prefix + f"Delete of '{agent_name}' failed: {e}"
+                    return note_prefix + (
+                        f"Agent '{agent_name}' permanently deleted "
+                        f"(state file removed, retained MQTT topics cleared)."
+                    )
+
+                # stop / pause — reversible. Keep state and spawn-registry entry.
+                reg  = self._get_spawn_registry()
+                node = reg.get(agent_name, {}).get("node", "").strip()
+                # Past-tense rendering: stop → stopped, pause → paused.
+                # Both are double-the-consonant + ed (English regular doubling
+                # for monosyllabic CVC verbs); just hard-code the table.
+                past = {"stop": "stopped", "pause": "paused"}.get(verb, f"{verb}ped")
 
                 if node:
-                    # Remote agent — publish stop + clear desired state
-                    await self._update_node_desired_state(node, remove_name=agent_name)
+                    # Remote agent — plain stop (no delete flag), keep registry
+                    # so /agents restart can resume it cleanly later.
                     await self._mqtt_publish(
                         f"nodes/{node}/stop", {"name": agent_name}, qos=1
                     )
-                    await self._clear_agent_manifest(agent_name)
-                    self._record_agent_deletion(agent_name, reason=f"manually stopped via /agents on node '{node}'")
-                    return note_prefix + f"Stop signal sent to '{agent_name}' on node '{node}'."
+                    self._record_agent_deletion(
+                        agent_name,
+                        reason=f"manually {past} via /agents on node '{node}'"
+                    )
+                    return note_prefix + (
+                        f"Stop signal sent to '{agent_name}' on node '{node}'. "
+                        f"State is preserved — use /agents restart {agent_name} to resume."
+                    )
                 else:
                     # Local agent
                     if self._registry:
@@ -2280,9 +2310,13 @@ class MainActor(LLMAgent):
                             actor_id = target.actor_id
                             await self._registry.unregister(actor_id)
                             await target.stop()
-                            await self._clear_agent_manifest(agent_name, actor_id)
-                            self._record_agent_deletion(agent_name, reason="manually stopped via /agents")
-                            return note_prefix + f"Agent '{agent_name}' stopped."
+                            self._record_agent_deletion(
+                                agent_name, reason=f"manually {past} via /agents"
+                            )
+                            return note_prefix + (
+                                f"Agent '{agent_name}' {past}. "
+                                f"State is preserved — use /agents restart {agent_name} to resume."
+                            )
                     return note_prefix + f"Agent '{agent_name}' not found locally."
 
         # ── /agents restart <name> ──────────────────────────────────────────
@@ -5421,26 +5455,129 @@ class MainActor(LLMAgent):
             await self.send(target.actor_id, command)
 
     async def delete_spawned_agent(self, name: str):
+        """
+        Permanently delete an agent.
+
+        Unlike a stop (which preserves state so the agent can resume later),
+        delete removes EVERY trace so a future spawn with the same name
+        starts truly clean:
+
+          - Spawn registry entry removed (so no auto-respawn on restart).
+          - For remote agents: the `nodes/<node>/stop` message carries
+            ``delete=True`` so the runner unlinks <name>_state.json on disk
+            and purges this agent's retained MQTT topics from the broker.
+          - For local agents: the underlying PersistenceAPI.purge() wipes
+            SQLite kv_store rows, Redis ephemeral keys, and the agent's
+            state.pkl directory.
+          - Either way, main also publishes empty retained payloads on the
+            per-agent MQTT topics as a defensive second pass — if the runner
+            is offline or main is acting alone, the broker is still cleared.
+        """
         # Find node before removing from registry
-        reg = self._get_spawn_registry()
+        reg  = self._get_spawn_registry()
         node = reg.get(name, {}).get("node", "").strip()
+
+        # Capture/derive the deterministic actor_id BEFORE we tear anything down,
+        # so we can purge per-agent retained topics even after the local actor
+        # is gone from the registry.
+        actor_id: Optional[str] = None
+        if self._registry:
+            target = self._registry.find_by_name(name)
+            if target:
+                actor_id = target.actor_id
+        if not actor_id:
+            # Remote agents (and local ones missing from the registry) follow the
+            # same uuid5 scheme used by _RemoteAgent and Actor — derive it.
+            actor_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"wactorz.actor.{name}"))
 
         self._remove_from_spawn_registry(name)
 
-        # Update desired state so Pi doesn't re-spawn on reconcile
+        # Remote path — let the runner do the heavy work on the edge node.
         if node:
             await self._update_node_desired_state(node, remove_name=name)
-            await self._mqtt_publish(f"nodes/{node}/stop", {"name": name}, qos=1)
-            # Clear cached manifest for the remote agent
-            await self._clear_agent_manifest(name)
+            await self._mqtt_publish(
+                f"nodes/{node}/stop",
+                {"name": name, "delete": True},
+                qos=1,
+            )
+            await self._clear_agent_manifest(name, actor_id)
+            await self._purge_agent_retained_topics(actor_id)
             self._record_agent_deletion(name, reason=f"deleted from node '{node}'")
             return
 
+        # Local path — stop the actor and wipe its persistence directly.
         if self._registry:
             target = self._registry.find_by_name(name)
             if target:
                 actor_id = target.actor_id
                 await self._registry.unregister(actor_id)
                 await target.stop()
+                await self._purge_local_agent_persistence(target, name)
                 await self._clear_agent_manifest(name, actor_id)
+                await self._purge_agent_retained_topics(actor_id)
                 self._record_agent_deletion(name, reason="deleted")
+                return
+
+        # Agent wasn't in the registry — still purge the broker side so any
+        # stale retained messages from a previous incarnation are cleared.
+        await self._clear_agent_manifest(name, actor_id)
+        await self._purge_agent_retained_topics(actor_id)
+        self._record_agent_deletion(name, reason="deleted (no live actor found)")
+
+    async def _purge_agent_retained_topics(self, actor_id: str) -> None:
+        """
+        Publish empty retained payloads on every per-agent MQTT topic so the
+        broker stops re-delivering them on later reconnects.
+
+        Mirrors the same purge done by the remote runner on delete and by the
+        monitor process — running it from all three sides is intentional, so
+        deletion succeeds even when one side is offline.
+        """
+        if not actor_id:
+            return
+        for metric in ("status", "heartbeat", "metrics", "logs", "spawned",
+                       "manifest", "errors", "detections", "results", "completed"):
+            try:
+                await self._mqtt_publish(
+                    f"agents/{actor_id}/{metric}", b"", retain=True
+                )
+            except Exception as e:
+                logger.debug(
+                    f"[{self.name}] Failed to clear retained agents/{actor_id}/{metric}: {e}"
+                )
+
+    async def _purge_local_agent_persistence(self, actor, name: str) -> None:
+        """
+        For a local actor: hard-delete its persisted state across all
+        backends (SQLite kv_store rows, Redis ephemeral keys, pickle file).
+
+        Uses the actor's own PersistenceAPI when available so the right
+        databases are touched. Falls back to a best-effort filesystem cleanup
+        if the new API isn't wired up (legacy pickle-only mode).
+        """
+        # Preferred path: actor has the unified PersistenceAPI.
+        api = getattr(actor, "_persistence_api", None) or getattr(actor, "_persistence", None)
+        if api is not None and hasattr(api, "purge"):
+            try:
+                api.purge()
+                return
+            except Exception as e:
+                logger.warning(
+                    f"[{self.name}] PersistenceAPI.purge() failed for '{name}': {e} — "
+                    f"falling back to filesystem cleanup"
+                )
+
+        # Legacy fallback: nuke the agent's pickle directory directly.
+        pdir = getattr(actor, "_persistence_dir", None)
+        if pdir is not None:
+            try:
+                import shutil
+                pdir_path = str(pdir)
+                shutil.rmtree(pdir_path, ignore_errors=True)
+                logger.info(
+                    f"[{self.name}] Removed local persistence dir for '{name}': {pdir_path}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[{self.name}] Could not remove persistence dir for '{name}': {e}"
+                )

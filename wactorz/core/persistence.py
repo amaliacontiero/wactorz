@@ -258,6 +258,20 @@ class WactorzDB:
         )
         self._conn.commit()
 
+    def kv_purge_agent(self, agent: str) -> int:
+        """
+        Hard-delete EVERY kv_store row for a given agent. Used when an agent
+        is permanently deleted (not just stopped) so its persisted state does
+        not survive into the next process lifetime.
+
+        Returns the number of rows removed.
+        """
+        cur = self._conn.execute(
+            "DELETE FROM kv_store WHERE agent=?", (agent,)
+        )
+        self._conn.commit()
+        return cur.rowcount or 0
+
     def kv_all(self, agent: str) -> dict:
         """Return all key-value pairs for an agent."""
         rows = self._conn.execute(
@@ -626,9 +640,28 @@ class PickleStore:
         return {}
 
     def delete(self, agent_name: str):
+        """
+        Remove the agent's state.pkl AND its containing directory.
+
+        Without removing the directory, a subsequent re-spawn of an agent
+        with the same name would find an empty folder rather than a truly
+        clean slate — harmless but easy to misread when debugging.
+        """
         path = self._path(agent_name)
         if path.exists():
-            path.unlink()
+            try:
+                path.unlink()
+            except Exception as e:
+                logger.warning(f"[Persistence] Pickle unlink failed for {agent_name}: {e}")
+                return
+        # Try to drop the parent directory too. rmdir only succeeds if empty,
+        # which is what we want — never remove a folder a user populated.
+        parent = path.parent
+        try:
+            if parent.exists() and not any(parent.iterdir()):
+                parent.rmdir()
+        except Exception as e:
+            logger.debug(f"[Persistence] Pickle rmdir skipped for {parent}: {e}")
 
 
 # ── Unified Persistence API ───────────────────────────────────────────────
@@ -727,6 +760,47 @@ class PersistenceAPI:
                 result[key] = val
         result.update(self.pickle.load(self.agent))
         return result
+
+    def purge(self) -> dict:
+        """
+        Permanently delete EVERY stored value for this agent across all
+        backends (SQLite kv_store, Redis ephemeral keys, pickle state file).
+
+        Use this only when the agent is being fully deleted — not on stop or
+        restart. Returns a small summary dict, useful for logging:
+
+            {"sqlite_rows": int, "redis_keys": int, "pickle_deleted": bool}
+        """
+        summary = {"sqlite_rows": 0, "redis_keys": 0, "pickle_deleted": False}
+
+        # 1. SQLite — drop every row this agent owns in kv_store.
+        try:
+            summary["sqlite_rows"] = self.db.kv_purge_agent(self.agent)
+        except Exception as e:
+            logger.warning(f"[Persistence] SQLite purge failed for {self.agent}: {e}")
+
+        # 2. Redis — only the known ephemeral keys live there.
+        for key in _REDIS_KEYS:
+            try:
+                self.redis.delete(f"{self.agent}:{key}")
+                summary["redis_keys"] += 1
+            except Exception as e:
+                logger.debug(f"[Persistence] Redis delete {key} failed: {e}")
+
+        # 3. Pickle — remove the agent's state.pkl on disk.
+        try:
+            self.pickle.delete(self.agent)
+            summary["pickle_deleted"] = True
+        except Exception as e:
+            logger.warning(f"[Persistence] Pickle delete failed for {self.agent}: {e}")
+
+        logger.info(
+            f"[Persistence] Purged agent '{self.agent}': "
+            f"{summary['sqlite_rows']} SQLite rows, "
+            f"{summary['redis_keys']} Redis keys, "
+            f"pickle_deleted={summary['pickle_deleted']}"
+        )
+        return summary
 
 
 # ── Migration helper ───────────────────────────────────────────────────────
