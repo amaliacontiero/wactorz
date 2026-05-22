@@ -203,7 +203,7 @@ docker<span class="w"> </span>compose<span class="w"> </span>-f<span class="w"> 
 <p>In this mode:
 - <code>run.sh</code> defaults to the Python backend unless <code>WACTORZ_BACKEND</code> overrides it.
 - The Python backend defaults to <code>INTERFACE=rest</code> and <code>PORT=8080</code>.
-- The primary frontend is <code>frontend/index.html</code>, not the legacy <code>monitor.html</code>.</p>
+- The primary frontend is <code>frontend/index.html</code> (built to <code>static/app/</code>).</p>
 <h3 id="stop-mock-stack">Stop mock stack</h3>
 <div class="highlight"><pre><span></span><code>docker<span class="w"> </span>compose<span class="w"> </span>-f<span class="w"> </span>compose.dev.yaml<span class="w"> </span>down
 </code></pre></div>

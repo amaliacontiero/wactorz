@@ -1147,8 +1147,6 @@ async def index_handler(request):
     for candidate in [
         FRONTEND_DIST / "index.html",
         _find_dir("frontend") / "index.html",
-        _pkg / "monitor.html",
-        _root / "monitor.html",
     ]:
         if candidate.exists():
             ingress_path = request.headers.get("X-Ingress-Path", "").rstrip("/")

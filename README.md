@@ -105,7 +105,7 @@ This replaces all previous keyword heuristics with a single LLM classification s
 | `interfaces/chat_interfaces.py` | I/O | CLI (streaming), REST, Discord, WhatsApp — all call `process_user_input[_stream]` |
 | `interfaces/mcp_server.py` | I/O | MCP server exposing Wactorz and Home Assistant tools to MCP-compatible clients |
 | `monitor_server.py` | I/O | MQTT→WebSocket bridge that feeds the live dashboard |
-| `monitor.html` | I/O | Real-time web dashboard — agent cards, logs, cost meters, error alerts |
+| `static/app/` | I/O | Real-time web dashboard (Vite/Babylon.js SPA) — agent cards, logs, cost meters, error alerts |
 
 ---
 
@@ -801,7 +801,7 @@ Set `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_WHATSAPP_FROM` and st
 
 ### Live Dashboard
 
-Start `monitor_server.py` alongside wactorz. Open `monitor.html` in a browser. The dashboard shows real-time agent cards, log streams, token cost meters, spawn/stop controls, and error alerts — all fed via MQTT over WebSocket.
+Start `monitor_server.py` alongside wactorz. Open `http://localhost:8888` in a browser. The dashboard shows real-time agent cards, log streams, token cost meters, spawn/stop controls, and error alerts — all fed via MQTT over WebSocket.
 
 ---
 
@@ -1307,7 +1307,7 @@ wactorz/
 ├── main.py                                    Entry point — CLI args, actor system setup, supervision tree
 ├── remote_runner.py                           Self-contained edge node runner — deploy to any Pi or machine
 ├── monitor_server.py                          MQTT → WebSocket bridge for dashboard
-├── monitor.html                               Live web dashboard
+├── static/app/                                Live web dashboard (Vite/Babylon.js SPA)
 ├── fix_history.py                             One-time corrupted history cleanup utility
 ├── requirements.txt
 │
