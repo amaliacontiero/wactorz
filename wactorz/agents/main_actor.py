@@ -5510,6 +5510,9 @@ class MainActor(LLMAgent):
             target = self._registry.find_by_name(name)
             if target:
                 actor_id = target.actor_id
+                sv = getattr(self._registry, "_supervisor_ref", None)
+                if sv is not None:
+                    sv.release(name)
                 await self._registry.unregister(actor_id)
                 await target.stop()
                 await self._purge_local_agent_persistence(target, name)

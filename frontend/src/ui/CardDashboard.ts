@@ -121,6 +121,7 @@ export class CardDashboard {
   private _evChunk: ((e: Event) => void) | null = null;
   private _evEnd: ((e: Event) => void) | null = null;
   private _evConn: ((e: Event) => void) | null = null;
+  private _evResetChat: ((e: Event) => void) | null = null;
 
   private get haUrl(): string | null {
     return localStorage.getItem("wactorz-ha-url") || null;
@@ -465,6 +466,16 @@ export class CardDashboard {
     document.addEventListener("af-stream-chunk", this._evChunk);
     document.addEventListener("af-stream-end", this._evEnd);
     document.addEventListener("af-connection-status", this._evConn);
+
+    this._evResetChat = (e: Event) => {
+      const agent = (e as CustomEvent).detail?.agent as string | null;
+      this.chatMessages = agent
+        ? this.chatMessages.filter((m) => m.from !== agent && m.from !== "user")
+        : [];
+      this._historyLoaded.clear();
+      if (this.view === "chat") this._renderChatThread();
+    };
+    document.addEventListener("af-reset-chat", this._evResetChat);
   }
 
   private _unwireEvents(): void {
@@ -487,6 +498,10 @@ export class CardDashboard {
     if (this._evConn) {
       document.removeEventListener("af-connection-status", this._evConn);
       this._evConn = null;
+    }
+    if (this._evResetChat) {
+      document.removeEventListener("af-reset-chat", this._evResetChat);
+      this._evResetChat = null;
     }
   }
 
@@ -2173,14 +2188,27 @@ export class CardDashboard {
       if (!popover.contains(e.target as Node)) popover.classList.remove("open");
     });
 
-    // const btn3d = document.createElement("button");
-    // btn3d.className = "af-view-btn";
-    // btn3d.style.marginLeft = "8px";
-    // btn3d.textContent = "⊞ Social";
-    // btn3d.addEventListener("click", () => {
-    //   document.dispatchEvent(new CustomEvent("theme-change", { detail: { theme: "social" } }));
-    // });
-    // right.appendChild(btn3d);
+    // ↺ Reset button → popover with scope choices
+    const resetBtn = document.createElement("button");
+    resetBtn.className = "af-view-btn";
+    resetBtn.title = "Clear stored state";
+    resetBtn.textContent = "↺";
+    right.appendChild(resetBtn);
+
+    const resetPop = this._buildResetPopover();
+    document.body.appendChild(resetPop);
+    resetBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const open = resetPop.classList.toggle("open");
+      if (open) {
+        const r = resetBtn.getBoundingClientRect();
+        resetPop.style.top   = `${r.bottom + 6}px`;
+        resetPop.style.right = `${window.innerWidth - r.right}px`;
+      }
+    });
+    document.addEventListener("click", (e) => {
+      if (!resetPop.contains(e.target as Node)) resetPop.classList.remove("open");
+    });
 
     header.append(left, center, right);
 
@@ -3125,6 +3153,52 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
 
     volRow.append(volIcon, volSlider);
     pop.appendChild(volRow);
+
+    return pop;
+  }
+
+  private _buildResetPopover(): HTMLElement {
+    const pop = document.createElement("div");
+    pop.className = "af-audio-popover glass";
+    pop.style.cssText = "min-width:180px;padding:10px 12px;";
+
+    const title = document.createElement("div");
+    title.textContent = "Clear stored state";
+    title.style.cssText = "font-size:11px;opacity:.55;margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em;";
+    pop.appendChild(title);
+
+    const scopes: { scope: string; label: string }[] = [
+      { scope: "chat",    label: "💬 Chat history" },
+      { scope: "metrics", label: "📊 Metrics & costs" },
+      { scope: "spawns",  label: "🚀 Spawn registry" },
+      { scope: "state",   label: "🗂 Agent state files" },
+      { scope: "all",     label: "🗑 Wipe everything" },
+    ];
+
+    for (const { scope, label } of scopes) {
+      const btn = document.createElement("button");
+      btn.className = "af-mini-btn";
+      btn.style.cssText = "display:block;width:100%;margin-bottom:4px;text-align:left;";
+      btn.textContent = label;
+      btn.addEventListener("click", async () => {
+        pop.classList.remove("open");
+        if (!confirm(`Reset scope "${scope}"?`)) return;
+        try {
+          const res = await fetch("/api/reset", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ scope }),
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            alert(`Reset failed: ${(err as any).error ?? res.status}`);
+          }
+        } catch (e) {
+          alert(`Reset failed: ${e}`);
+        }
+      });
+      pop.appendChild(btn);
+    }
 
     return pop;
   }

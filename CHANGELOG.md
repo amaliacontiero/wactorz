@@ -612,7 +612,7 @@ One round-trip instead of zero, live state every time.
 - **MQTT TCP bridge** in `monitor_server.py` -- `/mqtt` WebSocket endpoint now falls back to raw TCP (port 1883) when Mosquitto's WS listener (port 9001) is unavailable
 - **Web UI auto-start** -- `wactorz` CLI spawns the monitor server as a quiet background asyncio task (`--no-monitor` to opt out, `--monitor-port` to override port 8888)
 - **`/api/actors` REST endpoint** on Python monitor server -- returns live agent state from MQTT-derived in-memory store
-- **`wactorz[all]` wheel** now bundles `static/app/` and `monitor.html` via hatchling `force-include`; custom build hook rebuilds frontend when stale
+- **`wactorz[all]` wheel** now bundles `static/app/` via hatchling `force-include`; custom build hook rebuilds frontend when stale
 - **`wactorz/_version.py`** -- single source of version truth, imported by `__init__.py` and `pyproject.toml`
 - **Rust WS bridge** -- `/mqtt` proxy route added alongside `/ws`; `WsBridge` now tracks MonitorState and broadcasts `full_snapshot`/`patch`/`delete_agent` to `/ws` clients
 - **`scripts/build.py`** -- clean build script (hatchling + twine) with `--upload` flag for PyPI
