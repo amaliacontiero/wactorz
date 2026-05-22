@@ -3860,8 +3860,85 @@ class MainActor(LLMAgent):
         )
         return actor
 
+    async def _apply_initial_state(self, name: str, config: dict) -> None:
+        """
+        Load a migrated state snapshot into the per-agent persistence layer
+        BEFORE the agent is spawned.
+
+        ``config["_initial_state"]`` is the dict shipped over MQTT from the
+        source node (or assembled by main when migrating local → remote and
+        then back). We pop it from the config (so it isn't saved into the
+        spawn registry) and write it through PersistenceAPI.load_snapshot()
+        so that when the new actor runs its on_start() and calls recall(),
+        the migrated conversation_history / counters / etc. are already there.
+
+        Without this hop, _initial_state arrives in the config dict but is
+        completely ignored — the local agent starts with an empty memory
+        regardless of what was shipped from the source node.
+
+        Called for BOTH local LLMAgent and local DynamicAgent spawns. No-op
+        when there's no snapshot or when the unified PersistenceAPI isn't
+        wired up (legacy pickle-only deployments).
+        """
+        snapshot = config.pop("_initial_state", None)
+        if not snapshot or not isinstance(snapshot, dict):
+            return
+
+        try:
+            from ..core.persistence import (
+                PersistenceAPI, get_db, get_redis, get_pickle_store,
+            )
+        except Exception as e:
+            logger.debug(
+                f"[{self.name}] PersistenceAPI not importable — falling back to "
+                f"legacy state injection for '{name}': {e}"
+            )
+            # Best-effort legacy fallback: write a state.pkl next to where
+            # Actor.__init__ will look for it. This covers the pickle-only
+            # codepath that still exists in actor.py.
+            try:
+                from pathlib import Path
+                import pickle as _pickle
+                safe = name.replace("/", "_").replace("\\", "_")
+                pdir = Path(str(self._persistence_dir.parent)) / safe
+                pdir.mkdir(parents=True, exist_ok=True)
+                with open(pdir / "state.pkl", "wb") as fh:
+                    _pickle.dump(snapshot, fh)
+                logger.info(
+                    f"[{self.name}] Wrote {len(snapshot)} key(s) of migrated "
+                    f"state to {pdir / 'state.pkl'} for '{name}' (legacy path)"
+                )
+            except Exception as e2:
+                logger.warning(
+                    f"[{self.name}] Legacy state injection failed for '{name}': {e2}"
+                )
+            return
+
+        db    = get_db()
+        redis = get_redis()
+        pkl   = get_pickle_store()
+        if not (db and redis and pkl):
+            logger.warning(
+                f"[{self.name}] PersistenceAPI stores not initialised — "
+                f"cannot apply migrated state for '{name}'"
+            )
+            return
+
+        api = PersistenceAPI(db, redis, pkl, name)
+        applied = api.load_snapshot(snapshot, replace=True)
+        logger.info(
+            f"[{self.name}] Applied migrated state for '{name}': "
+            f"{applied['sqlite']} SQLite, {applied['redis']} Redis, "
+            f"{applied['pickle']} pickle key(s) (from {len(snapshot)} shipped)"
+        )
+
     async def _spawn_llm_agent(self, config: dict, name: str):
         """Spawn a proper LLMAgent — best for chat, Q&A, reasoning tasks."""
+        # Apply any migrated state BEFORE spawn so on_start()'s recall() finds
+        # conversation_history / history_summary already in the DB. Without
+        # this the chat-agent's memory wouldn't survive a migrate-back.
+        await self._apply_initial_state(name, config)
+
         from .llm_agent import LLMAgent
         system_prompt = config.get("system_prompt", "You are a helpful assistant.")
         logger.info(f"[{self.name}] Spawning LLM agent '{name}'")
@@ -3927,6 +4004,11 @@ class MainActor(LLMAgent):
 
     async def _do_spawn_dynamic(self, config: dict, name: str, code: str):
         """Actually create and start the DynamicAgent."""
+        # Apply any migrated state BEFORE spawn so on_start() and the agent's
+        # generated setup() see the right values for counters, calibration,
+        # chat history etc. that were shipped from the source node.
+        await self._apply_initial_state(name, config)
+
         from .dynamic_agent import DynamicAgent
         actor = await self.spawn(
             DynamicAgent,
@@ -4738,75 +4820,74 @@ class MainActor(LLMAgent):
             # ── Remote → Remote migration ────────────────────────────────────
             # The source node still has the agent's compiled code and state;
             # it does the heavy lifting via its own _migrate_agent handler.
-            # Main only needs to dispatch the command and update the registry.
+            # Main needs to update BOTH nodes' desired_state retained messages
+            # so neither tries to re-spawn the agent in the wrong place after
+            # a restart: source must forget the agent, target must remember it.
             logger.info(f"[{self.name}] Migrating '{agent_name}' from node "
                         f"'{current_node}' → '{target_node}'")
             await self._mqtt_publish(
                 f"nodes/{current_node}/migrate",
                 {"name": agent_name, "target_node": target_node},
             )
+            # Pre-stage the spawn registry and desired-state updates so a
+            # source-node restart between the migrate command and the
+            # spawn-completes-on-target window doesn't re-spawn the agent
+            # on the wrong side.
+            if config:
+                updated = dict(config)
+                updated["node"] = target_node
+                self._save_to_spawn_registry(updated)
+                # Remove from source's desired_state (forget the agent there)
+                # and add to target's desired_state (remember it on arrival).
+                await self._update_node_desired_state(
+                    current_node, remove_name=agent_name
+                )
+                await self._update_node_desired_state(target_node, updated)
 
         elif current_node and is_target_local:
             # ── Remote → Local migration ─────────────────────────────────────
-            # Path A (have_code): use the spawn-registry copy of the code and
-            #   re-spawn locally; tell the remote node to just stop.
-            # Path B (no code): use the '@main' sentinel so the remote node
-            #   ships back BOTH its current config (with code) AND its state
-            #   over MQTT; the state_return listener on main re-spawns from
-            #   what comes back.
-            logger.info(f"[{self.name}] Migrating '{agent_name}' from node "
-                        f"'{current_node}' → local "
-                        f"(via {'registry config' if have_code else '@main sentinel'})")
+            # Always use the '@main' sentinel mechanism so the remote node
+            # ships its persistent state (conversation history, counters,
+            # calibration, etc.) back to main BEFORE the agent is stopped.
+            #
+            # Earlier versions had a "fast path" when main already had the
+            # code in its spawn registry — it just sent a plain stop and
+            # re-spawned locally, but that silently lost ALL of the agent's
+            # accumulated memory. For LLM-based agents like chat-agent this
+            # was particularly bad: every migrate-back wiped their history.
+            #
+            # The @main path is slightly slower (one MQTT round-trip) but
+            # always correct. The state_return listener handles the spawn
+            # once the remote node replies.
+            logger.info(
+                f"[{self.name}] Migrating '{agent_name}' from node "
+                f"'{current_node}' → local (via @main sentinel; "
+                f"{'spawn-registry code available as fallback' if have_code else 'no local code, fully remote-driven'})"
+            )
 
-            if have_code:
-                # Stop on the remote node and remove from desired state
-                await self._update_node_desired_state(current_node, remove_name=agent_name)
-                await self._mqtt_publish(
-                    f"nodes/{current_node}/stop", {"name": agent_name}, qos=1
-                )
-                await asyncio.sleep(0.5)   # give the remote node time to stop cleanly
-
-                # Spawn locally — strip the node field so _spawn_from_config treats it as local
-                new_config = dict(config)
-                new_config.pop("node", None)
-                new_config.pop("_initial_state", None)
-                new_config["replace"] = True
-
-                try:
-                    await self._spawn_from_config(new_config, save=True)
-                except Exception as exc:
-                    logger.exception(f"[{self.name}] Remote→local spawn failed for '{agent_name}'")
-                    return {"success": False,
-                            "message": f"Stopped on remote but failed to spawn locally: {exc}"}
-
-                target_node = ""   # canonical "local" in the registry
-            else:
-                # No code on main — ask the remote node to ship it back.
-                # The state_return listener will pick up the response and
-                # re-spawn locally with full state preservation.
-                import secrets
-                return_token = secrets.token_hex(8)
-                # Stash the token so the listener knows this return is ours
-                # and not from some other concurrent migration.
-                self._pending_state_returns: dict = getattr(
-                    self, "_pending_state_returns", {}
-                )
-                self._pending_state_returns[return_token] = {
-                    "agent_name":  agent_name,
-                    "from_node":   current_node,
-                    "started_at":  _time.time(),
-                }
-                await self._mqtt_publish(
-                    f"nodes/{current_node}/migrate",
-                    {"name": agent_name,
-                     "target_node": "@main",
-                     "return_token": return_token},
-                    qos=1,
-                )
-                msg = (f"Migration of '{agent_name}' from '{current_node}' → local "
-                       f"initiated (waiting for state from remote node).")
-                logger.info(f"[{self.name}] {msg}")
-                return {"success": True, "message": msg}
+            import secrets
+            return_token = secrets.token_hex(8)
+            # Stash the token so the listener knows this return is ours
+            # and not from some other concurrent migration.
+            self._pending_state_returns: dict = getattr(
+                self, "_pending_state_returns", {}
+            )
+            self._pending_state_returns[return_token] = {
+                "agent_name":  agent_name,
+                "from_node":   current_node,
+                "started_at":  _time.time(),
+            }
+            await self._mqtt_publish(
+                f"nodes/{current_node}/migrate",
+                {"name":         agent_name,
+                 "target_node":  "@main",
+                 "return_token": return_token},
+                qos=1,
+            )
+            msg = (f"Migration of '{agent_name}' from '{current_node}' → local "
+                   f"initiated (waiting for state from remote node).")
+            logger.info(f"[{self.name}] {msg}")
+            return {"success": True, "message": msg}
 
         else:
             # ── Local → Remote migration ─────────────────────────────────────
@@ -4880,7 +4961,14 @@ class MainActor(LLMAgent):
             except Exception as _e:
                 logger.debug(f"[{self.name}] Could not capture live contract: {_e}")
 
-            # Stop the local instance
+            # Stop the local instance, then purge its persistence.
+            #
+            # We've already snapshotted `initial_state` above — that's the
+            # authoritative copy now being shipped to the remote node. The
+            # local SQLite rows / pickle / Redis values are about to become
+            # stale ghosts. If the user later migrates the agent back here
+            # without those being cleared, they'd merge with the freshly
+            # arrived state and produce duplicate conversation entries.
             if self._registry:
                 local = self._registry.find_by_name(agent_name)
                 if local:
@@ -4888,6 +4976,17 @@ class MainActor(LLMAgent):
                         await self._registry.unregister(local.actor_id)
                         await local.stop()
                         self._agent_manifests.pop(agent_name, None)
+                        # Wipe SQLite / Redis / pickle for this agent. Uses
+                        # the same purge primitive as permanent delete — the
+                        # difference is the agent is being re-created on the
+                        # target node with the snapshot we already have.
+                        try:
+                            await self._purge_local_agent_persistence(local, agent_name)
+                        except Exception as e:
+                            logger.warning(
+                                f"[{self.name}] Could not purge local persistence "
+                                f"for '{agent_name}' after local→remote migration: {e}"
+                            )
                         await asyncio.sleep(0.3)
                     except Exception as e:
                         logger.warning(f"[{self.name}] Could not stop local '{agent_name}': {e}")
@@ -4915,8 +5014,11 @@ class MainActor(LLMAgent):
             logger.info(f"[{self.name}] {msg}")
             return {"success": True, "message": msg}
 
-        # Update spawn registry so next restart re-spawns to the right node.
-        # Only reached on remote→remote and remote→local-with-code paths.
+        # NOTE: with the @main sentinel now handling all remote→local cases
+        # and the inline remote→remote registry update above, this trailing
+        # block is no longer reached in normal flow. Kept as a defensive
+        # net for any future path that finishes without updating the
+        # spawn registry — the write is idempotent.
         if config:
             updated = dict(config)
             updated["node"] = target_node

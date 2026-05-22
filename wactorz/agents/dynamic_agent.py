@@ -1335,6 +1335,37 @@ class _AgentAPI:
         self._mqtt_broker = actor._mqtt_broker
         self._mqtt_port   = actor._mqtt_port
 
+    # ── LLM convenience shims (parity with remote _RemoteAgentAPI) ─────────
+    # The remote runner exposes agent.chat(messages, ...) directly on the
+    # API object — generated code written on a remote node will use that
+    # form. Without the same surface here, migrating an agent local→remote
+    # and back (or copy-pasting code originally written for a remote node)
+    # crashes with "'_AgentAPI' object has no attribute 'chat'".
+    #
+    # These delegate to agent.llm so generated code keeps working in both
+    # environments. Both forms — agent.chat(...) and agent.llm.chat(...) —
+    # are valid; pick whichever feels cleaner in your code.
+
+    async def chat(self, messages, system: str = "", timeout: float = 60.0) -> str:
+        """
+        Multi-turn LLM call — mirrors _RemoteAgentAPI.chat() so the same
+        generated code runs locally and remotely.
+
+        ``messages`` is a list of {"role": "user"/"assistant", "content": "..."}.
+        For a single-turn prompt, prefer ``agent.llm.chat("prompt")`` instead.
+        """
+        if self.llm is None:
+            return "[No LLM configured for this agent]"
+        # Allow callers passing a bare string by promoting it to a single
+        # user-turn list — same forgiveness the remote side offers in practice.
+        if isinstance(messages, str):
+            messages = [{"role": "user", "content": messages}]
+        return await self.llm.complete(messages, system=system)
+
+    async def complete(self, messages, system: str = "", timeout: float = 60.0) -> str:
+        """Alias for chat() — matches _LLMInterface.complete() naming."""
+        return await self.chat(messages, system=system, timeout=timeout)
+
     # ── MQTT ───────────────────────────────────────────────────────────────
 
     async def publish(self, topic: str, data: Any):

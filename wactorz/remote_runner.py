@@ -912,26 +912,52 @@ class _RemoteAgent:
         self._restart_count  = 0
         self._failed         = False   # True = budget exhausted, do not restart
 
-        # P0: Load persisted state from disk first, then overlay any _initial_state
-        # that was shipped with the config (set by _migrate_agent on the source node).
-        # Disk wins over the shipped state only if the file already exists on this
-        # node — that means the agent ran here before and has newer local state.
-        self._load_state()
+        # Migration / restart state handling.
+        #
+        # Two cases need to be distinguished:
+        #
+        #   1. Plain start or restart (no `_initial_state` in config).
+        #      The agent ran here before and was restarted in place. We must
+        #      preserve whatever is on disk so counters, calibration, chat
+        #      history etc. survive the restart.
+        #
+        #   2. Migration arrival (`_initial_state` IS in config).
+        #      The source node has just shipped this agent's authoritative
+        #      state via MQTT. Any state file we find on disk is from a
+        #      PREVIOUS incarnation that lived here before being migrated
+        #      away — it is stale by definition, because the source node was
+        #      the one running the agent moments ago. Letting the stale file
+        #      win produces "ghost memory" and duplicate conversation entries
+        #      when the user migrates an agent back to a node it once lived on.
+        #
+        # The fix is to make migration explicit: when `_initial_state` is
+        # present, treat it as ground truth and overwrite any stale local
+        # file. When it's not, fall back to loading from disk as before.
         initial = config.pop("_initial_state", None)
         if initial and isinstance(initial, dict):
-            if not self._persistent_state:
-                # Fresh node — no local state file yet; use the migrated snapshot
-                self._persistent_state = initial
-                self._save_state()
+            # Migration arrival path — initial state wins, period.
+            if os.path.exists(self._state_path):
                 logger.info(
-                    f"[{self.name}] Restored {len(initial)} state key(s) from migration: "
-                    f"{list(initial.keys())}"
+                    f"[{self.name}] Migration: overwriting stale local state file "
+                    f"at {self._state_path} with {len(initial)} key(s) shipped from "
+                    f"the source node"
                 )
-            else:
-                logger.info(
-                    f"[{self.name}] Local state file exists — ignoring migration snapshot "
-                    f"(local state takes precedence)"
-                )
+                try:
+                    os.unlink(self._state_path)
+                except Exception as e:
+                    logger.warning(
+                        f"[{self.name}] Could not remove stale state file before "
+                        f"applying migration snapshot: {e}"
+                    )
+            self._persistent_state = dict(initial)
+            self._save_state()
+            logger.info(
+                f"[{self.name}] Restored {len(initial)} state key(s) from migration: "
+                f"{list(initial.keys())}"
+            )
+        else:
+            # Normal start/restart — pick up whatever is already on disk.
+            self._load_state()
 
     # ── State persistence (JSON, not pickle — portable across Python versions) ─
 
@@ -1867,8 +1893,11 @@ class _RemoteRunner:
             return_config["node"] = self.node_name
             return_config.pop("_initial_state", None)
             return_config.pop("replace", None)
-            # Stop locally first (also flushes state file to disk as a backup)
-            await self.stop_agent(name)
+            # Stop locally AND delete the state file. The agent has just been
+            # migrated away — keeping its state.json behind would resurrect
+            # stale memory if the agent is ever migrated back to this node.
+            # The snapshot we're about to publish is the authoritative copy.
+            await self.stop_agent(name, delete=True)
             await asyncio.sleep(0.3)
             await self.publish(
                 f"nodes/{self.node_name}/state_return",
@@ -1899,8 +1928,11 @@ class _RemoteRunner:
 
         logger.info(f"[runner] Migrating '{name}' from {self.node_name} → {target_node}")
 
-        # Stop locally first (flushes state file to disk as a backup)
-        await self.stop_agent(name)
+        # Stop locally AND delete the state file. The agent's state is now in
+        # `config["_initial_state"]` and about to be published to the target
+        # node — that snapshot is authoritative. A stale leftover JSON on this
+        # node would otherwise survive and conflict on any future migrate-back.
+        await self.stop_agent(name, delete=True)
         await asyncio.sleep(0.3)    # let heartbeat "stopped" reach broker
 
         # Publish spawn to target node via MQTT
