@@ -1895,6 +1895,7 @@ async def main(exit_on_failure: bool = False):
             raise SystemExit(1)
         return
 
+    @web.middleware
     async def _cors_middleware(request, handler):
         if request.method == "OPTIONS":
             return web.Response(headers={
@@ -1903,9 +1904,12 @@ async def main(exit_on_failure: bool = False):
                 "Access-Control-Allow-Headers": "Content-Type, Authorization",
             })
         response = await handler(request)
-        response.headers["Access-Control-Allow-Origin"]  = "*"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        try:
+            response.headers["Access-Control-Allow-Origin"]  = "*"
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        except Exception:
+            pass
         return response
 
     app = web.Application(middlewares=[_cors_middleware])
