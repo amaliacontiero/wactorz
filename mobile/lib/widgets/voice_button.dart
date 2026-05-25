@@ -31,7 +31,7 @@ class _VoiceButtonState extends State<VoiceButton>
     _pulseCtrl = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 700),
-    )..repeat(reverse: true);
+    );
 
     _stt.initialize(onStatus: _onStatus, onError: _onError).then((ok) {
       if (mounted) setState(() => _available = ok);
@@ -52,9 +52,12 @@ class _VoiceButtonState extends State<VoiceButton>
     setState(() => _listening = nowListening);
     if (nowListening) {
       _ringCtrl.repeat();
+      _pulseCtrl.repeat(reverse: true);
     } else {
       _ringCtrl.stop();
       _ringCtrl.reset();
+      _pulseCtrl.stop();
+      _pulseCtrl.reset();
     }
   }
 
@@ -63,6 +66,8 @@ class _VoiceButtonState extends State<VoiceButton>
     setState(() { _listening = false; _interim = ''; });
     _ringCtrl.stop();
     _ringCtrl.reset();
+    _pulseCtrl.stop();
+    _pulseCtrl.reset();
   }
 
   Future<void> _startListening() async {
@@ -116,8 +121,6 @@ class _VoiceButtonState extends State<VoiceButton>
             ),
           ),
         GestureDetector(
-          onLongPressStart: (_) => _startListening(),
-          onLongPressEnd: (_) => _stopListening(),
           onTap: () {
             if (_listening) {
               _stopListening();
@@ -133,7 +136,7 @@ class _VoiceButtonState extends State<VoiceButton>
         ),
         const SizedBox(height: 6),
         Text(
-          _listening ? 'Listening… release to send' : 'Hold to speak',
+          _listening ? 'Listening… tap to stop' : 'Tap to speak',
           style: TextStyle(
             fontSize: 11,
             color: _listening ? kGreen : kMuted,
