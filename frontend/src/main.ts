@@ -115,9 +115,10 @@ const voice = new VoiceInput();
 const ioManager = new IOManager(mqtt, chatPanel);
 const ioBar = new IOBar(voice, ioManager);
 
-document.addEventListener("af-wake-toggle", () => ioBar.toggleWake());
-document.addEventListener("af-mic-start",   () => void ioBar.startMic());
-document.addEventListener("af-mic-stop",    () => ioBar.stopMic());
+document.addEventListener("af-mic-toggle", () => {
+  if (voice.isRecording) ioBar.stopMic();
+  else void ioBar.startMic();
+});
 
 const feed = new ActivityFeed();
 
