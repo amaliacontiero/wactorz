@@ -25,7 +25,6 @@ import { toast } from "./ToastManager";
 const SYSTEM_AGENT_NAMES: Set<any> = new Set([
   "io-agent",
   "monitor-agent",
-  "manual-agent",
   "home-assistant-state-bridge",
   "home-assistant-map-agent",
 ]);
