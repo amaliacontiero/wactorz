@@ -18,6 +18,7 @@ import type { FeedItem } from "./ActivityFeed";
 import { HAClient, type HAEntity } from "../io/HAClient";
 import { ambient, AMBIENT_TRACKS } from "../io/AmbientManager";
 import { tts } from "../io/TTSManager";
+import { toast } from "./ToastManager";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -611,7 +612,7 @@ export class CardDashboard {
         </div>
         <span class="af-node-pill online">online</span>
       </div>`);
-    const staleMs = 90_000;
+    const staleMs = 180_000;
     const now = Date.now();
     for (const [name, info] of this._remoteNodes) {
       const online = now - info.lastSeen < staleMs;
@@ -2084,7 +2085,7 @@ export class CardDashboard {
 
   private _refreshTimestamps(): void {
     const now = Date.now();
-    const STALE_MS = 90_000; // matches nodes panel threshold
+    const STALE_MS = 180_000; // matches nodes panel threshold
     this.lastHb.forEach((ms, id) => {
       const card = this.root.querySelector<HTMLElement>(`[data-id="${CSS.escape(id)}"]`);
       if (!card) return;
@@ -3151,46 +3152,90 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
   private _buildResetPopover(): HTMLElement {
     const pop = document.createElement("div");
     pop.className = "af-audio-popover glass";
-    pop.style.cssText = "min-width:180px;padding:10px 12px;";
+    pop.style.cssText = "min-width:210px;padding:12px 14px;";
 
     const title = document.createElement("div");
     title.textContent = "Clear stored state";
-    title.style.cssText = "font-size:11px;opacity:.55;margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em;";
+    title.style.cssText = "font-size:10px;font-weight:600;opacity:.45;margin-bottom:10px;text-transform:uppercase;letter-spacing:.08em;";
     pop.appendChild(title);
 
-    const scopes: { scope: string; label: string }[] = [
-      { scope: "chat",    label: "💬 Chat history" },
-      { scope: "metrics", label: "📊 Metrics & costs" },
-      { scope: "spawns",  label: "🚀 Spawn registry" },
-      { scope: "state",   label: "🗂 Agent state files" },
-      { scope: "logs",    label: "📋 Log files" },
-      { scope: "all",     label: "🗑 Wipe everything" },
+    const ICON = {
+      chat:    `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9.5a5 5 0 0 1-5 5H3l-2 2V5a5 5 0 0 1 5-5h3"/><circle cx="12" cy="4" r="3"/></svg>`,
+      metrics: `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="9" width="3" height="6" rx="1"/><rect x="6" y="5" width="3" height="10" rx="1"/><rect x="11" y="2" width="3" height="13" rx="1"/></svg>`,
+      spawns:  `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="2" r="1.5"/><circle cx="2" cy="13" r="1.5"/><circle cx="14" cy="13" r="1.5"/><path d="M8 3.5v4m0 4-5 3.5m5-3.5 5 3.5m-5-7.5-5 3.5m5-3.5 5 3.5"/></svg>`,
+      state:   `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="12" height="3" rx="1"/><rect x="2" y="8" width="12" height="3" rx="1"/><rect x="2" y="13" width="8" height="2" rx="1"/></svg>`,
+      logs:    `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2h10a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1Z"/><path d="M5 6h6M5 9h4"/></svg>`,
+      all:     `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4h12M5 4V2h6v2M6 7v5M10 7v5M3 4l1 9a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1l1-9"/></svg>`,
+    } as Record<string, string>;
+
+    const scopes: { scope: string; label: string; danger?: boolean }[] = [
+      { scope: "chat",    label: "Chat history" },
+      { scope: "metrics", label: "Metrics & costs" },
+      { scope: "spawns",  label: "Spawn registry" },
+      { scope: "state",   label: "Agent state files" },
+      { scope: "logs",    label: "Log files" },
+      { scope: "all",     label: "Wipe everything", danger: true },
     ];
 
-    for (const { scope, label } of scopes) {
+    scopes.forEach(({ scope, label, danger }, i) => {
+      if (danger) {
+        const hr = document.createElement("div");
+        hr.style.cssText = "height:1px;background:rgba(255,255,255,.08);margin:6px 0 8px;";
+        pop.appendChild(hr);
+      }
+
       const btn = document.createElement("button");
       btn.className = "af-mini-btn";
-      btn.style.cssText = "display:block;width:100%;margin-bottom:4px;text-align:left;";
-      btn.textContent = label;
+      btn.style.cssText = [
+        "display:flex;align-items:center;gap:8px;width:100%;",
+        "padding:6px 8px;margin-bottom:3px;border-radius:6px;",
+        "font-size:12px;text-align:left;transition:background .15s;",
+        danger ? "color:#f87171;" : "",
+      ].join("");
+      btn.innerHTML = `${ICON[scope] ?? ""}<span>${label}</span>`;
+
+      // Two-step confirm: first click arms, second fires
+      let armed = false;
+      let armTimer: ReturnType<typeof setTimeout> | null = null;
+
       btn.addEventListener("click", async () => {
+        if (!armed) {
+          armed = true;
+          const span = btn.querySelector("span")!;
+          const orig = span.textContent!;
+          span.textContent = `Confirm ${label.toLowerCase()}?`;
+          btn.style.background = danger ? "rgba(248,113,113,.15)" : "rgba(255,255,255,.1)";
+          armTimer = setTimeout(() => {
+            armed = false;
+            span.textContent = orig;
+            btn.style.background = "";
+          }, 3000);
+          return;
+        }
+
+        if (armTimer) clearTimeout(armTimer);
+        armed = false;
         pop.classList.remove("open");
-        if (!confirm(`Reset scope "${scope}"?`)) return;
+
         try {
           const res = await fetch("/api/reset", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ scope }),
           });
-          if (!res.ok) {
+          if (res.ok) {
+            toast.show({ type: "system", title: "Reset", message: `${label} cleared` });
+          } else {
             const err = await res.json().catch(() => ({}));
-            alert(`Reset failed: ${(err as any).error ?? res.status}`);
+            toast.show({ type: "alert-error", title: "Reset failed", message: (err as any).error ?? String(res.status) });
           }
         } catch (e) {
-          alert(`Reset failed: ${e}`);
+          toast.show({ type: "alert-error", title: "Reset failed", message: String(e) });
         }
       });
+
       pop.appendChild(btn);
-    }
+    });
 
     return pop;
   }
