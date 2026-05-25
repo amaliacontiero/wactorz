@@ -102,6 +102,7 @@ class HomeAssistantAgent(LLMAgent):
         self.total_cost_usd      += usage.get("cost_usd", 0.0)
         self._persist_cost()
 
+
     # ── Public entry points ──────────────────────────────────────────────────
 
     async def chat(self, user_message: str) -> str:
@@ -117,6 +118,7 @@ class HomeAssistantAgent(LLMAgent):
         self._log_chat_turn(user_message, response, ts_user=ts_user, ts_reply=ts_reply)
         return response
 
+
     async def chat_stream(self, user_message: str):
         """
         Override LLMAgent streaming path so direct @home-assistant-agent calls
@@ -125,6 +127,7 @@ class HomeAssistantAgent(LLMAgent):
         response = await self.chat(user_message)
         yield response
         yield {}
+
 
     async def handle_message(self, msg: Message) -> None:
         if msg.type != MessageType.TASK:
@@ -148,6 +151,7 @@ class HomeAssistantAgent(LLMAgent):
         self.metrics.tasks_completed += 1
         if msg.sender_id:
             await self.send(msg.sender_id, MessageType.RESULT, result)
+
 
     # ── Dispatch ─────────────────────────────────────────────────────────────
 
@@ -205,6 +209,7 @@ class HomeAssistantAgent(LLMAgent):
             return await self._handle_other_request(text)
 
         return self._unsupported_action_response(text)
+
 
     # ── Intent classification ────────────────────────────────────────────────
 
@@ -282,16 +287,6 @@ class HomeAssistantAgent(LLMAgent):
             return "other"
         return "unknown"
 
-    @staticmethod
-    def _extract_entity_ids(text: str) -> list[str]:
-        seen: set[str] = set()
-        entity_ids: list[str] = []
-        for match in re.finditer(r"\b[a-z_][a-z0-9_]*\.[a-z0-9_]+\b", text.lower()):
-            entity_id = match.group(0)
-            if entity_id not in seen:
-                seen.add(entity_id)
-                entity_ids.append(entity_id)
-        return entity_ids
 
     @staticmethod
     def _unsupported_action_response(text: str) -> dict[str, Any]:
@@ -302,6 +297,7 @@ class HomeAssistantAgent(LLMAgent):
                 "create, edit, delete, list automations, list areas, list devices, and list entities."
             ),
         }
+
 
     async def _handle_entities_state_request(self, text: str) -> dict[str, Any]:
         entity_ids = self._extract_entity_ids(text)
@@ -353,6 +349,7 @@ class HomeAssistantAgent(LLMAgent):
             "result": "; ".join(parts) if parts else "No requested entity states were found.",
             "data": {"states": found, "missing": missing},
         }
+
 
     async def _handle_other_request(self, text: str) -> dict[str, Any]:
         if not self.ha_url or not self.ha_token:
@@ -433,6 +430,7 @@ class HomeAssistantAgent(LLMAgent):
             "error": "tool_round_limit",
         }
 
+
     # ── Device discovery ─────────────────────────────────────────────────────
 
     async def _get_devices(self) -> dict[str, Any]:
@@ -467,34 +465,93 @@ class HomeAssistantAgent(LLMAgent):
             self._device_cache = {"timestamp": now, "data": data}
             return data
 
-    async def _get_automations_brief(self) -> list[dict[str, Any]]:
-        """Return a brief list (id, name, description) with caching."""
-        now = time.time()
-        cached = self._automation_cache.get("data")
-        if cached is not None and now - float(self._automation_cache.get("timestamp", 0.0)) < self._automation_cache_ttl:
-            return cached
 
+    async def _fetch_registry_items(self, fetcher: Any) -> tuple[list[dict[str, Any]], str | None]:
+        """Fetch HA registry data with common config and error handling."""
         if not self.ha_url or not self.ha_token:
-            self._automation_cache = {"timestamp": now, "data": []}
-            return []
-
+            return [], "HA_URL or HA_TOKEN not configured."
         try:
-            full = await get_automations(self.ha_url, self.ha_token)
-            brief = [
-                {
-                    "id": a.get("id", "") or a.get("automation_id", ""),
-                    "name": a.get("alias", "") or a.get("name", ""),
-                    "description": a.get("description", ""),
-                }
-                for a in (full or [])
-                if isinstance(a, dict)
-            ]
-            self._automation_cache = {"timestamp": now, "data": brief}
-            return brief
+            items = await fetcher(self.ha_url, self.ha_token)
+            if not isinstance(items, list):
+                items = []
+            return items, None
         except Exception as exc:
-            logger.warning("[%s] Could not fetch automations: %s", self.name, exc)
-            self._automation_cache = {"timestamp": now, "data": []}
-            return []
+            logger.warning("[%s] Could not fetch Home Assistant registry data: %s", self.name, exc)
+            return [], f"Could not fetch data from Home Assistant: {exc}"
+
+
+    async def _list_areas(self) -> dict[str, Any]:
+        areas, error = await self._fetch_registry_items(get_areas)
+        if error:
+            return {"result": error, "areas": []}
+        if not areas:
+            return {"result": "No areas found in Home Assistant.", "areas": []}
+
+        area_rows = [
+            {
+                "area_id": str(a.get("area_id", "")),
+                "name": str(a.get("name") or "(unnamed)"),
+            }
+            for a in areas
+            if isinstance(a, dict)
+        ]
+        lines = [f"Found {len(area_rows)} area(s) in Home Assistant:"]
+        for idx, row in enumerate(area_rows, 1):
+            lines.append(f"{idx}. {row['name']} ({row['area_id']})")
+        return {"result": "\n".join(lines), "areas": area_rows}
+
+
+    async def _list_devices(self) -> dict[str, Any]:
+        devices, error = await self._fetch_registry_items(get_devices)
+        if error:
+            return {"result": error, "devices": []}
+        if not devices:
+            return {"result": "No devices found in Home Assistant.", "devices": []}
+
+        device_rows = [
+            {
+                "device_id": str(d.get("id", "")),
+                "name": str(d.get("name_by_user") or d.get("name") or "(unnamed)"),
+                "manufacturer": str(d.get("manufacturer") or ""),
+                "model": str(d.get("model") or ""),
+            }
+            for d in devices
+            if isinstance(d, dict)
+        ]
+        lines = [f"Found {len(device_rows)} device(s) in Home Assistant:"]
+        for idx, row in enumerate(device_rows, 1):
+            details = " ".join(p for p in (row["manufacturer"], row["model"]) if p).strip()
+            if details:
+                lines.append(f"{idx}. {row['name']} ({details})")
+            else:
+                lines.append(f"{idx}. {row['name']}")
+        return {"result": "\n".join(lines), "devices": device_rows}
+
+
+    async def _list_entities(self) -> dict[str, Any]:
+        entities, error = await self._fetch_registry_items(get_entities)
+        if error:
+            return {"result": error, "entities": []}
+        if not entities:
+            return {"result": "No entities found in Home Assistant.", "entities": []}
+
+        entity_rows = [
+            {
+                "entity_id": str(e.get("entity_id", "")),
+                "name": str(e.get("name") or e.get("original_name") or "(unnamed)"),
+                "platform": str(e.get("platform") or ""),
+            }
+            for e in entities
+            if isinstance(e, dict)
+        ]
+        lines = [f"Found {len(entity_rows)} entities in Home Assistant:"]
+        for idx, row in enumerate(entity_rows, 1):
+            if row["platform"]:
+                lines.append(f"{idx}. {row['entity_id']} ({row['platform']})")
+            else:
+                lines.append(f"{idx}. {row['entity_id']}")
+        return {"result": "\n".join(lines), "entities": entity_rows}
+
 
     # ── Hardware selection ────────────────────────────────────────────────────
     # NOTE: _select_hardware, _format_hardware_result, and _extract_entity_ids_from_hardware
@@ -562,6 +619,7 @@ class HomeAssistantAgent(LLMAgent):
         except Exception as exc:
             logger.error("[%s] Hardware selection failed: %s", self.name, exc, exc_info=True)
             return self._format_hardware_result(text, devices, [], False, f"Hardware selection error: {exc}")
+
 
     async def _recommend_hardware(self, text: str, devices: dict[str, Any]) -> dict[str, Any]:
         """Entry point for pure hardware-recommendation requests."""
@@ -679,6 +737,7 @@ class HomeAssistantAgent(LLMAgent):
                 f"Hardware recommendation error: {exc}",
             )
 
+
     def _format_available_hardware_result(
         self,
         text: str,
@@ -729,6 +788,7 @@ class HomeAssistantAgent(LLMAgent):
             "device_discovery": {"connected": connected, "reason": devices.get("reason", "")},
         }
 
+
     def _format_hardware_result(
         self,
         text: str,
@@ -777,6 +837,7 @@ class HomeAssistantAgent(LLMAgent):
             "device_discovery": {"connected": connected, "reason": devices.get("reason", "")},
         }
 
+
     # ── Automation creation ───────────────────────────────────────────────────
 
     async def _create_automation(
@@ -824,6 +885,7 @@ class HomeAssistantAgent(LLMAgent):
                 "result": f"Failed to create automation: {exc}",
                 "automation": {},
             }
+
 
     async def _generate_automation(
         self,
@@ -879,6 +941,7 @@ class HomeAssistantAgent(LLMAgent):
             },
         }
 
+
     async def _insert_automation(self, automation: dict[str, Any]) -> dict[str, Any]:
         if not self.ha_url or not self.ha_token:
             return {"inserted": False, "error": "HA_URL or HA_TOKEN not configured"}
@@ -888,7 +951,38 @@ class HomeAssistantAgent(LLMAgent):
         except Exception as exc:
             return {"inserted": False, "error": str(exc)}
 
+
     # ── Automation listing ────────────────────────────────────────────────────
+
+    async def _get_automations_brief(self) -> list[dict[str, Any]]:
+        """Return a brief list (id, name, description) with caching."""
+        now = time.time()
+        cached = self._automation_cache.get("data")
+        if cached is not None and now - float(self._automation_cache.get("timestamp", 0.0)) < self._automation_cache_ttl:
+            return cached
+
+        if not self.ha_url or not self.ha_token:
+            self._automation_cache = {"timestamp": now, "data": []}
+            return []
+
+        try:
+            full = await get_automations(self.ha_url, self.ha_token)
+            brief = [
+                {
+                    "id": a.get("id", "") or a.get("automation_id", ""),
+                    "name": a.get("alias", "") or a.get("name", ""),
+                    "description": a.get("description", ""),
+                }
+                for a in (full or [])
+                if isinstance(a, dict)
+            ]
+            self._automation_cache = {"timestamp": now, "data": brief}
+            return brief
+        except Exception as exc:
+            logger.warning("[%s] Could not fetch automations: %s", self.name, exc)
+            self._automation_cache = {"timestamp": now, "data": []}
+            return []
+        
 
     def _list_automations(self, automations: list[dict[str, Any]]) -> dict[str, Any]:
         if not automations:
@@ -906,88 +1000,6 @@ class HomeAssistantAgent(LLMAgent):
 
         return {"result": "\n".join(lines), "automations": automations}
 
-    async def _fetch_registry_items(self, fetcher: Any) -> tuple[list[dict[str, Any]], str | None]:
-        """Fetch HA registry data with common config and error handling."""
-        if not self.ha_url or not self.ha_token:
-            return [], "HA_URL or HA_TOKEN not configured."
-        try:
-            items = await fetcher(self.ha_url, self.ha_token)
-            if not isinstance(items, list):
-                items = []
-            return items, None
-        except Exception as exc:
-            logger.warning("[%s] Could not fetch Home Assistant registry data: %s", self.name, exc)
-            return [], f"Could not fetch data from Home Assistant: {exc}"
-
-    async def _list_areas(self) -> dict[str, Any]:
-        areas, error = await self._fetch_registry_items(get_areas)
-        if error:
-            return {"result": error, "areas": []}
-        if not areas:
-            return {"result": "No areas found in Home Assistant.", "areas": []}
-
-        area_rows = [
-            {
-                "area_id": str(a.get("area_id", "")),
-                "name": str(a.get("name") or "(unnamed)"),
-            }
-            for a in areas
-            if isinstance(a, dict)
-        ]
-        lines = [f"Found {len(area_rows)} area(s) in Home Assistant:"]
-        for idx, row in enumerate(area_rows, 1):
-            lines.append(f"{idx}. {row['name']} ({row['area_id']})")
-        return {"result": "\n".join(lines), "areas": area_rows}
-
-    async def _list_devices(self) -> dict[str, Any]:
-        devices, error = await self._fetch_registry_items(get_devices)
-        if error:
-            return {"result": error, "devices": []}
-        if not devices:
-            return {"result": "No devices found in Home Assistant.", "devices": []}
-
-        device_rows = [
-            {
-                "device_id": str(d.get("id", "")),
-                "name": str(d.get("name_by_user") or d.get("name") or "(unnamed)"),
-                "manufacturer": str(d.get("manufacturer") or ""),
-                "model": str(d.get("model") or ""),
-            }
-            for d in devices
-            if isinstance(d, dict)
-        ]
-        lines = [f"Found {len(device_rows)} device(s) in Home Assistant:"]
-        for idx, row in enumerate(device_rows, 1):
-            details = " ".join(p for p in (row["manufacturer"], row["model"]) if p).strip()
-            if details:
-                lines.append(f"{idx}. {row['name']} ({details})")
-            else:
-                lines.append(f"{idx}. {row['name']}")
-        return {"result": "\n".join(lines), "devices": device_rows}
-
-    async def _list_entities(self) -> dict[str, Any]:
-        entities, error = await self._fetch_registry_items(get_entities)
-        if error:
-            return {"result": error, "entities": []}
-        if not entities:
-            return {"result": "No entities found in Home Assistant.", "entities": []}
-
-        entity_rows = [
-            {
-                "entity_id": str(e.get("entity_id", "")),
-                "name": str(e.get("name") or e.get("original_name") or "(unnamed)"),
-                "platform": str(e.get("platform") or ""),
-            }
-            for e in entities
-            if isinstance(e, dict)
-        ]
-        lines = [f"Found {len(entity_rows)} entities in Home Assistant:"]
-        for idx, row in enumerate(entity_rows, 1):
-            if row["platform"]:
-                lines.append(f"{idx}. {row['entity_id']} ({row['platform']})")
-            else:
-                lines.append(f"{idx}. {row['entity_id']}")
-        return {"result": "\n".join(lines), "entities": entity_rows}
 
     # ── Automation deletion ───────────────────────────────────────────────────
 
@@ -1045,6 +1057,7 @@ class HomeAssistantAgent(LLMAgent):
         except Exception as exc:
             return {"result": f"Error deleting automation: {exc}", "deleted": False}
 
+
     # ── Automation editing ────────────────────────────────────────────────────
 
     async def _identify_automation(
@@ -1077,6 +1090,7 @@ class HomeAssistantAgent(LLMAgent):
 
         return automation_id, automation_name
 
+
     async def _get_automation_config(self, automation_id: str, automation_name: str) -> dict[str, Any]:
         """Fetch the full automation config for a given automation ID."""
         try:
@@ -1095,6 +1109,7 @@ class HomeAssistantAgent(LLMAgent):
         except Exception as exc:
             logger.warning("[%s] Could not fetch full automation config: %s", self.name, exc)
             return {}
+
 
     async def _generate_modified_automation_config(
         self,
@@ -1126,6 +1141,7 @@ class HomeAssistantAgent(LLMAgent):
         if not isinstance(updated_automation, dict):
             raise AutomationEditError("Generated automation config must be an object.")
         return updated_automation
+
 
     async def _edit_automation(
         self,
@@ -1186,6 +1202,7 @@ class HomeAssistantAgent(LLMAgent):
         except Exception as exc:
             return {"result": f"Error updating automation: {exc}", "edited": False}
 
+
     # ── Static helpers ────────────────────────────────────────────────────────
 
     @staticmethod
@@ -1195,6 +1212,7 @@ class HomeAssistantAgent(LLMAgent):
             for e in devices.get("data", {}).get("entities", []) or []
             if e.get("entity_id")
         ]
+
 
     @staticmethod
     def _extract_payload(payload: Any) -> tuple[str, list[str], list[dict[str, Any]]]:
@@ -1210,11 +1228,13 @@ class HomeAssistantAgent(LLMAgent):
             return text, entities, hardware
         return str(payload), [], []
 
+
     @staticmethod
     def _extract_task_id(payload: Any, fallback: str) -> str:
         if isinstance(payload, dict) and isinstance(payload.get("task"), str):
             return payload["task"]
         return fallback
+
 
     @staticmethod
     def _strip_fences(text: str) -> str:
@@ -1231,6 +1251,7 @@ class HomeAssistantAgent(LLMAgent):
             cleaned = re.sub(r"```$", "", cleaned).strip()
         return cleaned
 
+
     @staticmethod
     def _validate_automation(automation: dict[str, Any]) -> str | None:
         if not isinstance(automation.get("name"), str) or not automation["name"].strip():
@@ -1244,6 +1265,7 @@ class HomeAssistantAgent(LLMAgent):
         if not isinstance(automation.get("mode", "single"), str) or not automation.get("mode", "single").strip():
             return "automation.mode must be a non-empty string"
         return None
+
 
     @staticmethod
     def _available_entity_ids(devices: dict[str, Any]) -> set[str]:
@@ -1262,6 +1284,7 @@ class HomeAssistantAgent(LLMAgent):
             if entity_id:
                 available.add(entity_id)
         return available
+
 
     @staticmethod
     def _normalize_available_hardware_items(
@@ -1337,6 +1360,7 @@ class HomeAssistantAgent(LLMAgent):
 
         return normalized
 
+
     @staticmethod
     def _filter_hardware_alternatives(
         primary_hardware: list[dict[str, Any]],
@@ -1390,6 +1414,7 @@ class HomeAssistantAgent(LLMAgent):
 
         return filtered
 
+
     @staticmethod
     def _hardware_summary_lines(items: list[dict[str, Any]]) -> list[str]:
         lines: list[str] = []
@@ -1409,6 +1434,7 @@ class HomeAssistantAgent(LLMAgent):
             lines.append(line)
         return lines
 
+
     @staticmethod
     def _extract_entity_ids_from_hardware(hardware_result: dict[str, Any]) -> list[str]:
         seen: set[str] = set()
@@ -1422,3 +1448,15 @@ class HomeAssistantAgent(LLMAgent):
                     seen.add(normalized)
                     entities.append(normalized)
         return entities
+
+
+    @staticmethod
+    def _extract_entity_ids(text: str) -> list[str]:
+        seen: set[str] = set()
+        entity_ids: list[str] = []
+        for match in re.finditer(r"\b[a-z_][a-z0-9_]*\.[a-z0-9_]+\b", text.lower()):
+            entity_id = match.group(0)
+            if entity_id not in seen:
+                seen.add(entity_id)
+                entity_ids.append(entity_id)
+        return entity_ids
