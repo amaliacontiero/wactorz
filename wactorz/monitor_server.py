@@ -1425,7 +1425,7 @@ async def reset_handler(request):
     scope = body.get("scope", "")
     agent = body.get("agent") or None
 
-    valid = {"chat", "state", "metrics", "spawns", "all"}
+    valid = {"chat", "state", "metrics", "spawns", "logs", "all"}
     if scope not in valid:
         return web.json_response(
             {"error": f"scope must be one of {sorted(valid)}"}, status=400
@@ -1433,7 +1433,7 @@ async def reset_handler(request):
 
     from wactorz.reset import (
         reset_chat, reset_agent_state, reset_metrics, reset_spawns,
-        reset_all, _reset_all_pickles,
+        reset_all, reset_logs, _reset_all_pickles,
     )
 
     if scope == "all":
@@ -1449,6 +1449,8 @@ async def reset_handler(request):
         reset_metrics(agent)
     elif scope == "spawns":
         reset_spawns(agent)
+    elif scope == "logs":
+        reset_logs()
 
     # Clear in-memory dashboard state for the affected agents
     if scope in ("all", "chat", "metrics"):

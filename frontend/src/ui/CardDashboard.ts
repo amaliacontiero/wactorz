@@ -3163,6 +3163,7 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
       { scope: "metrics", label: "📊 Metrics & costs" },
       { scope: "spawns",  label: "🚀 Spawn registry" },
       { scope: "state",   label: "🗂 Agent state files" },
+      { scope: "logs",    label: "📋 Log files" },
       { scope: "all",     label: "🗑 Wipe everything" },
     ];
 
