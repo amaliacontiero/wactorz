@@ -994,9 +994,10 @@
       .af-state-error        { color: #f87171; }
 
       /* Heartbeat pulse on dot */
+      .af-card-state-dot { transition: opacity 1.2s ease, filter 1.2s ease; }
       .af-card-pulse { animation: af-card-hb-once 0.5s ease !important; }
       @keyframes af-card-hb-once { 0%,100%{transform:scale(1)} 40%{transform:scale(1.9);opacity:1} }
-      /* Stale agent — no heartbeat for 90 s */
+      /* Stale agent — no heartbeat for 180 s */
       .af-card-stale { animation: none !important; opacity: 0.35; filter: grayscale(1); }
 
       /* ── Classic (cd-card) layout ────────────────────────────────────────── */
