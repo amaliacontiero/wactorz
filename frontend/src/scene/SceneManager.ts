@@ -221,6 +221,10 @@ export class SceneManager {
     this.cardDashboard?.updateRemoteNode(name, agents);
   }
 
+  setHostStats(cpu: number, memUsedMb: number, memTotalMb?: number): void {
+    this.cardDashboard?.setHostStats(cpu, memUsedMb, memTotalMb);
+  }
+
   reconcileAgents(liveAgents: AgentInfo[]): void {
     const liveIds = new Set(liveAgents.map((agent) => agent.id));
     for (const id of this.agents.keys()) {

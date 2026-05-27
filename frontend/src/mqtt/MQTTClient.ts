@@ -17,6 +17,7 @@ import type {
   ChatMessage,
   CoinPayload,
   HeartbeatPayload,
+  HostStats,
   LogPayload,
   MetricsPayload,
   NodeHeartbeatPayload,
@@ -58,6 +59,8 @@ export interface MQTTEvents {
   "node-heartbeat": NodeHeartbeatPayload;
   /** system/health snapshot from MonitorAgent. */
   "system-health": unknown;
+  /** Host-level CPU + memory stats from the backend. */
+  "host-stats": HostStats;
   /** WizAgent coin economy event. */
   coin: CoinPayload;
   /** Catch-all for raw messages not matching a known pattern. */
@@ -216,6 +219,20 @@ export class MQTTClient {
     // system/health
     if (topic === "system/health") {
       this.emit("system-health", payload);
+      return;
+    }
+
+    // system/host — host-level CPU + memory snapshot
+    if (topic === "system/host") {
+      const p = payload as Record<string, unknown>;
+      const stats: HostStats = {};
+      const cpu = p["cpu"] ?? p["cpu_pct"];
+      const memUsed = p["mem_used_mb"] ?? p["memUsedMb"];
+      const memTotal = p["mem_total_mb"] ?? p["memTotalMb"];
+      if (typeof cpu === "number") stats.cpu = cpu;
+      if (typeof memUsed === "number") stats.memUsedMb = memUsed;
+      if (typeof memTotal === "number") stats.memTotalMb = memTotal;
+      this.emit("host-stats", stats);
       return;
     }
 

@@ -112,6 +112,9 @@ export class CardDashboard {
   private _historyLoaded: Set<string> = new Set();
   private _totalCostUsd: number | null = null;
   private _totalMessages: number | null = null;
+  private _hostCpu: number | null = null;
+  private _hostMemUsedMb: number | null = null;
+  private _hostMemTotalMb: number | null = null;
   private _costLimitInfo: Record<string, any> | null = null;
   private _costPollTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -284,6 +287,30 @@ export class CardDashboard {
     if (this.view === "overview") this._renderStats();
   }
 
+  setHostStats(cpu: number, memUsedMb: number, memTotalMb?: number): void {
+    this._hostCpu = cpu;
+    this._hostMemUsedMb = memUsedMb;
+    if (memTotalMb !== undefined) this._hostMemTotalMb = memTotalMb;
+    const bar = this.root.querySelector<HTMLElement>("#af-host-bar");
+    if (!bar) return;
+    const cpuFill = bar.querySelector<HTMLElement>(".af-host-bar-fill-cpu");
+    const cpuVal = bar.querySelector<HTMLElement>(".af-host-cpu-val");
+    if (cpuFill) cpuFill.style.width = `${Math.max(0, Math.min(100, cpu)).toFixed(1)}%`;
+    if (cpuVal) cpuVal.textContent = `${cpu.toFixed(1)}%`;
+    const memFill = bar.querySelector<HTMLElement>(".af-host-bar-fill-mem");
+    const memVal = bar.querySelector<HTMLElement>(".af-host-mem-val");
+    const total = this._hostMemTotalMb;
+    const pct = total && total > 0 ? (memUsedMb / total) * 100 : 0;
+    if (memFill) memFill.style.width = `${Math.max(0, Math.min(100, pct)).toFixed(1)}%`;
+    if (memVal) {
+      if (total && total > 0) {
+        memVal.textContent = `${(memUsedMb / 1024).toFixed(1)} / ${(total / 1024).toFixed(1)} GB`;
+      } else {
+        memVal.textContent = `${memUsedMb.toFixed(0)} MB`;
+      }
+    }
+  }
+
   // ── Agent events ──────────────────────────────────────────────────────────
 
   addAgent(agent: AgentInfo): void {
@@ -329,7 +356,7 @@ export class CardDashboard {
     if (this.view === "overview") this._renderNodes();
   }
 
-  onHeartbeat(agentId: string, timestampMs: number, cpu?: number, mem?: number): void {
+  onHeartbeat(agentId: string, timestampMs: number, _cpu?: number, _mem?: number): void {
     this.lastHb.set(agentId, timestampMs);
     if (!this.root.classList.contains("cd-visible")) return;
     if (this._removingIds.has(agentId)) return;
@@ -344,14 +371,6 @@ export class CardDashboard {
       dot.classList.remove("af-card-pulse", "af-card-stale");
       void dot.offsetWidth;
       dot.classList.add("af-card-pulse");
-    }
-    if (cpu !== undefined) {
-      const cpuEl = card.querySelector<HTMLElement>(".af-card-cpu");
-      if (cpuEl) { cpuEl.textContent = `CPU ${cpu.toFixed(1)}%`; cpuEl.style.display = ""; }
-    }
-    if (mem !== undefined) {
-      const memEl = card.querySelector<HTMLElement>(".af-card-mem");
-      if (memEl) { memEl.textContent = `${mem.toFixed(0)} MB`; memEl.style.display = ""; }
     }
   }
 
@@ -632,6 +651,8 @@ export class CardDashboard {
     const el = document.createElement("div");
     el.className = "af-overview";
 
+    el.appendChild(this._buildHostBar());
+
     const statsGrid = document.createElement("div");
     statsGrid.className = "af-stats-grid";
     statsGrid.id = "af-stats-grid";
@@ -671,6 +692,48 @@ export class CardDashboard {
     panels.appendChild(np);
     el.appendChild(panels);
     return el;
+  }
+
+  private _buildHostBar(): HTMLElement {
+    const bar = document.createElement("div");
+    bar.id = "af-host-bar";
+    bar.className = "af-host-bar";
+
+    const cpu = this._hostCpu;
+    const memUsed = this._hostMemUsedMb;
+    const memTotal = this._hostMemTotalMb;
+
+    const cpuPct = cpu != null ? Math.max(0, Math.min(100, cpu)) : 0;
+    const cpuText = cpu != null ? `${cpu.toFixed(1)}%` : "—";
+    const memPct =
+      memUsed != null && memTotal != null && memTotal > 0
+        ? Math.max(0, Math.min(100, (memUsed / memTotal) * 100))
+        : 0;
+    const memText =
+      memUsed != null
+        ? memTotal != null && memTotal > 0
+          ? `${(memUsed / 1024).toFixed(1)} / ${(memTotal / 1024).toFixed(1)} GB`
+          : `${memUsed.toFixed(0)} MB`
+        : "—";
+
+    bar.innerHTML = `
+      <div class="af-host-label">HOST</div>
+      <div class="af-host-metric">
+        <div class="af-host-metric-label">CPU</div>
+        <div class="af-host-bar-track">
+          <div class="af-host-bar-fill af-host-bar-fill-cpu" style="width:${cpuPct.toFixed(1)}%"></div>
+        </div>
+        <div class="af-host-metric-val af-host-cpu-val">${cpuText}</div>
+      </div>
+      <div class="af-host-metric">
+        <div class="af-host-metric-label">MEM</div>
+        <div class="af-host-bar-track">
+          <div class="af-host-bar-fill af-host-bar-fill-mem" style="width:${memPct.toFixed(1)}%"></div>
+        </div>
+        <div class="af-host-metric-val af-host-mem-val">${memText}</div>
+      </div>
+    `;
+    return bar;
   }
 
   private _buildStatCards(container: HTMLElement): void {
@@ -834,8 +897,6 @@ export class CardDashboard {
       <span>♥ <span class="af-card-hb-time">${hbMs ? relTime(hbMs) : "—"}</span></span>
       <span>${msgs} msgs</span>
       ${agent.costUsd != null ? `<span>$${agent.costUsd.toFixed(4)}</span>` : ""}
-      ${agent.cpu != null ? `<span class="af-card-cpu" title="CPU usage">${agent.cpu.toFixed(1)}%</span>` : `<span class="af-card-cpu" style="display:none"></span>`}
-      ${agent.mem != null ? `<span class="af-card-mem" title="Memory">${agent.mem.toFixed(0)} MB</span>` : `<span class="af-card-mem" style="display:none"></span>`}
     `;
 
     card.appendChild(dot);

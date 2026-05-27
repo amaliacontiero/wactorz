@@ -127,3 +127,10 @@ export interface AgentSelectedEvent {
 export interface ThemeChangeEvent {
   theme: "social" | "cards";
 }
+
+/** Host-level system stats from the backend. */
+export interface HostStats {
+  cpu?: number;
+  memUsedMb?: number;
+  memTotalMb?: number;
+}

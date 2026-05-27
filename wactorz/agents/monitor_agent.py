@@ -27,6 +27,8 @@ import logging
 import time
 from typing import Optional
 
+import psutil
+
 from ..core.actor import Actor, Message, MessageType, ActorState
 
 logger = logging.getLogger(__name__)
@@ -65,6 +67,12 @@ class MonitorActor(Actor):
                 if actor.actor_id != self.actor_id:
                     self._last_seen[actor.actor_id] = now
 
+        # Prime the cpu_percent baseline so the first reading is meaningful.
+        try:
+            psutil.cpu_percent(interval=None)
+        except Exception:
+            pass
+
         self._tasks.append(asyncio.create_task(self._monitor_loop()))
         logger.info(f"[{self.name}] Monitor started. check_interval={self.check_interval}s")
 
@@ -93,6 +101,7 @@ class MonitorActor(Actor):
                 await self._check_all_actors()
                 await self._check_error_registry()
                 await self._publish_system_health()
+                await self._publish_host_stats()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -305,3 +314,17 @@ class MonitorActor(Actor):
             ],
         }
         await self._mqtt_publish("system/health", health)
+
+    async def _publish_host_stats(self):
+        try:
+            cpu_pct = psutil.cpu_percent(interval=None)
+            vm = psutil.virtual_memory()
+            stats = {
+                "cpu":          cpu_pct,
+                "mem_used_mb":  vm.used / 1024 / 1024,
+                "mem_total_mb": vm.total / 1024 / 1024,
+                "timestamp":    time.time(),
+            }
+            await self._mqtt_publish("system/host", stats)
+        except Exception as e:
+            logger.debug(f"[{self.name}] host stats error: {e}")

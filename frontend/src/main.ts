@@ -545,6 +545,12 @@ mqtt.on("system-health", () => {
   hud.setSystemHealth(true);
 });
 
+mqtt.on("host-stats", (stats) => {
+  if (stats.cpu !== undefined || stats.memUsedMb !== undefined) {
+    scene.setHostStats(stats.cpu ?? 0, stats.memUsedMb ?? 0, stats.memTotalMb);
+  }
+});
+
 mqtt.on("coin", (payload) => {
   pushFeed({
     type: "qa-flag",
