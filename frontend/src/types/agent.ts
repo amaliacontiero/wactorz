@@ -27,6 +27,8 @@ export interface AgentInfo {
   messagesProcessed?: number;
   costUsd?: number;
   uptime?: number;
+  /** Set for remote-runner agents — the node name (e.g. "rpi"). */
+  node?: string;
 }
 
 // ── MQTT payloads ─────────────────────────────────────────────────────────────
@@ -42,6 +44,8 @@ export interface HeartbeatPayload {
   cpu?: number;
   memory_mb?: number;
   task?: string;
+  /** Set for remote-runner agents — matches node_name from remote_runner.py. */
+  node?: string;
 }
 
 /** Metrics payload — LLM cost, token counts, message counts. */

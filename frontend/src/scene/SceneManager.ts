@@ -227,8 +227,10 @@ export class SceneManager {
 
   reconcileAgents(liveAgents: AgentInfo[]): void {
     const liveIds = new Set(liveAgents.map((agent) => agent.id));
-    for (const id of this.agents.keys()) {
-      if (!liveIds.has(id)) this.removeAgent(id);
+    for (const [id, agent] of this.agents) {
+      // Remote agents (node field set) are not in the local REST response —
+      // keep them; they get evicted naturally when their node goes stale.
+      if (!liveIds.has(id) && !agent.node) this.removeAgent(id);
     }
     liveAgents.forEach((agent) => this.addOrUpdateAgent(agent));
   }
@@ -257,6 +259,7 @@ export class SceneManager {
             ? payload.timestampMs
             : Date.now(),
         ).toISOString(),
+        ...(payload.node !== undefined && { node: payload.node }),
       });
       // Immediately pulse the newly created card — without this, the dot
       // blinks infinitely for ~10s until the next scheduled heartbeat.
