@@ -850,11 +850,12 @@ def parse_topic(topic: str, payload_str: str):
                 uptime = float(uptime)
             except (TypeError, ValueError):
                 uptime = 0.0
-            if uptime < 10.0:
+            agent_state = data.get("state", "")
+            if uptime < 10.0 and agent_state not in ("stopped", "failed"):
                 _undelete(agent_id)
                 logger.info(
                     f"[MQTT] Re-admitting respawned agent {agent_id[:8]} "
-                    f"(uptime={uptime:.1f}s, previously deleted)"
+                    f"(uptime={uptime:.1f}s, state={agent_state}, previously deleted)"
                 )
 
         # If the agent was just deleted, update_agent() refuses to recreate
