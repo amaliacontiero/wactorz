@@ -3,7 +3,7 @@ HomeAssistantAgent - Unified Home Assistant agent.
 
 Handles all HA operations in a single agent:
   - recommend_hardware    : advise which devices/entities are needed
-  - create_automation     : build and insert a new automation via REST
+  - create_automation     : build and insert a new automation via REST (temporarily disabled — routes to recommend_hardware)
   - delete_automation     : remove an existing automation
   - edit_automation       : update an existing automation
   - list_automations      : enumerate all automations

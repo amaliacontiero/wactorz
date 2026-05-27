@@ -185,11 +185,15 @@ Wraps the Home Assistant REST API. Uses multiple internal LLM calls to classify 
 | `list_areas` | List all areas |
 | `list_devices` | List all devices |
 | `recommend_hardware` | Hardware recommendations using compact `get_simplified_ha_data` snapshot |
-| `create_automation` | Generate and POST a YAML automation via HA REST API |
+| `create_automation` | **Temporarily disabled** — currently routed to `recommend_hardware` instead of generating an automation |
 | `edit_automation` | Identify and update an existing automation |
 | `delete_automation` | Remove an automation |
 | `get_entities_state` | Fetch current state for explicit entity IDs and re-publish to MQTT — used by PlannerAgent bootstrap |
 | `other` | Answer open-ended HA questions via a short LLM tool-call loop backed by `get_simplified_ha_data` |
+
+#### Prompts
+
+All LLM system prompts used by this agent live in `wactorz/agents/prompts/home_assistant_prompts.py`.
 
 #### Configuration
 

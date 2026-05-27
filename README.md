@@ -852,7 +852,7 @@ Connects to your Home Assistant instance (set `HA_URL` and `HA_TOKEN`) and handl
 | Intent | Description |
 |--------|-------------|
 | `recommend_hardware` | Suggests devices and entities for an automation request |
-| `create_automation` | Generates and inserts a new automation via the HA REST API |
+| `create_automation` | Temporarily disabled — currently routes to `recommend_hardware` |
 | `edit_automation` | Identifies which automation to change and applies the update |
 | `delete_automation` | Finds and deletes an automation by name (fuzzy matching) |
 | `list_automations` | Returns a formatted list of all automations |
