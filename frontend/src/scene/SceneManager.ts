@@ -251,8 +251,11 @@ export class SceneManager {
     const now = Date.now();
     for (const [id, agent] of this.agents) {
       if (!agent.node) continue;
-      const lastSeen = this._remoteNodeLastSeen.get(agent.node) ?? 0;
-      if (now - lastSeen > staleMs) this.removeAgent(id);
+      const lastSeen = this._remoteNodeLastSeen.get(agent.node);
+      // Only prune if the node has been seen at least once AND has since gone
+      // stale.  If we have never received a node-heartbeat for this node yet,
+      // leave the agent alone — we simply don't have timing data yet.
+      if (lastSeen !== undefined && now - lastSeen > staleMs) this.removeAgent(id);
     }
   }
 
