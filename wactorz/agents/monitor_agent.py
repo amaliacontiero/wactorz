@@ -60,6 +60,11 @@ class MonitorActor(Actor):
         # Cooldown: actor_id -> last time we notified main
         self._last_notified:  dict[str, float] = {}
 
+        # Cached Process object — cpu_percent(interval=None) tracks a delta
+        # between consecutive calls on the SAME instance; creating a new one
+        # each time always returns 0.0.
+        self._proc = psutil.Process()
+
     async def on_start(self):
         if self._registry:
             now = time.time()
@@ -67,9 +72,10 @@ class MonitorActor(Actor):
                 if actor.actor_id != self.actor_id:
                     self._last_seen[actor.actor_id] = now
 
-        # Prime the process cpu_percent baseline so the first reading is meaningful.
+        # Prime the baseline on the cached instance so the first real reading
+        # is meaningful (cpu_percent needs two samples on the same object).
         try:
-            psutil.Process().cpu_percent(interval=None)
+            self._proc.cpu_percent(interval=None)
         except Exception:
             pass
 
@@ -317,9 +323,8 @@ class MonitorActor(Actor):
 
     async def _publish_host_stats(self):
         try:
-            proc = psutil.Process()
-            cpu_pct = proc.cpu_percent(interval=None)
-            mem_info = proc.memory_info()
+            cpu_pct = self._proc.cpu_percent(interval=None)
+            mem_info = self._proc.memory_info()
             mem_used_mb = mem_info.rss / 1024 / 1024
             mem_total_mb = psutil.virtual_memory().total / 1024 / 1024
             stats = {
