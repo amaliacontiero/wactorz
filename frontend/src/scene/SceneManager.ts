@@ -74,6 +74,7 @@ export class SceneManager {
   private activeTheme: ThemeBase;
   private cardDashboard: CardDashboard | null = null;
   private socialDashboard: SocialDashboard | null = null;
+  private _remoteNodeLastSeen: Map<string, number> = new Map();
 
   constructor(canvas: HTMLCanvasElement) {
     // ── Engine + Scene ────────────────────────────────────────────────────────
@@ -219,6 +220,14 @@ export class SceneManager {
 
   updateRemoteNode(name: string, agents: string[]): void {
     this.cardDashboard?.updateRemoteNode(name, agents);
+    this._remoteNodeLastSeen.set(name, Date.now());
+    // Evict remote agents for this node whose names are no longer in the live list.
+    const liveNames = new Set(agents);
+    for (const [id, agent] of this.agents) {
+      if (agent.node === name && !liveNames.has(agent.name)) {
+        this.removeAgent(id);
+      }
+    }
   }
 
   setHostStats(cpu: number, memUsedMb: number, memTotalMb?: number): void {
@@ -228,11 +237,23 @@ export class SceneManager {
   reconcileAgents(liveAgents: AgentInfo[]): void {
     const liveIds = new Set(liveAgents.map((agent) => agent.id));
     for (const [id, agent] of this.agents) {
-      // Remote agents (node field set) are not in the local REST response —
-      // keep them; they get evicted naturally when their node goes stale.
+      // Remote agents are not in the local REST response — skip them here.
+      // They are evicted by updateRemoteNode() when their node heartbeat
+      // updates the live agent list, or by pruneStaleRemoteAgents() when
+      // the node stops heartbeating.
       if (!liveIds.has(id) && !agent.node) this.removeAgent(id);
     }
     liveAgents.forEach((agent) => this.addOrUpdateAgent(agent));
+  }
+
+  /** Remove agents belonging to nodes whose heartbeat has gone stale (>3 min). */
+  pruneStaleRemoteAgents(staleMs = 180_000): void {
+    const now = Date.now();
+    for (const [id, agent] of this.agents) {
+      if (!agent.node) continue;
+      const lastSeen = this._remoteNodeLastSeen.get(agent.node) ?? 0;
+      if (now - lastSeen > staleMs) this.removeAgent(id);
+    }
   }
 
   onHeartbeat(payload: HeartbeatPayload): void {

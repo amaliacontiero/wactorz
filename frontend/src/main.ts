@@ -237,7 +237,7 @@ wsChat.onStatePatch((agents, deletedId, stats) => {
 
 wsChat.connect(`${_wsBase}/ws`);
 refreshLiveActors();
-window.setInterval(refreshLiveActors, 15000);
+window.setInterval(() => { refreshLiveActors(); scene.pruneStaleRemoteAgents(); }, 15000);
 
 // ── WS log_feed → Activity Feed ───────────────────────────────────────────────
 // The server embeds its in-memory log_feed (spawned/status/logs/alerts) in
