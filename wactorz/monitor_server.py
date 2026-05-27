@@ -1557,6 +1557,12 @@ async def actors_handler(request):
     # Prefer the live registry (injected by cli.py) — actor objects carry the
     # authoritative protected flag.  Fall back to MQTT-derived state dict when
     # the registry is unavailable (standalone monitor_server mode).
+    #
+    # CONTRACT: the registry path intentionally excludes remote-runner agents
+    # (they are not in the local Python registry).  The frontend relies on this
+    # to distinguish local vs remote agents: any agent absent from this response
+    # but present via MQTT heartbeat with a "node" field is a remote agent and
+    # must NOT be evicted by the 15-second REST reconcile cycle.
     if registry is not None:
         result = []
         for actor in registry.all_actors():

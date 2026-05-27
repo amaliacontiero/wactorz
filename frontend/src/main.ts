@@ -476,6 +476,8 @@ mqtt.on("connected", () => {
     new CustomEvent("af-connection-status", { detail: { status: "live" } }),
   );
 
+  scene.pruneStaleRemoteAgents();
+
   if (seeded) return;
   seeded = true;
 
