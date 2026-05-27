@@ -717,7 +717,7 @@ export class CardDashboard {
         : "—";
 
     bar.innerHTML = `
-      <div class="af-host-label">HOST</div>
+      <div class="af-host-label">APP</div>
       <div class="af-host-metric">
         <div class="af-host-metric-label">CPU</div>
         <div class="af-host-bar-track">

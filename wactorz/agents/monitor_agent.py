@@ -67,9 +67,9 @@ class MonitorActor(Actor):
                 if actor.actor_id != self.actor_id:
                     self._last_seen[actor.actor_id] = now
 
-        # Prime the cpu_percent baseline so the first reading is meaningful.
+        # Prime the process cpu_percent baseline so the first reading is meaningful.
         try:
-            psutil.cpu_percent(interval=None)
+            psutil.Process().cpu_percent(interval=None)
         except Exception:
             pass
 
@@ -317,12 +317,15 @@ class MonitorActor(Actor):
 
     async def _publish_host_stats(self):
         try:
-            cpu_pct = psutil.cpu_percent(interval=None)
-            vm = psutil.virtual_memory()
+            proc = psutil.Process()
+            cpu_pct = proc.cpu_percent(interval=None)
+            mem_info = proc.memory_info()
+            mem_used_mb = mem_info.rss / 1024 / 1024
+            mem_total_mb = psutil.virtual_memory().total / 1024 / 1024
             stats = {
                 "cpu":          cpu_pct,
-                "mem_used_mb":  vm.used / 1024 / 1024,
-                "mem_total_mb": vm.total / 1024 / 1024,
+                "mem_used_mb":  mem_used_mb,
+                "mem_total_mb": mem_total_mb,
                 "timestamp":    time.time(),
             }
             await self._mqtt_publish("system/host", stats)
