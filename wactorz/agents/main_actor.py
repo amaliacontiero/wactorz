@@ -4513,11 +4513,13 @@ async def handle_task(agent, payload):
         # Imported lazily once — cheap on subsequent uses.
         from ..core.topic_bus import TopicContract, get_topic_bus
 
+        _last_exc_str: str | None = None
         while self.state.value not in ("stopped", "failed"):
             try:
                 async with aiomqtt.Client(self._mqtt_broker, self._mqtt_port) as client:
                     await client.subscribe("agents/+/manifest")
                     logger.info("[main] Subscribed to agent manifests.")
+                    _last_exc_str = None
                     async for msg in client.messages:
                         # ── Tombstone: empty payload means agent was deleted ──
                         raw_payload = msg.payload
@@ -4626,7 +4628,12 @@ async def handle_task(agent, payload):
                 break
             except Exception as e:
                 if self.state.value not in ("stopped", "failed"):
-                    logger.warning(f"[main] Manifest listener error: {e}. Reconnecting in 5s…")
+                    exc_str = str(e)
+                    if exc_str != _last_exc_str:
+                        logger.warning(f"[main] Manifest listener error: {e}. Reconnecting in 5s…")
+                        _last_exc_str = exc_str
+                    else:
+                        logger.debug("[main] Manifest listener still unavailable — retrying in 5s…")
                     await asyncio.sleep(5)
 
     async def _state_return_listener(self):
@@ -4659,11 +4666,13 @@ async def handle_task(agent, payload):
             return
 
         TOKEN_TTL_S = 300
+        _last_exc_str: str | None = None
         while self.state.value not in ("stopped", "failed"):
             try:
                 async with aiomqtt.Client(self._mqtt_broker, self._mqtt_port) as client:
                     await client.subscribe("nodes/+/state_return")
                     logger.info("[main] Subscribed to state_return topics.")
+                    _last_exc_str = None
                     async for msg in client.messages:
                         # Drop empty retained messages (cleanup tombstones)
                         raw = msg.payload
@@ -4761,7 +4770,12 @@ async def handle_task(agent, payload):
                 break
             except Exception as e:
                 if self.state.value not in ("stopped", "failed"):
-                    logger.warning(f"[main] state_return listener error: {e}. Reconnecting in 5s…")
+                    exc_str = str(e)
+                    if exc_str != _last_exc_str:
+                        logger.warning(f"[main] state_return listener error: {e}. Reconnecting in 5s…")
+                        _last_exc_str = exc_str
+                    else:
+                        logger.debug("[main] state_return listener still unavailable — retrying in 5s…")
                     await asyncio.sleep(5)
 
     # ── Node deployment ────────────────────────────────────────────────────
@@ -5196,12 +5210,14 @@ async def handle_task(agent, payload):
             logger.warning("[main] aiomqtt not available — node heartbeat tracking disabled.")
             return
 
+        _last_exc_str: str | None = None
         while self.state.value not in ("stopped", "failed"):
             try:
                 async with aiomqtt.Client(self._mqtt_broker, self._mqtt_port) as client:
                     await client.subscribe("nodes/+/heartbeat")
                     await client.subscribe("nodes/+/migrate_result")
                     logger.info("[main] Subscribed to node heartbeats.")
+                    _last_exc_str = None
                     async for msg in client.messages:
                         topic = str(msg.topic)
                         try:
@@ -5337,7 +5353,12 @@ async def handle_task(agent, payload):
                 break
             except Exception as e:
                 if self.state.value not in ("stopped", "failed"):
-                    logger.warning(f"[main] Node heartbeat listener error: {e}. Reconnecting in 5s…")
+                    exc_str = str(e)
+                    if exc_str != _last_exc_str:
+                        logger.warning(f"[main] Node heartbeat listener error: {e}. Reconnecting in 5s…")
+                        _last_exc_str = exc_str
+                    else:
+                        logger.debug("[main] Node heartbeat listener still unavailable — retrying in 5s…")
                     await asyncio.sleep(5)
 
     async def _node_offline_watcher(self):
@@ -5433,11 +5454,13 @@ async def handle_task(agent, payload):
             logger.warning("[main] aiomqtt not available — LLM bridge disabled.")
             return
 
+        _last_exc_str: str | None = None
         while self.state.value not in ("stopped", "failed"):
             try:
                 async with aiomqtt.Client(self._mqtt_broker, self._mqtt_port) as client:
                     await client.subscribe("main/llm_request")
                     logger.info("[main] LLM bridge listening on main/llm_request")
+                    _last_exc_str = None
                     async for msg in client.messages:
                         try:
                             data = json.loads(msg.payload.decode())
@@ -5511,7 +5534,12 @@ async def handle_task(agent, payload):
                 break
             except Exception as e:
                 if self.state.value not in ("stopped", "failed"):
-                    logger.warning(f"[main] LLM bridge listener error: {e}. Reconnecting in 5s…")
+                    exc_str = str(e)
+                    if exc_str != _last_exc_str:
+                        logger.warning(f"[main] LLM bridge listener error: {e}. Reconnecting in 5s…")
+                        _last_exc_str = exc_str
+                    else:
+                        logger.debug("[main] LLM bridge listener still unavailable — retrying in 5s…")
                     await asyncio.sleep(5)
 
     async def _remote_observed_samples_listener(self):
