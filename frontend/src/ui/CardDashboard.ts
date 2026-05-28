@@ -18,13 +18,13 @@ import type { FeedItem } from "./ActivityFeed";
 import { HAClient, type HAEntity } from "../io/HAClient";
 import { ambient, AMBIENT_TRACKS } from "../io/AmbientManager";
 import { tts } from "../io/TTSManager";
+import { toast } from "./ToastManager";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 const SYSTEM_AGENT_NAMES: Set<any> = new Set([
   "io-agent",
   "monitor-agent",
-  "manual-agent",
   "home-assistant-state-bridge",
   "home-assistant-map-agent",
 ]);
@@ -112,6 +112,9 @@ export class CardDashboard {
   private _historyLoaded: Set<string> = new Set();
   private _totalCostUsd: number | null = null;
   private _totalMessages: number | null = null;
+  private _hostCpu: number | null = null;
+  private _hostMemUsedMb: number | null = null;
+  private _hostMemTotalMb: number | null = null;
   private _costLimitInfo: Record<string, any> | null = null;
   private _costPollTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -284,6 +287,30 @@ export class CardDashboard {
     if (this.view === "overview") this._renderStats();
   }
 
+  setHostStats(cpu: number, memUsedMb: number, memTotalMb?: number): void {
+    this._hostCpu = cpu;
+    this._hostMemUsedMb = memUsedMb;
+    if (memTotalMb !== undefined) this._hostMemTotalMb = memTotalMb;
+    const bar = this.root.querySelector<HTMLElement>("#af-host-bar");
+    if (!bar) return;
+    const cpuFill = bar.querySelector<HTMLElement>(".af-host-bar-fill-cpu");
+    const cpuVal = bar.querySelector<HTMLElement>(".af-host-cpu-val");
+    if (cpuFill) cpuFill.style.width = `${Math.max(0, Math.min(100, cpu)).toFixed(1)}%`;
+    if (cpuVal) cpuVal.textContent = `${cpu.toFixed(1)}%`;
+    const memFill = bar.querySelector<HTMLElement>(".af-host-bar-fill-mem");
+    const memVal = bar.querySelector<HTMLElement>(".af-host-mem-val");
+    const total = this._hostMemTotalMb;
+    const pct = total && total > 0 ? (memUsedMb / total) * 100 : 0;
+    if (memFill) memFill.style.width = `${Math.max(0, Math.min(100, pct)).toFixed(1)}%`;
+    if (memVal) {
+      if (total && total > 0) {
+        memVal.textContent = `${(memUsedMb / 1024).toFixed(1)} / ${(total / 1024).toFixed(1)} GB`;
+      } else {
+        memVal.textContent = `${memUsedMb.toFixed(0)} MB`;
+      }
+    }
+  }
+
   // ── Agent events ──────────────────────────────────────────────────────────
 
   addAgent(agent: AgentInfo): void {
@@ -329,7 +356,7 @@ export class CardDashboard {
     if (this.view === "overview") this._renderNodes();
   }
 
-  onHeartbeat(agentId: string, timestampMs: number, cpu?: number, mem?: number): void {
+  onHeartbeat(agentId: string, timestampMs: number, _cpu?: number, _mem?: number): void {
     this.lastHb.set(agentId, timestampMs);
     if (!this.root.classList.contains("cd-visible")) return;
     if (this._removingIds.has(agentId)) return;
@@ -344,14 +371,6 @@ export class CardDashboard {
       dot.classList.remove("af-card-pulse", "af-card-stale");
       void dot.offsetWidth;
       dot.classList.add("af-card-pulse");
-    }
-    if (cpu !== undefined) {
-      const cpuEl = card.querySelector<HTMLElement>(".af-card-cpu");
-      if (cpuEl) { cpuEl.textContent = `CPU ${cpu.toFixed(1)}%`; cpuEl.style.display = ""; }
-    }
-    if (mem !== undefined) {
-      const memEl = card.querySelector<HTMLElement>(".af-card-mem");
-      if (memEl) { memEl.textContent = `${mem.toFixed(0)} MB`; memEl.style.display = ""; }
     }
   }
 
@@ -611,7 +630,7 @@ export class CardDashboard {
         </div>
         <span class="af-node-pill online">online</span>
       </div>`);
-    const staleMs = 90_000;
+    const staleMs = 180_000;
     const now = Date.now();
     for (const [name, info] of this._remoteNodes) {
       const online = now - info.lastSeen < staleMs;
@@ -631,6 +650,8 @@ export class CardDashboard {
   private _buildOverview(): HTMLElement {
     const el = document.createElement("div");
     el.className = "af-overview";
+
+    el.appendChild(this._buildHostBar());
 
     const statsGrid = document.createElement("div");
     statsGrid.className = "af-stats-grid";
@@ -671,6 +692,48 @@ export class CardDashboard {
     panels.appendChild(np);
     el.appendChild(panels);
     return el;
+  }
+
+  private _buildHostBar(): HTMLElement {
+    const bar = document.createElement("div");
+    bar.id = "af-host-bar";
+    bar.className = "af-host-bar";
+
+    const cpu = this._hostCpu;
+    const memUsed = this._hostMemUsedMb;
+    const memTotal = this._hostMemTotalMb;
+
+    const cpuPct = cpu != null ? Math.max(0, Math.min(100, cpu)) : 0;
+    const cpuText = cpu != null ? `${cpu.toFixed(1)}%` : "—";
+    const memPct =
+      memUsed != null && memTotal != null && memTotal > 0
+        ? Math.max(0, Math.min(100, (memUsed / memTotal) * 100))
+        : 0;
+    const memText =
+      memUsed != null
+        ? memTotal != null && memTotal > 0
+          ? `${(memUsed / 1024).toFixed(1)} / ${(memTotal / 1024).toFixed(1)} GB`
+          : `${memUsed.toFixed(0)} MB`
+        : "—";
+
+    bar.innerHTML = `
+      <div class="af-host-label">APP</div>
+      <div class="af-host-metric">
+        <div class="af-host-metric-label">CPU</div>
+        <div class="af-host-bar-track">
+          <div class="af-host-bar-fill af-host-bar-fill-cpu" style="width:${cpuPct.toFixed(1)}%"></div>
+        </div>
+        <div class="af-host-metric-val af-host-cpu-val">${cpuText}</div>
+      </div>
+      <div class="af-host-metric">
+        <div class="af-host-metric-label">MEM</div>
+        <div class="af-host-bar-track">
+          <div class="af-host-bar-fill af-host-bar-fill-mem" style="width:${memPct.toFixed(1)}%"></div>
+        </div>
+        <div class="af-host-metric-val af-host-mem-val">${memText}</div>
+      </div>
+    `;
+    return bar;
   }
 
   private _buildStatCards(container: HTMLElement): void {
@@ -834,8 +897,6 @@ export class CardDashboard {
       <span>♥ <span class="af-card-hb-time">${hbMs ? relTime(hbMs) : "—"}</span></span>
       <span>${msgs} msgs</span>
       ${agent.costUsd != null ? `<span>$${agent.costUsd.toFixed(4)}</span>` : ""}
-      ${agent.cpu != null ? `<span class="af-card-cpu" title="CPU usage">${agent.cpu.toFixed(1)}%</span>` : `<span class="af-card-cpu" style="display:none"></span>`}
-      ${agent.mem != null ? `<span class="af-card-mem" title="Memory">${agent.mem.toFixed(0)} MB</span>` : `<span class="af-card-mem" style="display:none"></span>`}
     `;
 
     card.appendChild(dot);
@@ -1401,31 +1462,22 @@ export class CardDashboard {
     sendBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M1 13L13 7 1 1v4.5l8.5 1.5-8.5 1.5V13z" fill="currentColor"/></svg>`;
     sendBtn.addEventListener("click", () => this._sendMessage(input, select));
 
+    // Wake button hidden for 0.5 — create with hidden id so IOBar refs don't throw
     const wakeBtn = document.createElement("button");
-    wakeBtn.className = "af-voice-btn";
     wakeBtn.id = "af-wake-btn-cd";
-    wakeBtn.title = "Wake word — click to enable";
-    wakeBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 15 15" fill="currentColor" aria-hidden="true"><rect x="1" y="6" width="2" height="3" rx="1"/><rect x="4.5" y="4" width="2" height="7" rx="1"/><rect x="8" y="2" width="2" height="11" rx="1"/><rect x="11.5" y="4" width="2" height="7" rx="1"/></svg>`;
-    wakeBtn.addEventListener("click", () =>
-      document.dispatchEvent(new CustomEvent("af-wake-toggle")),
-    );
+    wakeBtn.style.display = "none";
 
     const micBtn = document.createElement("button");
     micBtn.className = "af-voice-btn";
     micBtn.id = "af-mic-btn-cd";
-    micBtn.title = "Hold to speak";
+    micBtn.title = "Tap to speak";
     micBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true"><path d="M7.5 1.5a2.5 2.5 0 0 0-2.5 2.5v4a2.5 2.5 0 0 0 5 0V4a2.5 2.5 0 0 0-2.5-2.5Z" fill="currentColor"/><path d="M3 7.5a4.5 4.5 0 0 0 9 0" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/><line x1="7.5" y1="12" x2="7.5" y2="13.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/><line x1="5" y1="13.5" x2="10" y2="13.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg>`;
-    micBtn.addEventListener("pointerdown", (e) => {
-      e.preventDefault();
-      micBtn.setPointerCapture(e.pointerId);
-      document.dispatchEvent(new CustomEvent("af-mic-start"));
-    });
-    micBtn.addEventListener("pointerup",     () => document.dispatchEvent(new CustomEvent("af-mic-stop")));
-    micBtn.addEventListener("pointercancel", () => document.dispatchEvent(new CustomEvent("af-mic-stop")));
+    micBtn.addEventListener("click", () =>
+      document.dispatchEvent(new CustomEvent("af-mic-toggle")),
+    );
 
     if ((document.body as any).__voiceUnavailable) {
-      wakeBtn.style.display = "none";
-      micBtn.style.display  = "none";
+      micBtn.style.display = "none";
     }
 
     bar.append(wakeBtn, micBtn, select, input, sendBtn);
@@ -2093,7 +2145,7 @@ export class CardDashboard {
 
   private _refreshTimestamps(): void {
     const now = Date.now();
-    const STALE_MS = 90_000; // matches nodes panel threshold
+    const STALE_MS = 180_000; // matches nodes panel threshold
     this.lastHb.forEach((ms, id) => {
       const card = this.root.querySelector<HTMLElement>(`[data-id="${CSS.escape(id)}"]`);
       if (!card) return;
@@ -3160,45 +3212,90 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
   private _buildResetPopover(): HTMLElement {
     const pop = document.createElement("div");
     pop.className = "af-audio-popover glass";
-    pop.style.cssText = "min-width:180px;padding:10px 12px;";
+    pop.style.cssText = "min-width:210px;padding:12px 14px;";
 
     const title = document.createElement("div");
     title.textContent = "Clear stored state";
-    title.style.cssText = "font-size:11px;opacity:.55;margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em;";
+    title.style.cssText = "font-size:10px;font-weight:600;opacity:.45;margin-bottom:10px;text-transform:uppercase;letter-spacing:.08em;";
     pop.appendChild(title);
 
-    const scopes: { scope: string; label: string }[] = [
-      { scope: "chat",    label: "💬 Chat history" },
-      { scope: "metrics", label: "📊 Metrics & costs" },
-      { scope: "spawns",  label: "🚀 Spawn registry" },
-      { scope: "state",   label: "🗂 Agent state files" },
-      { scope: "all",     label: "🗑 Wipe everything" },
+    const ICON = {
+      chat:    `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9.5a5 5 0 0 1-5 5H3l-2 2V5a5 5 0 0 1 5-5h3"/><circle cx="12" cy="4" r="3"/></svg>`,
+      metrics: `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="9" width="3" height="6" rx="1"/><rect x="6" y="5" width="3" height="10" rx="1"/><rect x="11" y="2" width="3" height="13" rx="1"/></svg>`,
+      spawns:  `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="2" r="1.5"/><circle cx="2" cy="13" r="1.5"/><circle cx="14" cy="13" r="1.5"/><path d="M8 3.5v4m0 4-5 3.5m5-3.5 5 3.5m-5-7.5-5 3.5m5-3.5 5 3.5"/></svg>`,
+      state:   `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="12" height="3" rx="1"/><rect x="2" y="8" width="12" height="3" rx="1"/><rect x="2" y="13" width="8" height="2" rx="1"/></svg>`,
+      logs:    `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2h10a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1Z"/><path d="M5 6h6M5 9h4"/></svg>`,
+      all:     `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4h12M5 4V2h6v2M6 7v5M10 7v5M3 4l1 9a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1l1-9"/></svg>`,
+    } as Record<string, string>;
+
+    const scopes: { scope: string; label: string; danger?: boolean }[] = [
+      { scope: "chat",    label: "Chat history" },
+      { scope: "metrics", label: "Metrics & costs" },
+      { scope: "spawns",  label: "Spawn registry" },
+      { scope: "state",   label: "Agent state files" },
+      { scope: "logs",    label: "Log files" },
+      { scope: "all",     label: "Wipe everything", danger: true },
     ];
 
-    for (const { scope, label } of scopes) {
+    scopes.forEach(({ scope, label, danger }, i) => {
+      if (danger) {
+        const hr = document.createElement("div");
+        hr.style.cssText = "height:1px;background:rgba(255,255,255,.08);margin:6px 0 8px;";
+        pop.appendChild(hr);
+      }
+
       const btn = document.createElement("button");
       btn.className = "af-mini-btn";
-      btn.style.cssText = "display:block;width:100%;margin-bottom:4px;text-align:left;";
-      btn.textContent = label;
+      btn.style.cssText = [
+        "display:flex;align-items:center;gap:8px;width:100%;",
+        "padding:6px 8px;margin-bottom:3px;border-radius:6px;",
+        "font-size:12px;text-align:left;transition:background .15s;",
+        danger ? "color:#f87171;" : "",
+      ].join("");
+      btn.innerHTML = `${ICON[scope] ?? ""}<span>${label}</span>`;
+
+      // Two-step confirm: first click arms, second fires
+      let armed = false;
+      let armTimer: ReturnType<typeof setTimeout> | null = null;
+
       btn.addEventListener("click", async () => {
+        if (!armed) {
+          armed = true;
+          const span = btn.querySelector("span")!;
+          const orig = span.textContent!;
+          span.textContent = `Confirm ${label.toLowerCase()}?`;
+          btn.style.background = danger ? "rgba(248,113,113,.15)" : "rgba(255,255,255,.1)";
+          armTimer = setTimeout(() => {
+            armed = false;
+            span.textContent = orig;
+            btn.style.background = "";
+          }, 3000);
+          return;
+        }
+
+        if (armTimer) clearTimeout(armTimer);
+        armed = false;
         pop.classList.remove("open");
-        if (!confirm(`Reset scope "${scope}"?`)) return;
+
         try {
           const res = await fetch("/api/reset", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ scope }),
           });
-          if (!res.ok) {
+          if (res.ok) {
+            toast.show({ type: "system", title: "Reset", message: `${label} cleared` });
+          } else {
             const err = await res.json().catch(() => ({}));
-            alert(`Reset failed: ${(err as any).error ?? res.status}`);
+            toast.show({ type: "alert-error", title: "Reset failed", message: (err as any).error ?? String(res.status) });
           }
         } catch (e) {
-          alert(`Reset failed: ${e}`);
+          toast.show({ type: "alert-error", title: "Reset failed", message: String(e) });
         }
       });
+
       pop.appendChild(btn);
-    }
+    });
 
     return pop;
   }

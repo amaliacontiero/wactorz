@@ -1335,6 +1335,60 @@ class _AgentAPI:
         self._mqtt_broker = actor._mqtt_broker
         self._mqtt_port   = actor._mqtt_port
 
+    # ── Identity properties (parity with _RemoteAgentAPI) ──────────────────
+    # The remote API exposes `agent.node` as the node_name of the runner the
+    # agent is running on. Generated code uses this for topic prefixing
+    # patterns like f"{agent.node}/{agent.name}/detections" — common enough
+    # that the LLM emits it routinely. Without the same property on local
+    # _AgentAPI, agents that migrate from a remote node back to main crash
+    # immediately with "'_AgentAPI' object has no attribute 'node'".
+    #
+    # The canonical "this agent is local" value across the rest of the
+    # framework (spawn registry, desired_state, list_nodes filters) is the
+    # empty string "" — see main_actor's `is_target_local` check which
+    # treats ("", "local", "main") as equivalent. For *display* though, an
+    # empty string concatenated into a topic produces a malformed leading
+    # slash. We compromise by returning "local" so f-strings stay readable
+    # and topics stay valid; user code that compares against "" should be
+    # updated to also accept "local".
+    @property
+    def node(self) -> str:
+        node = getattr(self._actor, "_node", None)
+        if node:
+            return str(node)
+        return "local"
+
+    # ── LLM convenience shims (parity with remote _RemoteAgentAPI) ─────────
+    # The remote runner exposes agent.chat(messages, ...) directly on the
+    # API object — generated code written on a remote node will use that
+    # form. Without the same surface here, migrating an agent local→remote
+    # and back (or copy-pasting code originally written for a remote node)
+    # crashes with "'_AgentAPI' object has no attribute 'chat'".
+    #
+    # These delegate to agent.llm so generated code keeps working in both
+    # environments. Both forms — agent.chat(...) and agent.llm.chat(...) —
+    # are valid; pick whichever feels cleaner in your code.
+
+    async def chat(self, messages, system: str = "", timeout: float = 60.0) -> str:
+        """
+        Multi-turn LLM call — mirrors _RemoteAgentAPI.chat() so the same
+        generated code runs locally and remotely.
+
+        ``messages`` is a list of {"role": "user"/"assistant", "content": "..."}.
+        For a single-turn prompt, prefer ``agent.llm.chat("prompt")`` instead.
+        """
+        if self.llm is None:
+            return "[No LLM configured for this agent]"
+        # Allow callers passing a bare string by promoting it to a single
+        # user-turn list — same forgiveness the remote side offers in practice.
+        if isinstance(messages, str):
+            messages = [{"role": "user", "content": messages}]
+        return await self.llm.complete(messages, system=system)
+
+    async def complete(self, messages, system: str = "", timeout: float = 60.0) -> str:
+        """Alias for chat() — matches _LLMInterface.complete() naming."""
+        return await self.chat(messages, system=system, timeout=timeout)
+
     # ── MQTT ───────────────────────────────────────────────────────────────
 
     async def publish(self, topic: str, data: Any):

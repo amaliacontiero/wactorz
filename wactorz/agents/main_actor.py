@@ -3860,8 +3860,85 @@ class MainActor(LLMAgent):
         )
         return actor
 
+    async def _apply_initial_state(self, name: str, config: dict) -> None:
+        """
+        Load a migrated state snapshot into the per-agent persistence layer
+        BEFORE the agent is spawned.
+
+        ``config["_initial_state"]`` is the dict shipped over MQTT from the
+        source node (or assembled by main when migrating local → remote and
+        then back). We pop it from the config (so it isn't saved into the
+        spawn registry) and write it through PersistenceAPI.load_snapshot()
+        so that when the new actor runs its on_start() and calls recall(),
+        the migrated conversation_history / counters / etc. are already there.
+
+        Without this hop, _initial_state arrives in the config dict but is
+        completely ignored — the local agent starts with an empty memory
+        regardless of what was shipped from the source node.
+
+        Called for BOTH local LLMAgent and local DynamicAgent spawns. No-op
+        when there's no snapshot or when the unified PersistenceAPI isn't
+        wired up (legacy pickle-only deployments).
+        """
+        snapshot = config.pop("_initial_state", None)
+        if not snapshot or not isinstance(snapshot, dict):
+            return
+
+        try:
+            from ..core.persistence import (
+                PersistenceAPI, get_db, get_redis, get_pickle_store,
+            )
+        except Exception as e:
+            logger.debug(
+                f"[{self.name}] PersistenceAPI not importable — falling back to "
+                f"legacy state injection for '{name}': {e}"
+            )
+            # Best-effort legacy fallback: write a state.pkl next to where
+            # Actor.__init__ will look for it. This covers the pickle-only
+            # codepath that still exists in actor.py.
+            try:
+                from pathlib import Path
+                import pickle as _pickle
+                safe = name.replace("/", "_").replace("\\", "_")
+                pdir = Path(str(self._persistence_dir.parent)) / safe
+                pdir.mkdir(parents=True, exist_ok=True)
+                with open(pdir / "state.pkl", "wb") as fh:
+                    _pickle.dump(snapshot, fh)
+                logger.info(
+                    f"[{self.name}] Wrote {len(snapshot)} key(s) of migrated "
+                    f"state to {pdir / 'state.pkl'} for '{name}' (legacy path)"
+                )
+            except Exception as e2:
+                logger.warning(
+                    f"[{self.name}] Legacy state injection failed for '{name}': {e2}"
+                )
+            return
+
+        db    = get_db()
+        redis = get_redis()
+        pkl   = get_pickle_store()
+        if not (db and redis and pkl):
+            logger.warning(
+                f"[{self.name}] PersistenceAPI stores not initialised — "
+                f"cannot apply migrated state for '{name}'"
+            )
+            return
+
+        api = PersistenceAPI(db, redis, pkl, name)
+        applied = api.load_snapshot(snapshot, replace=True)
+        logger.info(
+            f"[{self.name}] Applied migrated state for '{name}': "
+            f"{applied['sqlite']} SQLite, {applied['redis']} Redis, "
+            f"{applied['pickle']} pickle key(s) (from {len(snapshot)} shipped)"
+        )
+
     async def _spawn_llm_agent(self, config: dict, name: str):
         """Spawn a proper LLMAgent — best for chat, Q&A, reasoning tasks."""
+        # Apply any migrated state BEFORE spawn so on_start()'s recall() finds
+        # conversation_history / history_summary already in the DB. Without
+        # this the chat-agent's memory wouldn't survive a migrate-back.
+        await self._apply_initial_state(name, config)
+
         from .llm_agent import LLMAgent
         system_prompt = config.get("system_prompt", "You are a helpful assistant.")
         logger.info(f"[{self.name}] Spawning LLM agent '{name}'")
@@ -3927,6 +4004,11 @@ class MainActor(LLMAgent):
 
     async def _do_spawn_dynamic(self, config: dict, name: str, code: str):
         """Actually create and start the DynamicAgent."""
+        # Apply any migrated state BEFORE spawn so on_start() and the agent's
+        # generated setup() see the right values for counters, calibration,
+        # chat history etc. that were shipped from the source node.
+        await self._apply_initial_state(name, config)
+
         from .dynamic_agent import DynamicAgent
         actor = await self.spawn(
             DynamicAgent,
@@ -4042,6 +4124,122 @@ class MainActor(LLMAgent):
         finally:
             self._result_futures.pop(task_id, None)
 
+    # Synthetic bridge code shipped with type:"llm" agents when they're spawned
+    # on a remote node. The runner compiles this and finds handle_task, so the
+    # agent can actually respond to tasks instead of returning the "no
+    # handle_task function" error.
+    #
+    # Design points:
+    #   - All persistence is via agent.persist / agent.recall (these write to
+    #     the remote node's JSON state file under conversation_history).
+    #     conversation_history shipped via _initial_state from main is picked
+    #     up by recall() on first use, so memory survives migrate-back too.
+    #   - LLM calls go through agent.chat(messages, system=...) — on the remote
+    #     side this is _RemoteAgentAPI.chat, which RPCs back to main via the
+    #     main/llm_request bridge. No API key leaves main.
+    #   - System prompt is interpolated as a string literal at synthesis time
+    #     so the agent code doesn't need to look it up from config at runtime.
+    #     We use json.dumps to safely escape quotes / newlines / backslashes.
+    #   - History gets bounded at max_history turns (32 by default, matches
+    #     LLMAgent's default) so the prompt doesn't grow without bound.
+    _LLM_BRIDGE_CODE_TEMPLATE = '''
+# ── Auto-generated LLM bridge (synthesized by main when this agent was spawned
+# remotely with type: "llm"). Do not edit; replace the agent if you need to
+# change behavior. ─────────────────────────────────────────────────────────
+import time as _t
+
+_SYSTEM_PROMPT = {system_prompt_literal}
+_MAX_HISTORY   = {max_history}
+
+async def setup(agent):
+    # Conversation history may have been shipped via _initial_state at spawn
+    # time — agent.recall() finds it. If this is a fresh spawn, default to
+    # an empty list.
+    agent.state["history"] = list(agent.recall("conversation_history", []) or [])
+
+async def handle_task(agent, payload):
+    # Accept the same shapes LLMAgent does: dict with text/task/message/query,
+    # or a bare string. Anything else gets str()'d so the LLM at least gets
+    # something to look at instead of crashing on a non-string.
+    if isinstance(payload, dict):
+        text = (
+            payload.get("text")
+            or payload.get("task")
+            or payload.get("message")
+            or payload.get("query")
+            or str(payload)
+        )
+    else:
+        text = str(payload) if payload is not None else ""
+
+    started = _t.time()
+    history = agent.state.setdefault("history", [])
+    history.append({{"role": "user", "content": text, "ts": started}})
+
+    # Keep the prompt bounded — only send the last _MAX_HISTORY turns to the LLM.
+    safe_history = [
+        {{"role": m["role"], "content": str(m["content"])}}
+        for m in history[-_MAX_HISTORY:]
+        if isinstance(m, dict) and m.get("role") in ("user", "assistant")
+    ]
+
+    response = await agent.chat(safe_history, system=_SYSTEM_PROMPT)
+    duration = _t.time() - started
+
+    history.append({{"role": "assistant", "content": response, "ts": _t.time()}})
+    # Trim in-memory list too so it doesn't grow forever between persists.
+    if len(history) > _MAX_HISTORY * 2:
+        del history[: len(history) - _MAX_HISTORY * 2]
+    agent.persist("conversation_history", history)
+
+    return {{"text": response, "task": text[:60], "duration": duration}}
+'''
+
+    def _inject_llm_bridge_code(self, config: dict) -> dict:
+        """
+        If ``config`` is for an LLM-typed agent without code, return a copy
+        with synthesized bridge code so the remote runner can actually run it.
+
+        No-op (returns the original config) when:
+          - the config already has code (caller provided their own logic)
+          - the config isn't type "llm" (DynamicAgent, ha_actuator, etc. are
+            handled directly by the runner already)
+
+        Why a copy: callers may pass the same config dict for multiple writes
+        (spawn registry, desired_state, MQTT publish) and we don't want to
+        mutate it under their feet.
+        """
+        if not isinstance(config, dict):
+            return config
+        if (config.get("code") or "").strip():
+            return config
+        if (config.get("type") or "").strip().lower() != "llm":
+            return config
+
+        import json as _json
+        system_prompt = config.get("system_prompt", "You are a helpful assistant.")
+        max_history   = int(config.get("max_history", 32) or 32)
+        bridge = self._LLM_BRIDGE_CODE_TEMPLATE.format(
+            system_prompt_literal=_json.dumps(system_prompt),
+            max_history=max_history,
+        )
+
+        out = dict(config)
+        out["code"] = bridge
+        # description and capabilities are commonly already set by the LLM
+        # at spawn time; fill in sensible defaults if not so list_capabilities
+        # still works on the remote side.
+        out.setdefault("description",
+                       f"LLM-driven agent (remote bridge). System prompt: "
+                       f"{system_prompt[:80].rstrip()}{'...' if len(system_prompt) > 80 else ''}")
+        out.setdefault("input_schema",  {"text": "str — the question or request"})
+        out.setdefault("output_schema", {"text": "str — the LLM response"})
+        logger.info(
+            f"[{self.name}] Synthesized LLM bridge code for '{out.get('name')}': "
+            f"{len(bridge)} chars, max_history={max_history}"
+        )
+        return out
+
     async def _spawn_remote(self, config: dict, node: str, save: bool) -> None:
         """
         Publish a spawn command to a remote node via MQTT.
@@ -4056,8 +4254,16 @@ class MainActor(LLMAgent):
         remote node via SSH BEFORE the agent is spawned — so setup() won't fail
         with 'No module named X'.
         """
-        name     = config.get("name", "remote-agent")
-        packages = config.get("install", [])
+        # For LLM-type agents we ship a synthesized bridge code field over MQTT
+        # (the remote runner only knows how to run DynamicAgent-shaped code).
+        # We keep the registry-saved config CLEAN — just system_prompt, no code
+        # — so the bridge is re-synthesized fresh on every spawn / restart /
+        # migrate. This avoids carrying the bridge as dead baggage into local
+        # spawn configs on migrate-back, and keeps the spawn registry small.
+        wire_config = self._inject_llm_bridge_code(config)
+
+        name     = wire_config.get("name", "remote-agent")
+        packages = wire_config.get("install", [])
         if isinstance(packages, str):
             packages = [p.strip() for p in packages.replace(",", " ").split()]
 
@@ -4129,16 +4335,19 @@ class MainActor(LLMAgent):
                     f"Install manually: ssh into {node} and run: pip install {' '.join(packages)} --break-system-packages"
                 )
 
-        # Publish individual spawn (for immediate delivery)
+        # Publish individual spawn (for immediate delivery).
+        # Uses wire_config so any LLM-bridge synthesis is included on the wire.
         await self._mqtt_publish(
             f"nodes/{node}/spawn",
-            config,
+            wire_config,
             retain=True,
             qos=1,
         )
 
-        # Update desired state for the whole node (retained — survives Pi reboot)
-        await self._update_node_desired_state(node, config)
+        # Update desired state for the whole node (retained — survives Pi reboot).
+        # Also uses wire_config so the runner can reconcile the agent into
+        # existence with usable bridge code after a reboot.
+        await self._update_node_desired_state(node, wire_config)
 
         await self._mqtt_publish(
             f"agents/{self.actor_id}/logs",
@@ -4147,6 +4356,8 @@ class MainActor(LLMAgent):
         )
 
         if save:
+            # Persist the CLEAN config (no synthesized bridge code) so the
+            # registry stays small and bridge regenerates fresh per spawn.
             self._save_to_spawn_registry(config)
 
         return None
@@ -4171,9 +4382,19 @@ class MainActor(LLMAgent):
         if remove_name:
             agents.pop(remove_name, None)
 
+        # The spawn registry holds CLEAN configs (no synthesized bridge code).
+        # But the runner that consumes desired_state on reboot will compile
+        # whatever code field it finds and call handle_task() on it. So pass
+        # every config through _inject_llm_bridge_code() here, which is a
+        # no-op for non-llm-type agents and idempotent if code is already
+        # present. Without this, restarting a remote node would silently
+        # bring back all LLM agents in a non-functional state — same as the
+        # original "no handle_task" bug, just delayed by one reboot.
+        wire_agents = [self._inject_llm_bridge_code(cfg) for cfg in agents.values()]
+
         await self._mqtt_publish(
             f"nodes/{node}/desired_state",
-            {"node": node, "agents": list(agents.values()),
+            {"node": node, "agents": wire_agents,
              "timestamp": __import__("time").time()},
             retain=True,
             qos=1,
@@ -4292,11 +4513,13 @@ class MainActor(LLMAgent):
         # Imported lazily once — cheap on subsequent uses.
         from ..core.topic_bus import TopicContract, get_topic_bus
 
+        _last_exc_str: str | None = None
         while self.state.value not in ("stopped", "failed"):
             try:
                 async with aiomqtt.Client(self._mqtt_broker, self._mqtt_port) as client:
                     await client.subscribe("agents/+/manifest")
                     logger.info("[main] Subscribed to agent manifests.")
+                    _last_exc_str = None
                     async for msg in client.messages:
                         # ── Tombstone: empty payload means agent was deleted ──
                         raw_payload = msg.payload
@@ -4405,7 +4628,12 @@ class MainActor(LLMAgent):
                 break
             except Exception as e:
                 if self.state.value not in ("stopped", "failed"):
-                    logger.warning(f"[main] Manifest listener error: {e}. Reconnecting in 5s…")
+                    exc_str = str(e)
+                    if exc_str != _last_exc_str:
+                        logger.warning(f"[main] Manifest listener error: {e}. Reconnecting in 5s…")
+                        _last_exc_str = exc_str
+                    else:
+                        logger.debug("[main] Manifest listener still unavailable — retrying in 5s…")
                     await asyncio.sleep(5)
 
     async def _state_return_listener(self):
@@ -4438,11 +4666,13 @@ class MainActor(LLMAgent):
             return
 
         TOKEN_TTL_S = 300
+        _last_exc_str: str | None = None
         while self.state.value not in ("stopped", "failed"):
             try:
                 async with aiomqtt.Client(self._mqtt_broker, self._mqtt_port) as client:
                     await client.subscribe("nodes/+/state_return")
                     logger.info("[main] Subscribed to state_return topics.")
+                    _last_exc_str = None
                     async for msg in client.messages:
                         # Drop empty retained messages (cleanup tombstones)
                         raw = msg.payload
@@ -4494,6 +4724,17 @@ class MainActor(LLMAgent):
                         local_cfg["replace"] = True
                         local_cfg.setdefault("name", agent_name)
 
+                        # For LLM agents, drop the synthesized bridge code we
+                        # injected on the way out. Locally, type:"llm" routes
+                        # to LLMAgent and the code field is ignored anyway —
+                        # keeping it would just bloat the spawn registry and
+                        # confuse anyone inspecting it. Detect by the marker
+                        # comment in the synthesized template; user-written
+                        # code never carries this header.
+                        if (local_cfg.get("type") == "llm"
+                                and "Auto-generated LLM bridge" in (local_cfg.get("code") or "")):
+                            local_cfg.pop("code", None)
+
                         logger.info(
                             f"[main] Received state_return for '{agent_name}' "
                             f"from '{from_node}' "
@@ -4529,7 +4770,12 @@ class MainActor(LLMAgent):
                 break
             except Exception as e:
                 if self.state.value not in ("stopped", "failed"):
-                    logger.warning(f"[main] state_return listener error: {e}. Reconnecting in 5s…")
+                    exc_str = str(e)
+                    if exc_str != _last_exc_str:
+                        logger.warning(f"[main] state_return listener error: {e}. Reconnecting in 5s…")
+                        _last_exc_str = exc_str
+                    else:
+                        logger.debug("[main] state_return listener still unavailable — retrying in 5s…")
                     await asyncio.sleep(5)
 
     # ── Node deployment ────────────────────────────────────────────────────
@@ -4738,75 +4984,74 @@ class MainActor(LLMAgent):
             # ── Remote → Remote migration ────────────────────────────────────
             # The source node still has the agent's compiled code and state;
             # it does the heavy lifting via its own _migrate_agent handler.
-            # Main only needs to dispatch the command and update the registry.
+            # Main needs to update BOTH nodes' desired_state retained messages
+            # so neither tries to re-spawn the agent in the wrong place after
+            # a restart: source must forget the agent, target must remember it.
             logger.info(f"[{self.name}] Migrating '{agent_name}' from node "
                         f"'{current_node}' → '{target_node}'")
             await self._mqtt_publish(
                 f"nodes/{current_node}/migrate",
                 {"name": agent_name, "target_node": target_node},
             )
+            # Pre-stage the spawn registry and desired-state updates so a
+            # source-node restart between the migrate command and the
+            # spawn-completes-on-target window doesn't re-spawn the agent
+            # on the wrong side.
+            if config:
+                updated = dict(config)
+                updated["node"] = target_node
+                self._save_to_spawn_registry(updated)
+                # Remove from source's desired_state (forget the agent there)
+                # and add to target's desired_state (remember it on arrival).
+                await self._update_node_desired_state(
+                    current_node, remove_name=agent_name
+                )
+                await self._update_node_desired_state(target_node, updated)
 
         elif current_node and is_target_local:
             # ── Remote → Local migration ─────────────────────────────────────
-            # Path A (have_code): use the spawn-registry copy of the code and
-            #   re-spawn locally; tell the remote node to just stop.
-            # Path B (no code): use the '@main' sentinel so the remote node
-            #   ships back BOTH its current config (with code) AND its state
-            #   over MQTT; the state_return listener on main re-spawns from
-            #   what comes back.
-            logger.info(f"[{self.name}] Migrating '{agent_name}' from node "
-                        f"'{current_node}' → local "
-                        f"(via {'registry config' if have_code else '@main sentinel'})")
+            # Always use the '@main' sentinel mechanism so the remote node
+            # ships its persistent state (conversation history, counters,
+            # calibration, etc.) back to main BEFORE the agent is stopped.
+            #
+            # Earlier versions had a "fast path" when main already had the
+            # code in its spawn registry — it just sent a plain stop and
+            # re-spawned locally, but that silently lost ALL of the agent's
+            # accumulated memory. For LLM-based agents like chat-agent this
+            # was particularly bad: every migrate-back wiped their history.
+            #
+            # The @main path is slightly slower (one MQTT round-trip) but
+            # always correct. The state_return listener handles the spawn
+            # once the remote node replies.
+            logger.info(
+                f"[{self.name}] Migrating '{agent_name}' from node "
+                f"'{current_node}' → local (via @main sentinel; "
+                f"{'spawn-registry code available as fallback' if have_code else 'no local code, fully remote-driven'})"
+            )
 
-            if have_code:
-                # Stop on the remote node and remove from desired state
-                await self._update_node_desired_state(current_node, remove_name=agent_name)
-                await self._mqtt_publish(
-                    f"nodes/{current_node}/stop", {"name": agent_name}, qos=1
-                )
-                await asyncio.sleep(0.5)   # give the remote node time to stop cleanly
-
-                # Spawn locally — strip the node field so _spawn_from_config treats it as local
-                new_config = dict(config)
-                new_config.pop("node", None)
-                new_config.pop("_initial_state", None)
-                new_config["replace"] = True
-
-                try:
-                    await self._spawn_from_config(new_config, save=True)
-                except Exception as exc:
-                    logger.exception(f"[{self.name}] Remote→local spawn failed for '{agent_name}'")
-                    return {"success": False,
-                            "message": f"Stopped on remote but failed to spawn locally: {exc}"}
-
-                target_node = ""   # canonical "local" in the registry
-            else:
-                # No code on main — ask the remote node to ship it back.
-                # The state_return listener will pick up the response and
-                # re-spawn locally with full state preservation.
-                import secrets
-                return_token = secrets.token_hex(8)
-                # Stash the token so the listener knows this return is ours
-                # and not from some other concurrent migration.
-                self._pending_state_returns: dict = getattr(
-                    self, "_pending_state_returns", {}
-                )
-                self._pending_state_returns[return_token] = {
-                    "agent_name":  agent_name,
-                    "from_node":   current_node,
-                    "started_at":  _time.time(),
-                }
-                await self._mqtt_publish(
-                    f"nodes/{current_node}/migrate",
-                    {"name": agent_name,
-                     "target_node": "@main",
-                     "return_token": return_token},
-                    qos=1,
-                )
-                msg = (f"Migration of '{agent_name}' from '{current_node}' → local "
-                       f"initiated (waiting for state from remote node).")
-                logger.info(f"[{self.name}] {msg}")
-                return {"success": True, "message": msg}
+            import secrets
+            return_token = secrets.token_hex(8)
+            # Stash the token so the listener knows this return is ours
+            # and not from some other concurrent migration.
+            self._pending_state_returns: dict = getattr(
+                self, "_pending_state_returns", {}
+            )
+            self._pending_state_returns[return_token] = {
+                "agent_name":  agent_name,
+                "from_node":   current_node,
+                "started_at":  _time.time(),
+            }
+            await self._mqtt_publish(
+                f"nodes/{current_node}/migrate",
+                {"name":         agent_name,
+                 "target_node":  "@main",
+                 "return_token": return_token},
+                qos=1,
+            )
+            msg = (f"Migration of '{agent_name}' from '{current_node}' → local "
+                   f"initiated (waiting for state from remote node).")
+            logger.info(f"[{self.name}] {msg}")
+            return {"success": True, "message": msg}
 
         else:
             # ── Local → Remote migration ─────────────────────────────────────
@@ -4880,7 +5125,14 @@ class MainActor(LLMAgent):
             except Exception as _e:
                 logger.debug(f"[{self.name}] Could not capture live contract: {_e}")
 
-            # Stop the local instance
+            # Stop the local instance, then purge its persistence.
+            #
+            # We've already snapshotted `initial_state` above — that's the
+            # authoritative copy now being shipped to the remote node. The
+            # local SQLite rows / pickle / Redis values are about to become
+            # stale ghosts. If the user later migrates the agent back here
+            # without those being cleared, they'd merge with the freshly
+            # arrived state and produce duplicate conversation entries.
             if self._registry:
                 local = self._registry.find_by_name(agent_name)
                 if local:
@@ -4888,6 +5140,17 @@ class MainActor(LLMAgent):
                         await self._registry.unregister(local.actor_id)
                         await local.stop()
                         self._agent_manifests.pop(agent_name, None)
+                        # Wipe SQLite / Redis / pickle for this agent. Uses
+                        # the same purge primitive as permanent delete — the
+                        # difference is the agent is being re-created on the
+                        # target node with the snapshot we already have.
+                        try:
+                            await self._purge_local_agent_persistence(local, agent_name)
+                        except Exception as e:
+                            logger.warning(
+                                f"[{self.name}] Could not purge local persistence "
+                                f"for '{agent_name}' after local→remote migration: {e}"
+                            )
                         await asyncio.sleep(0.3)
                     except Exception as e:
                         logger.warning(f"[{self.name}] Could not stop local '{agent_name}': {e}")
@@ -4915,8 +5178,11 @@ class MainActor(LLMAgent):
             logger.info(f"[{self.name}] {msg}")
             return {"success": True, "message": msg}
 
-        # Update spawn registry so next restart re-spawns to the right node.
-        # Only reached on remote→remote and remote→local-with-code paths.
+        # NOTE: with the @main sentinel now handling all remote→local cases
+        # and the inline remote→remote registry update above, this trailing
+        # block is no longer reached in normal flow. Kept as a defensive
+        # net for any future path that finishes without updating the
+        # spawn registry — the write is idempotent.
         if config:
             updated = dict(config)
             updated["node"] = target_node
@@ -4944,12 +5210,14 @@ class MainActor(LLMAgent):
             logger.warning("[main] aiomqtt not available — node heartbeat tracking disabled.")
             return
 
+        _last_exc_str: str | None = None
         while self.state.value not in ("stopped", "failed"):
             try:
                 async with aiomqtt.Client(self._mqtt_broker, self._mqtt_port) as client:
                     await client.subscribe("nodes/+/heartbeat")
                     await client.subscribe("nodes/+/migrate_result")
                     logger.info("[main] Subscribed to node heartbeats.")
+                    _last_exc_str = None
                     async for msg in client.messages:
                         topic = str(msg.topic)
                         try:
@@ -5085,7 +5353,12 @@ class MainActor(LLMAgent):
                 break
             except Exception as e:
                 if self.state.value not in ("stopped", "failed"):
-                    logger.warning(f"[main] Node heartbeat listener error: {e}. Reconnecting in 5s…")
+                    exc_str = str(e)
+                    if exc_str != _last_exc_str:
+                        logger.warning(f"[main] Node heartbeat listener error: {e}. Reconnecting in 5s…")
+                        _last_exc_str = exc_str
+                    else:
+                        logger.debug("[main] Node heartbeat listener still unavailable — retrying in 5s…")
                     await asyncio.sleep(5)
 
     async def _node_offline_watcher(self):
@@ -5181,11 +5454,13 @@ class MainActor(LLMAgent):
             logger.warning("[main] aiomqtt not available — LLM bridge disabled.")
             return
 
+        _last_exc_str: str | None = None
         while self.state.value not in ("stopped", "failed"):
             try:
                 async with aiomqtt.Client(self._mqtt_broker, self._mqtt_port) as client:
                     await client.subscribe("main/llm_request")
                     logger.info("[main] LLM bridge listening on main/llm_request")
+                    _last_exc_str = None
                     async for msg in client.messages:
                         try:
                             data = json.loads(msg.payload.decode())
@@ -5259,7 +5534,12 @@ class MainActor(LLMAgent):
                 break
             except Exception as e:
                 if self.state.value not in ("stopped", "failed"):
-                    logger.warning(f"[main] LLM bridge listener error: {e}. Reconnecting in 5s…")
+                    exc_str = str(e)
+                    if exc_str != _last_exc_str:
+                        logger.warning(f"[main] LLM bridge listener error: {e}. Reconnecting in 5s…")
+                        _last_exc_str = exc_str
+                    else:
+                        logger.debug("[main] LLM bridge listener still unavailable — retrying in 5s…")
                     await asyncio.sleep(5)
 
     async def _remote_observed_samples_listener(self):

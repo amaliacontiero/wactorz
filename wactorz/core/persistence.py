@@ -783,6 +783,64 @@ class PersistenceAPI:
         result.update(self.pickle.load(self.agent))
         return result
 
+    def load_snapshot(self, snapshot: dict, *, replace: bool = True) -> dict:
+        """
+        Bulk-load a state snapshot (the inverse of all()).
+
+        Used at migration time: the source node ships its complete state, and
+        the destination calls this once BEFORE the agent's on_start() runs so
+        recall() finds the migrated values during initialization.
+
+        When ``replace`` is True (default), every existing value for this
+        agent is wiped first — this is the correct semantics for migration,
+        where the incoming snapshot must fully replace any stale local state
+        from a prior incarnation of the same name. Pass replace=False for
+        merge semantics (advanced; rarely the right thing).
+
+        Returns a summary dict for logging.
+        """
+        if replace:
+            self.purge()
+
+        applied = {"sqlite": 0, "redis": 0, "pickle": 0}
+        if not isinstance(snapshot, dict):
+            return applied
+
+        # Pickle keys are anything not in the SQLite or Redis sets — we group
+        # them so one disk write covers all of them instead of N writes.
+        pickle_blob: dict = {}
+        for key, value in snapshot.items():
+            try:
+                if key in _SQLITE_KEYS:
+                    self.db.kv_set(self.agent, key, value)
+                    applied["sqlite"] += 1
+                elif key in _REDIS_KEYS:
+                    self.redis.set(f"{self.agent}:{key}", value)
+                    applied["redis"] += 1
+                else:
+                    pickle_blob[key] = value
+            except Exception as e:
+                logger.warning(
+                    f"[Persistence] Could not load snapshot key '{key}' for "
+                    f"'{self.agent}': {e}"
+                )
+
+        if pickle_blob:
+            try:
+                self.pickle.save(self.agent, pickle_blob)
+                applied["pickle"] = len(pickle_blob)
+            except Exception as e:
+                logger.warning(
+                    f"[Persistence] Pickle bulk-load failed for '{self.agent}': {e}"
+                )
+
+        logger.info(
+            f"[Persistence] Loaded snapshot for '{self.agent}': "
+            f"{applied['sqlite']} SQLite keys, {applied['redis']} Redis keys, "
+            f"{applied['pickle']} pickle keys"
+        )
+        return applied
+
     def purge(self) -> dict:
         """
         Permanently delete EVERY stored value for this agent across all
