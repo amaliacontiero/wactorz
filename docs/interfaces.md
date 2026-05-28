@@ -11,7 +11,7 @@ Wactorz supports multiple user-facing interfaces simultaneously. All of them fun
 | **MCP** | separate `wactorz-mcp` process | `wactorz[mcp]` | Model Context Protocol tools for MCP clients. |
 | **Discord** | `--interface discord` | `wactorz[discord]` | Bot responds in channels and DMs. |
 | **WhatsApp** | `--interface whatsapp` | `wactorz[whatsapp]` | Via Twilio Messaging. |
-| **Telegram** | `--interface telegram` | — | Bot API, polling mode. |
+| **Telegram** | `--interface telegram` | `python-telegram-bot` | Bot API, polling mode. |
 | **Web UI** | (always on) | — | Dashboard at `localhost:8888`. Disable with `--no-monitor`. |
 
 > **💡 Multiple interfaces** — Only one chat interface can be active at a time (set via `--interface`), but the Web UI dashboard always runs alongside it unless disabled.
@@ -69,13 +69,23 @@ wactorz --interface rest --port 8000
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/chat` | Send a message. Body: `{"message": "..."}`. Returns streamed or buffered response. |
+| `POST` | `/chat` | Send a message. Body: `{"message": "..."}`. Returns a buffered JSON response. |
 | `GET` | `/agents` | List all registered agents with their status. |
 | `GET` | `/health` | System health check. |
+| `GET` | `/metrics` | Prometheus-format HTTP and actor metrics. |
+| `GET` | `/ha-map` | Latest Home Assistant map snapshot, if available. |
+| `GET` | `/actors` | Alias for `/agents`. |
+| `GET` | `/actors/{actor_id}` | Get one actor's status payload. |
+| `POST` | `/actors/{actor_id}/message` | Send a task payload to an actor. Body: `{"content": "..."}`. |
+| `DELETE` | `/actors/{actor_id}` | Stop and unregister a non-protected actor. |
+| `POST` | `/actors/{actor_id}/pause` | Pause a non-protected actor. |
+| `POST` | `/actors/{actor_id}/resume` | Resume a paused non-protected actor. |
+| `GET` | `/actors/{actor_id}/metrics` | Get one actor's metrics payload. |
+| `POST` | `/agents/command` | Send `stop`, `pause`, or `resume` to a target actor. |
 
 #### Authentication
 
-Set `API_KEY` in your `.env` to require an API key on all requests:
+Set `API_KEY` in your `.env` to require an API key on `/chat`:
 
 ```bash
 API_KEY=my-secret-key
@@ -131,7 +141,7 @@ HA_TOKEN=                     # optional; enables direct HA tools
 | Tool | Description |
 |---|---|
 | `ask_wactorz(message)` | Send a message to the main orchestrator through `/chat`. |
-| `ask_agent(agent_name, message)` | Send a message to a named agent through `/chat`. |
+| `ask_agent(agent_name, message)` | Send a message through `/chat` with `agent_name` included in the payload. |
 | `list_agents()` | List currently registered agents from `/agents`. |
 | `list_capabilities(keyword)` | Ask main for the running and spawnable capability catalog. |
 | `stop_agent(agent_id)` | Stop and unregister a non-protected actor via REST. |
@@ -242,7 +252,7 @@ TWILIO_WHATSAPP_NUMBER=whatsapp:+14155238886
 
 ---
 
-## Telegram `[built-in]`
+## Telegram `[requires package]`
 
 **Flag:** `--interface telegram`
 

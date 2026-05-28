@@ -23,7 +23,7 @@ ha-addon/
 3. **`run.sh`** reads `options.json` via `jq`, exports env vars (`WACTORZ_*`, `MQTT_*`, etc.), and then:
    - Optionally starts embedded Mosquitto (if `mosquitto_embedded: true`).
    - Optionally starts embedded Fuseki (if `fuseki_embedded: true`).
-   - Launches `python3 -m wactorz` (the main Wactorz server).
+   - Launches `wactorz` (the main Wactorz server).
 4. **Ingress** — HA proxies the addon UI through the Supervisor ingress tunnel on port 8888, so the UI is accessible directly from the HA sidebar without exposing a port.
 
 ### HA Supervisor token vs long-lived token
@@ -72,7 +72,7 @@ cat > /tmp/options.json <<'EOF'
   "llm_api_key": "sk-ant-...",
   "mqtt_host": "localhost",
   "mqtt_port": 1883,
-  "mqtt_ws_port": 9001,
+  "mqtt_ws_port": 8083,
   "ha_url": "http://homeassistant.local:8123",
   "ha_token": "",
   "mosquitto_embedded": true,

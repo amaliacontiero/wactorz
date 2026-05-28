@@ -37,7 +37,7 @@ Options are defined in three places that must stay in sync:
 
 - Use `jq -r '.key // "default"'` for every option read — never assume the key exists.
 - Start embedded services before Wactorz and wait for them to be ready (`mosquitto` / `fuseki-server &` then a short health poll).
-- `exec python3 -m wactorz …` at the end so Wactorz is PID 1's child and receives signals correctly.
+- `exec wactorz` at the end so Wactorz is PID 1's child and receives signals correctly.
 - Test changes locally with `OPTIONS_PATH=/tmp/options.json bash ha-addon/run.sh` (see `README.md` for a sample `options.json`).
 
 ## Testing locally

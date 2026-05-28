@@ -54,7 +54,7 @@ Wactorz was born out of the need for a framework that could operate on real-worl
 
 ### The Actor Model
 
-Each agent is an Actor: an independent unit with its own async message loop, mailbox (`asyncio.Queue`), and lifecycle (`CREATED → RUNNING → PAUSED → STOPPED / FAILED`). Actors never share memory. They communicate by sending typed `Message` objects to each other via the `ActorRegistry`, which maps actor IDs to actor instances.
+Each agent is an Actor: an independent unit with its own async message loop, mailbox (`asyncio.Queue`), and lifecycle (`IDLE → RUNNING → PAUSED → STOPPED / FAILED`). Actors never share memory. They communicate by sending typed `Message` objects to each other via the `ActorRegistry`, which maps actor IDs to actor instances.
 
 ```
 Message flow:
@@ -102,10 +102,9 @@ This replaces all previous keyword heuristics with a single LLM classification s
 | `agents/home_assistant_map_agent.py` | Agent | Live entity/location map via HA WebSocket |
 | `agents/home_assistant_state_bridge_agent.py` | Agent | HA `state_changed` → MQTT bridge |
 | `agents/home_assistant_actuator_agent.py` | Agent | Reactive MQTT→HA actuator — subscribes to topics, calls HA services |
-| `interfaces/chat_interfaces.py` | I/O | CLI (streaming), REST, Discord, WhatsApp — all call `process_user_input[_stream]` |
+| `interfaces/chat_interfaces.py` | I/O | CLI (streaming), REST, Discord, WhatsApp, Telegram — all call `process_user_input[_stream]` |
 | `interfaces/mcp_server.py` | I/O | MCP server exposing Wactorz and Home Assistant tools to MCP-compatible clients |
-| `monitor_server.py` | I/O | MQTT→WebSocket bridge that feeds the live dashboard |
-| `monitor.html` | I/O | Real-time web dashboard — agent cards, logs, cost meters, error alerts |
+| `monitor_server.py` | I/O | MQTT→WebSocket bridge that feeds the live dashboard (also serves the SPA from `static/app/`) |
 
 ---
 
@@ -192,9 +191,10 @@ Spawned on-demand for two distinct modes:
 1. Query `home-assistant-agent` for real entity IDs from your HA instance
 2. Feasibility check — verifies required entity types exist, surfaces a clear error if not
 3. LLM designs the agent wiring using canonical patterns (see Section 9)
-4. Spawn `ha_actuator` agents (for HA service calls) and `dynamic` agents (for filtering, webcam, notifications)
-5. Register each rule in main's pipeline registry for persistence and listing
-6. Bootstrap HA state — re-publishes current state for all referenced entities over MQTT so freshly-spawned agents fire immediately instead of waiting for the next real HA state change
+4. In the default approval flow, return a pending proposal without spawning
+5. After approval, spawn `scheduled`, `ha_actuator`, and `dynamic` agents as needed
+6. Register each rule in main's pipeline registry for persistence and listing
+7. Bootstrap HA state — re-publishes current state for all referenced entities over MQTT so freshly-spawned agents fire immediately instead of waiting for the next real HA state change
 
 **Trigger the planner explicitly or automatically:**
 
@@ -431,9 +431,10 @@ The `PlannerAgent` handles pipeline requests:
 1. **Entity discovery** — queries `home-assistant-agent` for real entity IDs from your HA instance
 2. **Feasibility check** — verifies the required entity types exist; surfaces a clear error if not
 3. **Agent design** — LLM selects the correct wiring pattern and generates spawn configs with real entity IDs
-4. **Spawning** — agents are created and registered in the spawn registry (auto-restore on restart)
-5. **Rule registration** — the rule is saved in main's pipeline registry with its agent list
-6. **State bootstrap** — re-publishes current HA state for all referenced entities over MQTT so agents that subscribe to `homeassistant/state_changes/#` fire immediately without waiting for the next real HA event
+4. **Proposal** — by default, the plan is returned for user approval without spawning
+5. **Approved spawning** — after approval, agents are created and registered in the spawn registry (auto-restore on restart)
+6. **Rule registration** — the rule is saved in main's pipeline registry with its agent list
+7. **State bootstrap** — re-publishes current HA state for all referenced entities over MQTT so agents that subscribe to `homeassistant/state_changes/#` fire immediately without waiting for the next real HA event
 
 ### Wiring Patterns
 
@@ -445,7 +446,7 @@ The pipeline builder uses five canonical patterns:
 | 2 | HA sensor state change | Discord/webhook notification | dynamic agent |
 | 3 | Webcam object detection | HA service call | dynamic YOLO agent + `ha_actuator` |
 | 4 | Webcam object detection | Discord/webhook notification | dynamic YOLO agent + dynamic notify agent |
-| 5 | Timer/schedule | HA service call | dynamic timer agent + `ha_actuator` |
+| 5 | Timer/schedule | HA service call | `ScheduledAgent` + `ha_actuator` |
 | 6 | MQTT sensor data + condition (e.g. temp > 20 AND lamp is on) | HA service call | dynamic monitor agent + `ha_actuator` |
 
 Pattern 1 requires a dynamic filter agent because HA state is nested under `new_state.state` — the `ha_actuator`'s `detection_filter` only matches top-level payload keys, so the filter agent extracts the state and re-publishes a clean trigger.
@@ -534,7 +535,7 @@ await agent.publish('sensors/data', {'temp': 30.5, 'humidity': 47.7})
 # }
 ```
  
-**Planner reads before generating:** Before writing consumer code, the planner checks `observed_samples` on registered contracts. If none exist yet, it falls back to `_sample_live_topics()` — a single MQTT connection subscribes to all known topics with a global timeout and captures one real message per topic.
+**Planner reads before generating:** Before writing consumer code, the planner checks `observed_samples` on registered contracts. If none exist yet, it falls back to `_sample_live_topics()` — a single MQTT connection samples up to 10 known topics, with up to 5 publish topics per contract and a 15-second maximum wait.
  
 The result is injected into the LLM prompt:
  
@@ -725,7 +726,7 @@ python -m wactorz --interface discord --discord-token YOUR_TOKEN
 
 Start with `--interface rest` (default port 8000). Send `POST` requests to `/chat` with `{"message": "..."}`. Responses are blocking (non-streaming). Suitable for integration with other services.
 
-The Home Assistant map snapshot is also available at `GET /api/ha-map/latest`. It returns the latest cached map payload from `HomeAssistantMapAgent`, or `404` if no snapshot has been fetched yet.
+The Home Assistant map snapshot is also available at `GET /ha-map`. It returns the latest cached map payload from `HomeAssistantMapAgent`, or `404` if no snapshot has been fetched yet.
 
 ### MCP Server
 
@@ -789,7 +790,7 @@ Set `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_WHATSAPP_FROM` and st
 
 ### Live Dashboard
 
-Start `monitor_server.py` alongside wactorz. Open `monitor.html` in a browser. The dashboard shows real-time agent cards, log streams, token cost meters, spawn/stop controls, and error alerts — all fed via MQTT over WebSocket.
+The dashboard starts alongside wactorz by default at `http://localhost:8888`; use `--monitor-port` to change it or `--no-monitor` to disable it. It shows real-time agent cards, log streams, token cost meters, spawn/stop controls, and error alerts.
 
 ---
 
@@ -1221,7 +1222,7 @@ mosquitto -v
 docker run -it -p 1883:1883 eclipse-mosquitto
 ```
 
-By default Wactorz connects to `localhost:1883`. Override with `--mqtt-host` and `--mqtt-port`.
+By default Wactorz connects to `localhost:1883`. Override with `--mqtt-broker` and `--mqtt-port`.
 
 ### Environment Variables
 
@@ -1292,18 +1293,20 @@ Ensure **Message Content Intent** is enabled in the Discord Developer Portal (Bo
 
 ```
 wactorz/
-├── main.py                                    Entry point — CLI args, actor system setup, supervision tree
+├── __main__.py                                Entry point — runs `cli.app()` via `python -m wactorz`
+├── main.py                                    Embedded application entry — used by ha-addon and tests
+├── cli.py                                     argparse, supervision tree wiring, interface dispatch
+├── config.py                                  Env-driven `AppConfig` (LLM_*, MQTT_*, HA_*, FUSEKI_*, …)
 ├── remote_runner.py                           Self-contained edge node runner — deploy to any Pi or machine
-├── monitor_server.py                          MQTT → WebSocket bridge for dashboard
-├── monitor.html                               Live web dashboard
-├── fix_history.py                             One-time corrupted history cleanup utility
-├── requirements.txt
+├── monitor_server.py                          aiohttp dashboard + MQTT↔WS bridge (serves `static/app/`)
+├── reset.py                                   `wactorz-reset` CLI — clears persisted state
+├── fuseki.py / fuseki_proxy.py                Fuseki bootstrap and SPARQL HTTP proxy
 │
 ├── core/
 │   ├── actor.py                               Base Actor — mailbox, lifecycle, heartbeat, spawn, supervisor
 │   ├── registry.py                            ActorSystem, ActorRegistry, Supervisor — routing & OTP restarts
-│   └── topic_bus.py                           TopicBus — reactive pub/sub coordination, schema introspection,
-│                                              TopicContract, TopicRegistry, SharedStateHub, StreamWindow
+│   ├── topic_bus.py                           TopicBus — TopicContract / TopicRegistry, schema introspection
+│   └── persistence.py                         SQLite + Redis + Pickle three-tier persistence
 │
 ├── agents/
 │   ├── llm_agent.py                           LLMAgent — 5 providers, rolling summarization, cost tracking
@@ -1313,27 +1316,33 @@ wactorz/
 │   ├── monitor_agent.py                       MonitorAgent — heartbeat, error registry, recovery
 │   ├── installer_agent.py                     InstallerAgent — pip install locally + SSH deploy to remote nodes
 │   ├── catalog_agent.py                       CatalogAgent — pre-built recipe library, spawns agents by name
-│   ├── manual_agent.py                        ManualAgent — 3-layer PDF search and extraction
+│   ├── io_agent.py                            IOAgent — MQTT↔UI gateway for browser chat
+│   ├── scheduled_agent.py                     ScheduledAgent — first-class time triggers (daily/weekly/cron/once)
+│   ├── one_off_actuator_agent.py              OneOffActuatorAgent — ephemeral one-shot HA actuator
 │   ├── home_assistant_agent.py                HomeAssistantAgent — HA automation CRUD (LLM-backed, intent routing)
 │   ├── home_assistant_map_agent.py            HomeAssistantMapAgent — live entity/location map via HA WebSocket
 │   ├── home_assistant_state_bridge_agent.py   HomeAssistantStateBridgeAgent — HA state_changed → MQTT bridge
 │   ├── home_assistant_actuator_agent.py       HomeAssistantActuatorAgent — reactive MQTT→HA service actuator
-│   ├── code_agent.py                          CodeAgent — sandboxed Python execution
-│   └── ml_agent.py                            MLAgent, YOLOAgent, AnomalyDetectorAgent
+│   ├── timeseries_collector.py                TimeSeriesCollector — buffered MQTT → SQLite time-series tables
+│   ├── fuseki_agent.py                        FusekiAgent — SPARQL query/update interface (a.k.a. `fern-agent`)
+│   └── sparql_context.py                      SPARQL prompt helpers
+│
+├── catalogue_agents/                          Pre-built recipe files (loaded by CatalogAgent at startup)
+│   ├── image_gen_agent.py                     NIM FLUX.1-dev image generation
+│   ├── doc_to_pptx_agent.py                   PDF/TXT → PowerPoint conversion with real image extraction
+│   ├── anomaly_detector_agent.py              Statistical anomaly detection over HA + Sinergym streams
+│   └── manual_agent.py                        Device-manual search + PDF Q&A
+│
+├── experimental_agents/                       Optional add-on agents (code, ML, weather, news, …)
 │
 └── interfaces/
-    ├── chat_interfaces.py                     CLI (with /deploy, /migrate, /nodes), REST, Discord, WhatsApp
+    ├── chat_interfaces.py                     CLIInterface, RESTInterface, DiscordInterface, WhatsAppInterface, TelegramInterface
     └── mcp_server.py                          MCP tools/resources for compatible clients
 
-catalogue_agents/                              Pre-built agent recipe files (loaded by CatalogAgent at startup)
-├── __init__.py
-├── image_gen_agent.py                         NIM FLUX.1-dev image generation
-└── doc_to_pptx_agent.py                      PDF/TXT → PowerPoint conversion with real image extraction
-
 state/                                         Persisted agent state (auto-created, never commit to git)
-├── main/state.pkl                             Spawn registry, pipeline rules, user facts, webhook URLs, history
-├── planner/state.pkl                          Plan cache
-└── {agent-name}/state.pkl                     Per-agent persistent state
+├── wactorz.db                                 SQLite — spawn registry, pipeline rules, user facts, conversation, time-series
+├── mqtt_outbox.db                             SQLite — durable MQTT publish queue
+└── {agent-name}/state.pkl                     Per-agent pickle fallback (large/binary state)
 ```
 
 ---

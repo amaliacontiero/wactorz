@@ -37,10 +37,13 @@ The `[all]` extra installs everything except the ML stack (heavy torch dependenc
 |---|---|---|
 | `wactorz[anthropic]` | `anthropic` | `--llm anthropic` (default) |
 | `wactorz[openai]` | `openai` | `--llm openai` |
-| `wactorz[google]` | `google-generativeai` | `--llm gemini` |
+| `wactorz[google]` | `google-genai` | `--llm gemini` |
 | `wactorz[discord]` | `discord.py` | `--interface discord` |
 | `wactorz[whatsapp]` | `twilio` | `--interface whatsapp` |
 | `wactorz[mcp]` | `mcp` | MCP-compatible clients |
+| `wactorz[otel]` | OpenTelemetry SDK/exporter | OTLP tracing |
+| `wactorz[influx]` | `influxdb-client` | InfluxDB time-series export |
+| `wactorz[tts]` | `edge-tts` | text-to-speech support |
 | `wactorz[ml]` | `ultralytics`, `torch`, `numpy` | webcam detection pipelines |
 | `wactorz[all]` | all of the above except `ml` | recommended starting point |
 
@@ -133,13 +136,12 @@ WACTORZ_API_KEY=              # optional; mirrors API_KEY for REST auth
 # Only needed if using an external broker instead of the embedded one
 MQTT_HOST=localhost
 MQTT_PORT=1883
-MQTT_WS_PORT=9001
 ```
 
 #### Web dashboard
 
 ```env
-MONITOR_PORT=8888   # dashboard port, default 8888
+WS_PORT=8888   # dashboard port, default 8888
 ```
 
 ---
@@ -290,7 +292,7 @@ docker compose --profile python-full down -v
 
 ```bash
 # Rebuild and restart just the Python app
-docker compose --profile python-full up -d --build wactorz
+docker compose --profile python-full up -d --build wactorz-python
 
 # Full teardown and clean rebuild
 docker compose --profile python-full down -v
@@ -367,8 +369,6 @@ wactorz/                         ← repo root
 │   ├── interfaces/
 │   │   ├── chat_interfaces.py   ← CLI, REST, Discord, WhatsApp, Telegram
 │   │   └── mcp_server.py        ← MCP tools/resources for compatible clients
-│   └── static/
-│       └── docs/                ← documentation (served at /docs/)
 ├── static/                      ← source docs + frontend SPA
 ├── state/                       ← agent persistence (created at runtime)
 ├── Dockerfile                   ← Python app container
@@ -416,7 +416,7 @@ touch wactorz/catalogue_agents/my_agent.py
 
 ```bash
 pip install -e ".[dev]"
-pytest
+python -m unittest discover -s tests -p 'test_*.py'
 ```
 
 ---

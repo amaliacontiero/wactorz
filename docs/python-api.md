@@ -26,8 +26,8 @@ maps to the same ID across restarts.
 | `async broadcast(msg_type, payload)` | Send to all registered actors |
 | `async spawn(actor_class, **kwargs)` | Spawn a child actor (inherits MQTT, registry, persistence) |
 | `persist(key, value)` | Save a value (auto-routed to SQLite / Redis / Pickle) |
-| `recall(key, default)` | Load a persisted value |
-| `async publish_manifest(description, publishes, capabilities, input_schema, output_schema)` | Publish a retained capability manifest so main can discover this actor |
+| `recall(key, default=None)` | Load a persisted value |
+| `async publish_manifest(description="", publishes=None, capabilities=None, input_schema=None, output_schema=None)` | Publish a retained capability manifest so main can discover this actor |
 
 **Key attributes:**
 
@@ -61,6 +61,9 @@ class SupervisorStrategy(str, Enum):
 **Minimal custom actor:**
 
 ```python
+import asyncio
+import time
+
 from wactorz.core.actor import Actor, Message, MessageType
 
 class MyAgent(Actor):
@@ -76,7 +79,9 @@ class MyAgent(Actor):
         if msg.type != MessageType.TASK:
             return
         result = {"echo": msg.payload}
-        await self.send(msg.reply_to or msg.sender_id, MessageType.RESULT, result)
+        target = msg.reply_to or msg.sender_id
+        if target:
+            await self.send(target, MessageType.RESULT, result)
 
     async def _poll(self):
         while True:
@@ -196,8 +201,9 @@ MainActor and relays responses back to the browser over WebSocket.
 ### `wactorz.agents.planner_agent.PlannerAgent`
 
 On-demand orchestrator. Spawned per `PIPELINE`-classified request. Discovers
-available agents, generates a multi-step plan via LLM, spawns required agents,
-and self-terminates.
+available agents and generates a multi-step plan via LLM. By default MainActor
+runs it in `plan_only` mode and stores a pending proposal; after approval, the
+planner executes the approved plan, spawns required agents, and self-terminates.
 
 ---
 
