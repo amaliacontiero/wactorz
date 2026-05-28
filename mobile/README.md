@@ -51,6 +51,9 @@ main.dart
 | `speech_to_text` | Voice input in Chat screen |
 | `audioplayers` | TTS audio playback |
 | `google_fonts` | Typography |
+| `timeago` | Relative timestamps in feeds |
+| `intl` | Date and number formatting |
+| `cupertino_icons` | iOS-style icon set |
 | `shared_preferences` | Persist server URL |
 
 ## Building for release
@@ -68,4 +71,4 @@ flutter build ios --release
 
 ## Assets
 
-Static assets (icons, images) live in `assets/`. They are declared in `pubspec.yaml` under `flutter: assets:`.
+Static assets (icons, images) live in `assets/`. The current declared asset is `assets/icon.png` under `flutter: assets:`.
