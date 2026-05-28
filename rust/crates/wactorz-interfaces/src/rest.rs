@@ -36,6 +36,25 @@ use crate::ws::MonitorState;
 use wactorz_core::ActorSystem;
 use wactorz_core::message::{ActorCommand, Message};
 
+/// JSON body for POST /api/reset
+#[derive(Debug, Deserialize)]
+struct ResetRequest {
+    scope: String,
+    agent: Option<String>,
+}
+
+/// JSON body for POST /api/cost/limit
+#[derive(Debug, Deserialize)]
+struct CostLimitRequest {
+    limit_usd: f64,
+    #[serde(default = "default_period")]
+    period: String,
+}
+
+fn default_period() -> String {
+    "monthly".to_string()
+}
+
 /// Runtime config exposed via /api/config (mirrors Python's config_handler).
 #[derive(Clone, Debug, Default)]
 pub struct RuntimeConfig {
@@ -160,6 +179,20 @@ impl RestServer {
             // Global chat log
             .route("/api/chats", get(chat_log_handler))
             .route("/chats", get(chat_log_handler))
+            // Reset
+            .route("/api/reset", post(reset_handler))
+            // Cost tracking
+            .route("/api/cost", get(cost_handler))
+            .route("/cost", get(cost_handler))
+            .route("/api/cost/limit", post(cost_limit_handler))
+            .route("/cost/limit", post(cost_limit_handler))
+            .route("/api/cost/reset", post(cost_reset_handler))
+            .route("/cost/reset", post(cost_reset_handler))
+            // TTS
+            .route("/api/tts/voices", get(tts_voices_handler))
+            .route("/api/tts", get(tts_handler))
+            // HA bridge sync
+            .route("/api/ha/sync", post(ha_sync_handler))
             .with_state(self.state.clone());
 
         // Merge /ws and /mqtt onto the same port so the frontend can reach
@@ -603,6 +636,432 @@ async fn chat_handler(
             match state.system.registry.send(&entry.id, msg).await {
                 Ok(_) => Json(serde_json::json!({"status": "sent", "agent": target_name}))
                     .into_response(),
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            }
+        }
+    }
+}
+
+// ── Reset ────────────────────────────────────────────────────────────────────
+
+async fn reset_handler(
+    State(state): State<AppState>,
+    Json(body): Json<ResetRequest>,
+) -> axum::response::Response {
+    const VALID: &[&str] = &["chat", "state", "metrics", "spawns", "logs", "all"];
+    if !VALID.contains(&body.scope.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("scope must be one of {VALID:?}") })),
+        )
+            .into_response();
+    }
+    let data_dir = std::path::PathBuf::from(&state.config.data_dir);
+    let scope = body.scope.clone();
+    let agent = body.agent.clone();
+    let result =
+        tokio::task::spawn_blocking(move || do_reset(&data_dir, &scope, agent.as_deref())).await;
+    match result {
+        Ok(Ok(())) => Json(
+            serde_json::json!({ "status": "ok", "scope": body.scope, "agent": body.agent }),
+        )
+        .into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+fn do_reset(data_dir: &std::path::Path, scope: &str, agent: Option<&str>) -> anyhow::Result<()> {
+    match scope {
+        "chat" => do_reset_chat(data_dir, agent),
+        "state" => do_reset_state(data_dir, agent),
+        "metrics" => do_reset_metrics(data_dir, agent),
+        "spawns" => do_reset_spawns(data_dir, agent),
+        "logs" => do_reset_logs(data_dir),
+        "all" => {
+            do_reset_chat(data_dir, agent)?;
+            do_reset_state(data_dir, agent)?;
+            do_reset_metrics(data_dir, agent)?;
+            do_reset_spawns(data_dir, agent)?;
+            do_reset_logs(data_dir)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn do_reset_chat(data_dir: &std::path::Path, agent: Option<&str>) -> anyhow::Result<()> {
+    let db_path = data_dir.join("wactorz.db");
+    if db_path.exists() {
+        let conn = rusqlite::Connection::open(&db_path)?;
+        let _ = conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS chat_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts REAL, agent_name TEXT, role TEXT, content TEXT, session_id TEXT
+            );",
+        );
+        if let Some(name) = agent {
+            let _ = conn.execute(
+                "DELETE FROM chat_log WHERE agent_name = ?",
+                rusqlite::params![name],
+            );
+        } else {
+            let _ = conn.execute("DELETE FROM chat_log", []);
+        }
+    }
+    for_actor_dbs(data_dir, agent, |conn| {
+        let _ = conn.execute(
+            "DELETE FROM kv_store WHERE key IN ('conversation_history', 'history_summary')",
+            [],
+        );
+    });
+    Ok(())
+}
+
+fn do_reset_state(data_dir: &std::path::Path, agent: Option<&str>) -> anyhow::Result<()> {
+    for_actor_dbs(data_dir, agent, |conn| {
+        let _ = conn.execute("DELETE FROM kv_store", []);
+    });
+    Ok(())
+}
+
+fn do_reset_metrics(data_dir: &std::path::Path, agent: Option<&str>) -> anyhow::Result<()> {
+    for_actor_dbs(data_dir, agent, |conn| {
+        let _ = conn.execute(
+            "DELETE FROM kv_store WHERE key IN ('_final_cost', '_messages_processed')",
+            [],
+        );
+    });
+    Ok(())
+}
+
+fn do_reset_spawns(data_dir: &std::path::Path, agent: Option<&str>) -> anyhow::Result<()> {
+    let db_path = data_dir.join("wactorz.db");
+    if db_path.exists() {
+        if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+            if let Some(name) = agent {
+                let _ = conn.execute(
+                    "DELETE FROM spawn_registry WHERE name = ? OR spawned_by = ?",
+                    rusqlite::params![name, name],
+                );
+            } else {
+                let _ = conn.execute("DELETE FROM spawn_registry", []);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn do_reset_logs(data_dir: &std::path::Path) -> anyhow::Result<()> {
+    for name in &["wactorz.log", "monitor.log"] {
+        let p = data_dir.join(name);
+        if p.exists() {
+            std::fs::write(&p, b"")?;
+        }
+    }
+    Ok(())
+}
+
+/// Run `f` against the SQLite kv_store of every matching actor DB under `<data_dir>/actors/`.
+fn for_actor_dbs<F: FnMut(&rusqlite::Connection)>(
+    data_dir: &std::path::Path,
+    agent: Option<&str>,
+    mut f: F,
+) {
+    let actors_dir = data_dir.join("actors");
+    if !actors_dir.exists() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(&actors_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("db") {
+            continue;
+        }
+        if let Some(name) = agent {
+            let safe: String = name
+                .chars()
+                .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+                .collect();
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if stem != safe {
+                continue;
+            }
+        }
+        if let Ok(conn) = rusqlite::Connection::open(&path) {
+            f(&conn);
+        }
+    }
+}
+
+// ── Cost ─────────────────────────────────────────────────────────────────────
+
+async fn cost_handler(State(state): State<AppState>) -> axum::response::Response {
+    let data_dir = std::path::PathBuf::from(&state.config.data_dir);
+    let result =
+        tokio::task::spawn_blocking(move || aggregate_cost(&data_dir)).await;
+    match result {
+        Ok(info) => Json(info).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+fn aggregate_cost(data_dir: &std::path::Path) -> serde_json::Value {
+    let actors_dir = data_dir.join("actors");
+    let mut total_cost = 0.0f64;
+    let mut total_input = 0u64;
+    let mut total_output = 0u64;
+    let mut agents: Vec<serde_json::Value> = Vec::new();
+
+    if actors_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&actors_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("db") {
+                    continue;
+                }
+                let Ok(conn) = rusqlite::Connection::open(&path) else {
+                    continue;
+                };
+                let Ok(raw) = conn.query_row(
+                    "SELECT value FROM kv_store WHERE key = '_final_cost'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                ) else {
+                    continue;
+                };
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                    continue;
+                };
+                let cost = v.get("cost_usd").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                let input = v.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+                let output = v.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+                let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                total_cost += cost;
+                total_input += input;
+                total_output += output;
+                agents.push(serde_json::json!({
+                    "name": name,
+                    "cost_usd": cost,
+                    "input_tokens": input,
+                    "output_tokens": output,
+                }));
+            }
+        }
+    }
+
+    let (limit_usd, period) = read_cost_limit(data_dir);
+    serde_json::json!({
+        "total_cost_usd": (total_cost * 1_000_000.0).round() / 1_000_000.0,
+        "total_input_tokens": total_input,
+        "total_output_tokens": total_output,
+        "limit_usd": limit_usd,
+        "period": period,
+        "agents": agents,
+    })
+}
+
+fn read_cost_limit(data_dir: &std::path::Path) -> (f64, String) {
+    let db_path = data_dir.join("wactorz.db");
+    if !db_path.exists() {
+        return (0.0, "monthly".to_string());
+    }
+    let Ok(conn) = rusqlite::Connection::open(&db_path) else {
+        return (0.0, "monthly".to_string());
+    };
+    let _ = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+    );
+    let Ok(raw) = conn.query_row(
+        "SELECT value FROM kv_store WHERE key = 'cost_limit'",
+        [],
+        |row| row.get::<_, String>(0),
+    ) else {
+        return (0.0, "monthly".to_string());
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return (0.0, "monthly".to_string());
+    };
+    let limit = v.get("limit_usd").and_then(|x| x.as_f64()).unwrap_or(0.0);
+    let period = v
+        .get("period")
+        .and_then(|x| x.as_str())
+        .unwrap_or("monthly")
+        .to_string();
+    (limit, period)
+}
+
+async fn cost_limit_handler(
+    State(state): State<AppState>,
+    Json(body): Json<CostLimitRequest>,
+) -> axum::response::Response {
+    if !["daily", "weekly", "monthly"].contains(&body.period.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "period must be daily, weekly, or monthly" })),
+        )
+            .into_response();
+    }
+    let data_dir = std::path::PathBuf::from(&state.config.data_dir);
+    let limit_usd = body.limit_usd;
+    let period = body.period.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = data_dir.join("wactorz.db");
+        let conn = rusqlite::Connection::open(&db_path)?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        )?;
+        let val = serde_json::to_string(&serde_json::json!({ "limit_usd": limit_usd, "period": period }))?;
+        conn.execute(
+            "INSERT INTO kv_store (key, value) VALUES ('cost_limit', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![val],
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => Json(
+            serde_json::json!({ "ok": true, "limit_usd": body.limit_usd, "period": body.period }),
+        )
+        .into_response(),
+        Ok(Err(e)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn cost_reset_handler(State(state): State<AppState>) -> axum::response::Response {
+    let data_dir = std::path::PathBuf::from(&state.config.data_dir);
+    let result = tokio::task::spawn_blocking(move || {
+        for_actor_dbs(&data_dir, None, |conn| {
+            let _ = conn.execute("DELETE FROM kv_store WHERE key = '_final_cost'", []);
+        });
+        Ok::<_, anyhow::Error>(())
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => {
+            Json(serde_json::json!({ "ok": true, "total_cost_usd": 0.0 })).into_response()
+        }
+        Ok(Err(e)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+// ── TTS ──────────────────────────────────────────────────────────────────────
+
+async fn tts_voices_handler() -> axum::response::Response {
+    let output = tokio::process::Command::new("edge-tts")
+        .args(["--list-voices"])
+        .output()
+        .await;
+    match output {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            // Parse "Name: ...\nGender: ...\n\n" blocks
+            let mut voices: Vec<serde_json::Value> = Vec::new();
+            let mut name = String::new();
+            let mut gender = String::new();
+            for line in text.lines() {
+                if let Some(v) = line.strip_prefix("Name: ") {
+                    name = v.trim().to_string();
+                } else if let Some(v) = line.strip_prefix("Gender: ") {
+                    gender = v.trim().to_string();
+                } else if line.trim().is_empty() && !name.is_empty() {
+                    let locale: String = name.splitn(3, '-').take(2).collect::<Vec<_>>().join("-");
+                    voices.push(serde_json::json!({ "name": name, "locale": locale, "gender": gender }));
+                    name.clear();
+                    gender.clear();
+                }
+            }
+            if !name.is_empty() {
+                let locale: String = name.splitn(3, '-').take(2).collect::<Vec<_>>().join("-");
+                voices.push(serde_json::json!({ "name": name, "locale": locale, "gender": gender }));
+            }
+            Json(voices).into_response()
+        }
+        _ => Json(serde_json::json!([])).into_response(),
+    }
+}
+
+async fn tts_handler(Query(params): Query<HashMap<String, String>>) -> axum::response::Response {
+    let text = params.get("text").map(|s| s.trim().to_string()).unwrap_or_default();
+    if text.is_empty() {
+        return (StatusCode::BAD_REQUEST, "text param required").into_response();
+    }
+
+    // Strip code blocks and cap at 300 chars — same as Python
+    let clean: String = {
+        let mut s = text.clone();
+        while let (Some(start), Some(end)) = (s.find("```"), s.find("```").and_then(|i| s[i+3..].find("```").map(|j| i + 3 + j + 3))) {
+            s = format!("{}code block{}", &s[..start], &s[end..]);
+        }
+        s.chars().take(300).collect()
+    };
+
+    let default_voice = std::env::var("TTS_VOICE").unwrap_or_else(|_| "en-US-JennyNeural".to_string());
+    let voice = params.get("voice").cloned().unwrap_or(default_voice);
+
+    let tmp = std::env::temp_dir().join(format!("wactorz_tts_{}.mp3", std::process::id()));
+    let result = tokio::process::Command::new("edge-tts")
+        .args(["--text", &clean, "--voice", &voice, "--write-media", tmp.to_str().unwrap_or("/tmp/tts.mp3")])
+        .output()
+        .await;
+
+    match result {
+        Ok(out) if out.status.success() => {
+            match tokio::fs::read(&tmp).await {
+                Ok(audio) => {
+                    let _ = tokio::fs::remove_file(&tmp).await;
+                    (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "audio/mpeg"),
+                         (header::CACHE_CONTROL, "no-store")],
+                        audio,
+                    )
+                        .into_response()
+                }
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            }
+        }
+        _ => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "edge-tts not installed — pip install 'wactorz[tts]' or brew install edge-tts",
+        )
+            .into_response(),
+    }
+}
+
+// ── HA bridge sync ────────────────────────────────────────────────────────────
+
+async fn ha_sync_handler(State(state): State<AppState>) -> axum::response::Response {
+    if state.config.ha_token.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "HA_TOKEN not configured" })),
+        )
+            .into_response();
+    }
+    match state.system.registry.get_by_name("ha-state-bridge").await {
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "ha-state-bridge not running" })),
+        )
+            .into_response(),
+        Some(entry) => {
+            // Send Stop — the supervisor will restart the agent automatically
+            let msg = Message::command(entry.id.clone(), ActorCommand::Stop);
+            match state.system.registry.send(&entry.id, msg).await {
+                Ok(_) => Json(serde_json::json!({ "status": "restarted" })).into_response(),
                 Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
             }
         }
