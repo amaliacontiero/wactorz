@@ -15,7 +15,7 @@ Both publish to the same MQTT broker, so external clients can mix and match.
 
 ## Monitor REST API (`:8888`)
 
-Base URL: `http://localhost:8888/`. All endpoints accept both `/api/<path>` and `/<path>`.
+Base URL: `http://localhost:8888/`. Most endpoints accept both `/api/<path>` and `/<path>`; `/api/tts`, `/api/reset`, `/api/ha/sync`, and `/api/fuseki/*` are `/api/`-only.
 
 ### `GET /health`
 
@@ -185,7 +185,7 @@ Clear stored state and broadcast a reset event over the dashboard WebSocket.
 { "scope": "all", "agent": "optional-agent-name" }
 ```
 
-`scope` must be one of `"chat"`, `"state"`, `"metrics"`, `"spawns"`, or `"all"`.
+`scope` must be one of `"chat"`, `"state"`, `"metrics"`, `"spawns"`, `"logs"`, or `"all"`.
 `agent` is optional — when set, the reset is limited to that agent by name.
 
 **Response** `200 OK` with the result of the reset operation; `400` if `scope` is missing or invalid. Also available as the `wactorz-reset` CLI for offline use.
@@ -288,6 +288,8 @@ After connection the server streams every MQTT message as a JSON object. Field n
 ```
 
 The dashboard also receives bespoke control frames (`delete_agent`, snapshot diffs, etc.) over the same socket.
+
+The monitor additionally serves `ws://localhost:8888/mqtt`, a raw passthrough to the broker's WebSocket listener so clients can speak native MQTT over WebSocket through a single port.
 
 ---
 
