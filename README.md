@@ -68,11 +68,9 @@ Windows setup is in [docs/windows.md](docs/windows.md); the full set of deployme
 ## Example prompts
 
 ```text
-when motion is detected at the front door, turn on the porch light and send me the snapshot
-if the living room CO2 goes above 1000 ppm, open the window and notify me
-spawn a water leak detector on rpi-basement and text me on WhatsApp if it triggers
-dim the living room to 40% at sunset
-what is the energy consumption of the kitchen appliances today?
+when a person is detected in my pc camera, open the office light
+when the door opens, make reachy wakeup
+when the light has been on for too long, send me a discord notification
 ```
 
 ---
