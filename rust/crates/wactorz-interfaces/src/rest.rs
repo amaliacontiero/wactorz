@@ -1067,3 +1067,239 @@ async fn ha_sync_handler(State(state): State<AppState>) -> axum::response::Respo
         }
     }
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn setup_global_db(dir: &TempDir) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open(dir.path().join("wactorz.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chat_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts REAL, agent_name TEXT, role TEXT, content TEXT, session_id TEXT
+             );
+             CREATE TABLE spawn_registry (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT, spawned_by TEXT
+             );
+             CREATE TABLE kv_store (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn setup_actor_db(dir: &TempDir, name: &str) -> rusqlite::Connection {
+        let actors = dir.path().join("actors");
+        std::fs::create_dir_all(&actors).unwrap();
+        let conn = rusqlite::Connection::open(actors.join(format!("{name}.db"))).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE kv_store (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        )
+        .unwrap();
+        conn
+    }
+
+    // ── reset_chat ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn reset_chat_clears_all_chat_log_rows() {
+        let dir = TempDir::new().unwrap();
+        let conn = setup_global_db(&dir);
+        conn.execute(
+            "INSERT INTO chat_log (ts, agent_name, role, content, session_id) VALUES (1.0, 'a', 'user', 'hi', 's1')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chat_log (ts, agent_name, role, content, session_id) VALUES (2.0, 'b', 'assistant', 'hello', 's1')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        do_reset_chat(dir.path(), None).unwrap();
+
+        let conn = rusqlite::Connection::open(dir.path().join("wactorz.db")).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chat_log", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn reset_chat_with_agent_filter_only_removes_that_agent() {
+        let dir = TempDir::new().unwrap();
+        let conn = setup_global_db(&dir);
+        conn.execute("INSERT INTO chat_log (ts, agent_name, role, content, session_id) VALUES (1.0, 'keep', 'user', 'x', 's')", []).unwrap();
+        conn.execute("INSERT INTO chat_log (ts, agent_name, role, content, session_id) VALUES (2.0, 'remove', 'user', 'y', 's')", []).unwrap();
+        drop(conn);
+
+        do_reset_chat(dir.path(), Some("remove")).unwrap();
+
+        let conn = rusqlite::Connection::open(dir.path().join("wactorz.db")).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chat_log", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "only 'remove' rows should be deleted");
+    }
+
+    #[test]
+    fn reset_chat_clears_history_kv_in_actor_db() {
+        let dir = TempDir::new().unwrap();
+        setup_global_db(&dir);
+        let actor = setup_actor_db(&dir, "my-agent");
+        actor.execute("INSERT INTO kv_store VALUES ('conversation_history', '[]')", []).unwrap();
+        actor.execute("INSERT INTO kv_store VALUES ('history_summary', '\"\"')", []).unwrap();
+        actor.execute("INSERT INTO kv_store VALUES ('other_key', '\"keep\"')", []).unwrap();
+        drop(actor);
+
+        do_reset_chat(dir.path(), None).unwrap();
+
+        let actor = rusqlite::Connection::open(dir.path().join("actors/my-agent.db")).unwrap();
+        let remaining: Vec<String> = {
+            let mut stmt = actor.prepare("SELECT key FROM kv_store").unwrap();
+            stmt.query_map([], |r| r.get(0))
+                .unwrap()
+                .flatten()
+                .collect()
+        };
+        assert!(!remaining.contains(&"conversation_history".to_string()));
+        assert!(!remaining.contains(&"history_summary".to_string()));
+        assert!(remaining.contains(&"other_key".to_string()));
+    }
+
+    // ── reset_metrics ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn reset_metrics_removes_cost_and_message_count_keys() {
+        let dir = TempDir::new().unwrap();
+        setup_global_db(&dir);
+        let actor = setup_actor_db(&dir, "llm");
+        actor.execute("INSERT INTO kv_store VALUES ('_final_cost', '{\"cost_usd\":0.5}')", []).unwrap();
+        actor.execute("INSERT INTO kv_store VALUES ('_messages_processed', '100')", []).unwrap();
+        actor.execute("INSERT INTO kv_store VALUES ('other', '\"keep\"')", []).unwrap();
+        drop(actor);
+
+        do_reset_metrics(dir.path(), None).unwrap();
+
+        let actor = rusqlite::Connection::open(dir.path().join("actors/llm.db")).unwrap();
+        let remaining: Vec<String> = {
+            let mut stmt = actor.prepare("SELECT key FROM kv_store").unwrap();
+            stmt.query_map([], |r| r.get(0))
+                .unwrap()
+                .flatten()
+                .collect()
+        };
+        assert!(!remaining.contains(&"_final_cost".to_string()));
+        assert!(!remaining.contains(&"_messages_processed".to_string()));
+        assert!(remaining.contains(&"other".to_string()));
+    }
+
+    // ── reset_logs ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn reset_logs_truncates_existing_log_files() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("wactorz.log"), b"old log content").unwrap();
+        std::fs::write(dir.path().join("monitor.log"), b"monitor output").unwrap();
+
+        do_reset_logs(dir.path()).unwrap();
+
+        assert_eq!(std::fs::read(dir.path().join("wactorz.log")).unwrap(), b"");
+        assert_eq!(std::fs::read(dir.path().join("monitor.log")).unwrap(), b"");
+    }
+
+    #[test]
+    fn reset_logs_does_not_error_when_log_files_absent() {
+        let dir = TempDir::new().unwrap();
+        assert!(do_reset_logs(dir.path()).is_ok());
+    }
+
+    // ── aggregate_cost ────────────────────────────────────────────────────────
+
+    #[test]
+    fn aggregate_cost_sums_across_all_actor_dbs() {
+        let dir = TempDir::new().unwrap();
+        for (name, cost, inp, out) in [("a", 0.01, 100u64, 50u64), ("b", 0.02, 200, 100)] {
+            let actor = setup_actor_db(&dir, name);
+            let val = serde_json::to_string(&serde_json::json!({
+                "name": name, "cost_usd": cost,
+                "input_tokens": inp, "output_tokens": out,
+            }))
+            .unwrap();
+            actor.execute("INSERT INTO kv_store VALUES ('_final_cost', ?)", rusqlite::params![val]).unwrap();
+        }
+
+        let info = aggregate_cost(dir.path());
+        let total = info["total_cost_usd"].as_f64().unwrap();
+        assert!((total - 0.03).abs() < 1e-6, "total={total}");
+        assert_eq!(info["total_input_tokens"].as_u64().unwrap(), 300);
+        assert_eq!(info["total_output_tokens"].as_u64().unwrap(), 150);
+        assert_eq!(info["agents"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn aggregate_cost_returns_zero_when_no_actor_dbs() {
+        let dir = TempDir::new().unwrap();
+        let info = aggregate_cost(dir.path());
+        assert_eq!(info["total_cost_usd"].as_f64().unwrap(), 0.0);
+        assert_eq!(info["agents"].as_array().unwrap().len(), 0);
+    }
+
+    // ── read_cost_limit ───────────────────────────────────────────────────────
+
+    #[test]
+    fn read_cost_limit_returns_defaults_when_no_db() {
+        let dir = TempDir::new().unwrap();
+        let (limit, period) = read_cost_limit(dir.path());
+        assert_eq!(limit, 0.0);
+        assert_eq!(period, "monthly");
+    }
+
+    #[test]
+    fn read_cost_limit_reads_stored_limit() {
+        let dir = TempDir::new().unwrap();
+        let conn = setup_global_db(&dir);
+        let val = serde_json::to_string(&serde_json::json!({"limit_usd": 5.0, "period": "weekly"})).unwrap();
+        conn.execute("INSERT INTO kv_store VALUES ('cost_limit', ?)", rusqlite::params![val]).unwrap();
+        drop(conn);
+
+        let (limit, period) = read_cost_limit(dir.path());
+        assert!((limit - 5.0).abs() < 1e-9);
+        assert_eq!(period, "weekly");
+    }
+
+    // ── do_reset (integration) ────────────────────────────────────────────────
+
+    #[test]
+    fn do_reset_all_scope_clears_everything() {
+        let dir = TempDir::new().unwrap();
+        let conn = setup_global_db(&dir);
+        conn.execute("INSERT INTO chat_log (ts, agent_name, role, content, session_id) VALUES (1.0, 'x', 'user', 'hi', 's')", []).unwrap();
+        drop(conn);
+        let actor = setup_actor_db(&dir, "agent");
+        actor.execute("INSERT INTO kv_store VALUES ('_final_cost', '{\"cost_usd\":1.0}')", []).unwrap();
+        actor.execute("INSERT INTO kv_store VALUES ('conversation_history', '[]')", []).unwrap();
+        drop(actor);
+        std::fs::write(dir.path().join("wactorz.log"), b"stuff").unwrap();
+
+        do_reset(dir.path(), "all", None).unwrap();
+
+        let conn = rusqlite::Connection::open(dir.path().join("wactorz.db")).unwrap();
+        let chat_count: i64 = conn.query_row("SELECT COUNT(*) FROM chat_log", [], |r| r.get(0)).unwrap();
+        assert_eq!(chat_count, 0);
+        assert_eq!(std::fs::read(dir.path().join("wactorz.log")).unwrap(), b"");
+    }
+
+    #[test]
+    fn do_reset_rejects_unknown_scope_silently() {
+        let dir = TempDir::new().unwrap();
+        // Unknown scope is already rejected by the handler before calling do_reset,
+        // but do_reset itself should not error — it's a no-op.
+        assert!(do_reset(dir.path(), "nonexistent", None).is_ok());
+    }
+}
