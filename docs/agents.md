@@ -149,9 +149,9 @@ Runs `pip install` in a subprocess on request. Called automatically by `CatalogA
 |---|---|
 | **name** | `catalog` |
 | **restarts** | 10 |
-| **recipes dir** | `catalogue_agents/` |
+| **recipes dir** | `wactorz/catalogue_agents/` |
 
-Pre-built agent recipe library. On startup it loads every `AGENT_CODE` string from `catalogue_agents/*.py` and injects a manifest for each recipe into MainActor so the LLM is aware of what can be spawned. When asked to spawn a recipe it first asks InstallerAgent to install any declared dependencies, then creates a DynamicAgent with the recipe code and `trusted=True` — bypassing the code safety validator since catalog agents are pre-built and tested.
+Pre-built agent recipe library. On startup it loads every `AGENT_CODE` string from `wactorz/catalogue_agents/*.py` and injects a manifest for each recipe into MainActor so the LLM is aware of what can be spawned. When asked to spawn a recipe it first asks InstallerAgent to install any declared dependencies, then creates a DynamicAgent with the recipe code and `trusted=True` — bypassing the code safety validator since catalog agents are pre-built and tested.
 
 #### Usage
 
@@ -279,6 +279,55 @@ Subscribes to the Home Assistant WebSocket API and republishes every state-chang
 | **restarts** | 5 |
 
 Maintains a live map of entity IDs to friendly names and domains. Used by PlannerAgent and OneOffActuatorAgent to resolve user-friendly device names ("the living room lamp") to actual HA entity IDs before generating pipeline code or executing service calls.
+
+---
+
+### ScheduledAgent `[spawned]`
+
+**File:** `wactorz/agents/scheduled_agent.py`
+
+| | |
+|---|---|
+| **name** | set at spawn time (e.g. `evening-lights-trigger`) |
+| **spawned by** | PlannerAgent (pattern 5 — scheduled trigger) |
+| **persists** | `_schedule_state` (last fire time, fire count) → SQLite |
+
+First-class scheduled trigger primitive. Sleeps until the next fire time, publishes to its topic, then loops. Replaces the broken `while True: if datetime.now()…` patterns that LLM-generated dynamic agents kept producing for time-based rules.
+
+#### Schedule spec
+
+```python
+{"type": "daily",    "at": "17:00"}
+{"type": "weekly",   "at": "07:00", "days": ["mon", "tue", "wed", "thu", "fri"]}
+{"type": "interval", "seconds": 1800}
+{"type": "once",     "at": "2026-05-02T17:00:00"}    # ISO-8601 local time
+{"type": "cron",     "expr": "0 17 * * *"}            # escape hatch
+```
+
+Day names: `mon|tue|wed|thu|fri|sat|sun` (full names also accepted).
+
+#### Fire topic
+
+Publishes to `schedule/{name}/fired` with payload:
+
+```json
+{"fired_at": "<ISO-8601 UTC>", "schedule_type": "daily", "agent": "evening-lights-trigger"}
+```
+
+A downstream `ha_actuator` or `dynamic` agent subscribes to this topic and performs the actual action.
+
+#### Timezone resolution
+
+1. Schedule spec's optional `"tz"` field (e.g. `"Europe/Athens"`)
+2. `timezone` kwarg injected by MainActor from the user's `pref_timezone` fact
+3. System local timezone
+
+#### Catch-up behaviour on restart
+
+- **`once` schedules** — fire if missed within the last 5 minutes; otherwise the agent self-deletes silently.
+- **Recurring schedules** — never catch up. Resume from the next fire time.
+
+The internal sleep is bounded to 5 minutes so DST transitions, system clock jumps, and laptop sleep don't strand the agent.
 
 ---
 
@@ -508,7 +557,7 @@ See [API reference](api.md#cost-management) for the full endpoint spec.
 
 ## Catalog recipes
 
-Recipes live in `catalogue_agents/` as plain Python files exporting an `AGENT_CODE` string. They are loaded by `CatalogAgent` at startup and spawned on demand as DynamicAgents with `trusted=True` (safety validator bypassed).
+Recipes live in `wactorz/catalogue_agents/` as plain Python files exporting an `AGENT_CODE` string. They are loaded by `CatalogAgent` at startup and spawned on demand as DynamicAgents with `trusted=True` (safety validator bypassed).
 
 | Recipe name | File | Description | Deps |
 |-------------|------|-------------|------|
@@ -520,7 +569,7 @@ Recipes live in `catalogue_agents/` as plain Python files exporting an `AGENT_CO
 | `sinergym-optimizer` | `sinergym_optimizer_agent.py` | Env-aware GP-UCB Q(s,a) optimizer with RBC warm-start. Trains from collected episodes (RL PPO/SAC or Bayesian GP), then publishes actions to `sinergym/env/{env_id}/action` during deployment. Auto-introspects obs/action variable names and comfort models. | `stable-baselines3`, `scikit-learn`, `numpy`, `torch`, `aiomqtt`, `gymnasium` |
 | `anomaly-detector` | `anomaly_detector_agent.py` | Learns normal patterns from time-series data (HA sensors and Sinergym), detects anomalies in real-time. Statistical z-score, percentile range, rate-of-change, and absence detection. Works with both real-world HA devices and simulated building data. | `aiomqtt`, `numpy` |
 
-> **💡 Adding a recipe** — Create `catalogue_agents/my_agent.py` exporting `AGENT_CODE = r'''...'''`, then add an entry to `_build_catalog()` in `catalog_agent.py`. The recipe is available on the next restart without any other changes.
+> **💡 Adding a recipe** — Create `wactorz/catalogue_agents/my_agent.py` exporting `AGENT_CODE = r'''...'''`, then add an entry to `_build_catalog()` in `wactorz/agents/catalog_agent.py`. The recipe is available on the next restart without any other changes.
 
 ---
 

@@ -30,7 +30,7 @@ pip install aiomqtt psutil aiohttp --break-system-packages
 #### 2. Copy `remote_runner.py` to the device
 
 ```bash
-scp remote_runner.py pi@raspberrypi.local:~/
+scp wactorz/remote_runner.py pi@raspberrypi.local:~/
 ```
 
 #### 3. Start the runner

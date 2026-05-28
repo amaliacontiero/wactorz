@@ -275,7 +275,7 @@ Want to see your avatar here? Contributions of any kind are welcome — read [CO
 | Have an idea | [Start a discussion](https://github.com/waldiez/wactorz/discussions) |
 | Want to code | Fork, branch, and open a PR against `main` |
 | Docs, tests, UI | Same as above — every improvement counts |
-| New agent recipe | Add it in `wactorz/agents/` and open a PR |
+| New agent recipe | Add it in `wactorz/catalogue_agents/` and open a PR |
 | Home Assistant | HA integrations and addon config PRs are very welcome |
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions, code style, and the PR process.
