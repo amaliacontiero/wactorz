@@ -854,6 +854,7 @@ mod tests {
         config: ActorConfig,
         metrics: Arc<ActorMetrics>,
         mailbox_tx: mpsc::Sender<Message>,
+        #[allow(dead_code)]
         mailbox_rx: Option<mpsc::Receiver<Message>>,
     }
 
