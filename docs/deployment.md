@@ -108,7 +108,7 @@ bash deploy-native.sh        # interactive wizard
 
 ```bash
 # 1. Configure .env
-cp .env.example .env
+cp .env.template .env
 nano .env
 # Set: LLM_API_KEY, DEPLOY_HOST, DEPLOY_PATH, NAUTILUS_SSH_KEY
 # If the remote already has nginx running (certbot/SSL), also set:
@@ -123,7 +123,7 @@ The wizard will:
 2. Build the frontend (`npm run build`)
 3. Build the binary via `cargo build --release` or Docker buildx
 4. rsync `static/app/` and the binary to the remote host
-5. Create `.env` from `.env.example` on the remote (preserves existing)
+5. Create `.env` from `.env.template` on the remote (preserves existing)
 6. Start Mosquitto via Docker + configure nginx (see modes below)
 7. Install + start the `wactorz` systemd service
 
@@ -201,7 +201,7 @@ The unit template at `systemd/wactorz.service` has comments for every field.
 
 ## Environment variables
 
-See `.env.example` for the full annotated list.  The most important ones:
+See `.env.template` for the full annotated list.  The most important ones:
 
 | Variable | Default | Notes |
 |---|---|---|

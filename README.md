@@ -11,8 +11,6 @@
 
 <p align="center"><strong>AI agents that don't stop when you close the tab.</strong></p>
 
-<p align="center">Long-running &nbsp;·&nbsp; distributed across nodes &nbsp;·&nbsp; self-healing &nbsp;·&nbsp; spawned by prompt</p>
-
 <p align="center">
 <a href="https://docs.waldiez.io/wactorz/">Docs</a> |
 <a href="https://docs.waldiez.io/wactorz/guide/development.html">Installation</a> |
@@ -30,27 +28,9 @@
 
 ---
 
-Wactorz is an actor-model multi-agent framework built for IoT and edge workloads.
-You describe what you need. It writes the agents, wires them over MQTT, spawns them across your nodes, and keeps them alive through crashes, restarts, and node migrations.
+Wactorz runs LLM-driven agents as long-lived actors on the hardware you already have - a Raspberry Pi in the garage, an old laptop, a VM in your closet. You describe what you want in chat; the planner writes the Python, spawns it on a node, and supervises it. When an agent crashes, only that one restarts. State persists across restarts and you can move an agent to a different machine without losing it.
 
----
-
-## Why Wactorz
-
-| | |
-|---|---|
-| **24/7 by design** | Agents run indefinitely on IoT hardware and edge devices — not just until the script exits. |
-| **Distributed across nodes** | Spawn agents on Raspberry Pis, VMs, and laptops from one prompt. All visible in one dashboard. |
-| **Self-healing supervision** | Erlang-style ONE_FOR_ONE restart per actor. One agent crashes, the rest keep running. |
-| **Prompt-generated code** | Describe the automation in chat. The planner writes Python, spawns it, and wires the topics. |
-| **Auto-discovery** | Agents publish capability manifests over MQTT. The orchestrator routes tasks automatically. |
-| **Centralized persistence** | SQLite + Redis + Pickle shared across all actors. State survives restarts and node migrations. |
-| **Node migration** | Move agents between machines. State follows. |
-| **Sandboxed execution** | Dynamic agents run in isolated venv subprocesses. |
-| **MQTT-native** | Every event, log, heartbeat, and sensor reading flows through topics — to agents, dashboard, or external systems. |
-| **HA is one channel** | Home Assistant control, entity lookup, automations, and addon support — alongside Discord, Telegram, REST, and MCP. |
-| **Offline capable** | Full Ollama support for air-gapped and local deployments. |
-| **Cost tracking** | Token usage and USD spend tracked per agent, persisted across restarts. |
+It runs on MQTT, so anything happening inside the system surfaces as a topic external code can subscribe to. Home Assistant talks to it the same way Discord and Telegram do - it's one channel among several, alongside a REST API and an MCP server. The LLM provider is configurable (Anthropic, OpenAI, Gemini, NIM) or fully local via Ollama for offline use.
 
 ---
 
@@ -72,45 +52,27 @@ export LLM_API_KEY=your-key-here
 python -m wactorz
 ```
 
-Dashboard: `http://localhost:8888`
+Dashboard: `http://localhost:8888`.
 
-**No repo clone needed?** Pull straight from Docker Hub — see [docs/dockerhub.md](docs/dockerhub.md).
-
-**Local model:**
+If you'd rather skip the clone, [pull the image from Docker Hub](docs/dockerhub.md). To run without an API key, use Ollama:
 
 ```bash
 ollama pull llama3
 python -m wactorz --llm ollama --ollama-model llama3
 ```
 
-Windows users: [docs/windows.md](docs/windows.md). Full deployment options: [docs/deployment.md](docs/deployment.md).
+Windows setup is in [docs/windows.md](docs/windows.md); the full set of deployment options lives in [docs/deployment.md](docs/deployment.md).
 
 ---
 
-## What people build with it
-
-**Reactive IoT pipelines**
+## Example prompts
 
 ```text
-when a person is detected on the front door camera, turn on the porch light and send me a photo
+when motion is detected at the front door, turn on the porch light and send me the snapshot
 if the living room CO2 goes above 1000 ppm, open the window and notify me
-monitor all temperature sensors and alert if any reading looks anomalous
-```
-
-**Home automation that understands context**
-
-```text
-turn off everything in the bedroom except the air purifier
-create an automation: dim the living room to 40% at sunset
+spawn a water leak detector on rpi-basement and text me on WhatsApp if it triggers
+dim the living room to 40% at sunset
 what is the energy consumption of the kitchen appliances today?
-```
-
-**Distributed edge workloads**
-
-```text
-spawn a motion detection agent on rpi-garage
-deploy a water leak detector on rpi-basement that texts me on WhatsApp
-run inference on rpi-kitchen and send results back to the main dashboard
 ```
 
 ---
@@ -136,9 +98,6 @@ flowchart LR
     Bus --> External["Sensors, services, and IoT systems"]
 ```
 
-Every actor owns its work. MQTT carries all events. Persistence keeps everything durable.
-The dashboard makes the invisible parts visible.
-
 ---
 
 ## Interfaces
@@ -158,7 +117,7 @@ The dashboard makes the invisible parts visible.
 
 ## LLM Configuration
 
-Three variables in `.env` (or exported) control the model:
+Set these three env vars in `.env` or export them in your shell:
 
 ```bash
 # Options: anthropic | openai | ollama | nim | gemini | none
@@ -263,7 +222,7 @@ LLM_API_KEY=your-key-here
 <!-- prettier-ignore-end -->
 <!-- ALL-CONTRIBUTORS-LIST:END -->
 
-Want to see your avatar here? Contributions of any kind are welcome — read [CONTRIBUTING.md](CONTRIBUTING.md) to get started.
+Contributions of any kind are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) to get started.
 
 ---
 
@@ -274,7 +233,7 @@ Want to see your avatar here? Contributions of any kind are welcome — read [CO
 | Found a bug | [Open an issue](https://github.com/waldiez/wactorz/issues/new?template=bug_report.yml) |
 | Have an idea | [Start a discussion](https://github.com/waldiez/wactorz/discussions) |
 | Want to code | Fork, branch, and open a PR against `main` |
-| Docs, tests, UI | Same as above — every improvement counts |
+| Docs, tests, UI | Same drill, open a PR |
 | New agent recipe | Add it in `wactorz/catalogue_agents/` and open a PR |
 | Home Assistant | HA integrations and addon config PRs are very welcome |
 
