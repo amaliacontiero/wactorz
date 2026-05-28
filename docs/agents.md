@@ -70,7 +70,7 @@ Every DynamicAgent spawned during the session is saved to the `_spawned_agents` 
 | **name** | `planner-{hash}` (ephemeral) |
 | **lifetime** | per-request |
 
-Spawned by MainActor for every `PIPELINE`-classified request. The planner queries `home-assistant-agent` for the full list of real entity IDs, samples live topic schemas from the TopicBus, then asks the LLM to produce a multi-agent plan as a JSON array. Each step is either a `dynamic` agent (Python code string) or an `ha_actuator` agent (declarative HA service call). The planner spawns all agents, registers the pipeline rule with main, and exits.
+Spawned by MainActor for every `PIPELINE`-classified request. The planner queries `home-assistant-agent` for the full list of real entity IDs, samples live topic schemas from the TopicBus, then asks the LLM to produce a multi-agent plan as a JSON array. Each step is one of three types: an `ha_actuator` agent (declarative HA service call), a `scheduled` agent (first-class time trigger — see [ScheduledAgent](#scheduledagent-spawned)), or a `dynamic` agent (Python code string). The planner spawns all agents, registers the pipeline rule with main, and exits.
 
 After spawning, the planner fires a background `_bootstrap_ha_entity_states()` task that extracts HA entity IDs from the plan (generated code, `ha_actuator` actions, MQTT topics, and the enriched task string) and sends a `get_entities_state` request to `home-assistant-agent`. This re-publishes the current HA state over MQTT so freshly-spawned agents that subscribe to `homeassistant/state_changes/#` fire immediately — without waiting for the next real HA state change.
 
@@ -82,7 +82,7 @@ After spawning, the planner fires a background `_bootstrap_ha_entity_states()` t
 | 2 | HA sensor state change | Discord/webhook notification | dynamic agent |
 | 3 | Webcam detection (YOLO) | HA service call | dynamic YOLO + `ha_actuator` |
 | 4 | Webcam detection (YOLO) | Discord/webhook notification | dynamic YOLO + dynamic notify |
-| 5 | Timer/schedule | HA service call | dynamic timer + `ha_actuator` |
+| 5 | Timer/schedule | HA service call OR notification | `scheduled` + `ha_actuator` (or `scheduled` + `dynamic` notify) |
 | 6 | MQTT sensor + condition | HA service call | dynamic monitor + `ha_actuator` |
 
 #### Code validation
@@ -107,7 +107,7 @@ Before generating code, the planner calls `prune_stale()` on the TopicBus regist
 | **check interval** | 15 s |
 | **heartbeat timeout** | 60 s |
 
-Tracks heartbeat timestamps from every registered actor. If an actor's last heartbeat is older than `heartbeat_timeout` seconds it publishes an alert to `agents/{monitor_id}/alert` and notifies MainActor directly. Does _not_ auto-restart actors — restart policy belongs to the Supervisor. Infrastructure agents (monitor, installer, main, home-assistant-agent) are excluded from user-facing notifications.
+Tracks heartbeat timestamps from every registered actor. If an actor's last heartbeat is older than `heartbeat_timeout` seconds it publishes an alert to `agents/{monitor_id}/alert` and notifies MainActor directly. Does _not_ auto-restart actors — restart policy belongs to the Supervisor. Infrastructure agents (`monitor`, `installer`, `main`, `home-assistant-agent`, `code-agent`, `anomaly-detector`) are excluded from user-facing notifications.
 
 ---
 
@@ -392,8 +392,8 @@ SPARQL interface to Apache Jena Fuseki. Executes `SELECT`, `CONSTRUCT`, `DESCRIB
 #### Configuration
 
 ```bash
-FUSEKI_URL=http://fuseki:3030   # default
-FUSEKI_DATASET=/ds              # default
+FUSEKI_URL=http://localhost:3030   # default
+FUSEKI_DATASET=wactorz             # default
 ```
 
 #### Commands
@@ -561,13 +561,12 @@ Recipes live in `wactorz/catalogue_agents/` as plain Python files exporting an `
 
 | Recipe name | File | Description | Deps |
 |-------------|------|-------------|------|
-| `discord-notify-agent` | `discord_notify_agent.py` | Subscribes to any MQTT topic and posts a message to a Discord webhook when a triggering event arrives. Configurable cooldown, trigger key/value filter, and message template. | `aiohttp`, `aiomqtt` |
-| `homeassistant-actuator-agent` | `home_assistant_actuator_agent.py` | Subscribes to an MQTT topic and calls a Home Assistant service when a detection filter matches the payload. Used as the action side of HA pipelines. | `aiomqtt` |
 | `image-gen-agent` | `image_gen_agent.py` | Generates images from text prompts using NVIDIA NIM FLUX.1-dev. Returns the absolute path to the saved PNG. | `requests` |
 | `doc-to-pptx-agent` | `doc_to_pptx_agent.py` | Converts PDF or TXT documents into PowerPoint presentations. Extracts embedded images from PDF; optionally uses NIM FLUX for slides without images. | `pymupdf`, `pdfplumber`, `pillow` |
 | `sinergym-collector` | `sinergym_collector_agent.py` | Collects Sinergym episode data via MQTT for RL/Bayesian training. Listens on `sinergym/env/{env_id}/observation`, buffers transitions per-episode, persists episode blobs, and signals the optimizer on collection complete. | `aiomqtt`, `numpy` |
 | `sinergym-optimizer` | `sinergym_optimizer_agent.py` | Env-aware GP-UCB Q(s,a) optimizer with RBC warm-start. Trains from collected episodes (RL PPO/SAC or Bayesian GP), then publishes actions to `sinergym/env/{env_id}/action` during deployment. Auto-introspects obs/action variable names and comfort models. | `stable-baselines3`, `scikit-learn`, `numpy`, `torch`, `aiomqtt`, `gymnasium` |
 | `anomaly-detector` | `anomaly_detector_agent.py` | Learns normal patterns from time-series data (HA sensors and Sinergym), detects anomalies in real-time. Statistical z-score, percentile range, rate-of-change, and absence detection. Works with both real-world HA devices and simulated building data. | `aiomqtt`, `numpy` |
+| `manual-agent` | `manual_agent.py` | Searches the web for device manuals, downloads PDFs, extracts text, and answers questions about them using the agent's LLM. | `httpx`, `pdfplumber`, `duckduckgo_search` |
 
 > **💡 Adding a recipe** — Create `wactorz/catalogue_agents/my_agent.py` exporting `AGENT_CODE = r'''...'''`, then add an entry to `_build_catalog()` in `wactorz/agents/catalog_agent.py`. The recipe is available on the next restart without any other changes.
 
