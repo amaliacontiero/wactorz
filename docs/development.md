@@ -358,6 +358,8 @@ wactorz/                         ← repo root
 │   │   ├── main_actor.py        ← LLM orchestrator
 │   │   ├── llm_agent.py         ← LLM base + all providers
 │   │   ├── home_assistant_agent.py
+│   │   ├── prompts/
+│   │   │   └── home_assistant_prompts.py  ← HA LLM system prompts
 │   │   ├── home_assistant_state_bridge_agent.py
 │   │   ├── home_assistant_map_agent.py
 │   │   ├── monitor_agent.py
