@@ -1,7 +1,7 @@
 # Changelog
 
 All notable changes to Wactorz are documented here.
-Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Versioning follows [SemVer](https://semver.org/).
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 

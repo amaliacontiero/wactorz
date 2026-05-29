@@ -41,6 +41,7 @@ STATIC = ROOT / "static"
 NAV = [
     ("Guide", "guide", [
         ("Installation", "development.md"),
+        ("Docker Hub",   "dockerhub.md"),
         ("Architecture", "architecture.md"),
         ("Agents",       "agents.md"),
         ("Auto-Wiring",       "mqtt_auto_wiring.md"),
