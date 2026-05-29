@@ -75,6 +75,7 @@ type Listeners = { [K in keyof MQTTEvents]: Array<Listener<MQTTEvents[K]>> };
 export class MQTTClient {
   private client: MqttClient | null = null;
   private listeners: Partial<Listeners> = {};
+  private _disconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Default: MQTT WebSocket via nginx path (/mqtt) rather than direct port 9001.
   // Override with VITE_MQTT_WS_URL env var or constructor argument.
@@ -90,6 +91,11 @@ export class MQTTClient {
 
     this.client.on("connect", () => {
       console.info("[MQTT] Connected to", this.brokerUrl);
+      // Cancel any pending disconnected notification from a brief close/reconnect cycle.
+      if (this._disconnectTimer !== null) {
+        clearTimeout(this._disconnectTimer);
+        this._disconnectTimer = null;
+      }
       this.client?.subscribe("#", { qos: 1 });
       this.emit("connected", undefined);
     });
@@ -99,7 +105,16 @@ export class MQTTClient {
     });
 
     this.client.on("close", () => {
-      this.emit("disconnected", undefined);
+      // mqtt.js fires "close" on every WebSocket close, including between
+      // reconnect attempts (reconnectPeriod: 2000 ms).  Immediately emitting
+      // "disconnected" flips the badge to "Demo fallback" on every brief
+      // hiccup.  Delay the notification so a successful reconnect (which fires
+      // "connect" and cancels this timer) doesn't cause a visible flicker.
+      if (this._disconnectTimer !== null) return;
+      this._disconnectTimer = setTimeout(() => {
+        this._disconnectTimer = null;
+        this.emit("disconnected", undefined);
+      }, 6000);
     });
 
     this.client.on("error", (err) => {
@@ -114,6 +129,10 @@ export class MQTTClient {
 
   /** Disconnect cleanly. */
   disconnect(): void {
+    if (this._disconnectTimer !== null) {
+      clearTimeout(this._disconnectTimer);
+      this._disconnectTimer = null;
+    }
     this.client?.end(true);
     this.client = null;
   }

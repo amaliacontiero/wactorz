@@ -125,6 +125,10 @@ export class CardDashboard {
   private _evEnd: ((e: Event) => void) | null = null;
   private _evConn: ((e: Event) => void) | null = null;
   private _evResetChat: ((e: Event) => void) | null = null;
+  private _evSendMessage: ((e: Event) => void) | null = null;
+  // True while _sendMessage() is dispatching — prevents the listener from
+  // double-adding a message that _sendMessage() already rendered locally.
+  private _selfDispatching = false;
 
   private get haUrl(): string | null {
     return localStorage.getItem("wactorz-ha-url") || null;
@@ -495,6 +499,37 @@ export class CardDashboard {
       if (this.view === "chat") this._renderChatThread();
     };
     document.addEventListener("af-reset-chat", this._evResetChat);
+
+    // Display the user's message in the chat UI for any send path (keyboard
+    // OR voice/wake-word). Keyboard sends go through _sendMessage() which
+    // already adds the message locally and sets _selfDispatching; those are
+    // skipped here to avoid double-add.  Voice sends dispatch af-send-message
+    // directly (from IOBar) without ever calling _sendMessage(), so they reach
+    // this listener with _selfDispatching === false and are rendered here.
+    this._evSendMessage = (e: Event) => {
+      if (this._selfDispatching) return;
+      const { content, target } = (
+        e as CustomEvent<{ content: string; target: string }>
+      ).detail;
+      this.chatTarget = target;
+      this._lastSentTarget = target;
+      const msg: ChatMessage = {
+        id: `user-${Date.now()}`,
+        from: "user",
+        to: target,
+        content,
+        timestampMs: Date.now(),
+      };
+      this.chatMessages.push(msg);
+      if (this.view !== "chat") {
+        this.view = "chat";
+        this._renderView();
+      } else {
+        this._appendChatMsgEl(msg);
+        this._scrollThread();
+      }
+    };
+    document.addEventListener("af-send-message", this._evSendMessage);
   }
 
   private _unwireEvents(): void {
@@ -521,6 +556,10 @@ export class CardDashboard {
     if (this._evResetChat) {
       document.removeEventListener("af-reset-chat", this._evResetChat);
       this._evResetChat = null;
+    }
+    if (this._evSendMessage) {
+      document.removeEventListener("af-send-message", this._evSendMessage);
+      this._evSendMessage = null;
     }
   }
 
@@ -1540,9 +1579,11 @@ export class CardDashboard {
     }
     input.value = "";
     input.style.height = "auto";
+    this._selfDispatching = true;
     document.dispatchEvent(
       new CustomEvent("af-send-message", { detail: { content, target } }),
     );
+    this._selfDispatching = false;
   }
 
   // ── Private: API calls ────────────────────────────────────────────────────
