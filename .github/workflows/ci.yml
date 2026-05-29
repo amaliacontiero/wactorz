@@ -73,7 +73,6 @@ jobs:
       - name: Lint
         working-directory: frontend
         run: bun run lint
-        continue-on-error: true
 
   test-mobile:
     name: Mobile (Flutter)

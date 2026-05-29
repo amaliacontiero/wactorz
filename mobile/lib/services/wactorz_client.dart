@@ -117,7 +117,9 @@ class WactorzClient extends ChangeNotifier {
         case 'stream_end':
           _finalizeStream();
       }
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('[WS] Failed to parse message: $e');
+    }
   }
 
   /// Exposes [_onWsMessage] for unit testing.
@@ -252,7 +254,7 @@ class WactorzClient extends ChangeNotifier {
 
   @override
   void dispose() {
-    _disconnect();
+    unawaited(_disconnect());
     _http.close();
     super.dispose();
   }

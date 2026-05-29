@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'services/wactorz_client.dart';
-import 'services/tts_service.dart';
 import 'theme.dart';
 import 'screens/home_screen.dart';
 import 'screens/setup_screen.dart';
@@ -11,7 +10,6 @@ void main() {
     MultiProvider(
       providers: [
         ChangeNotifierProvider(create: (_) => WactorzClient()),
-        ChangeNotifierProvider(create: (_) => TtsService()),
       ],
       child: const WactorzApp(),
     ),
