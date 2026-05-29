@@ -125,6 +125,21 @@ export class CardDashboard {
   private _evEnd: ((e: Event) => void) | null = null;
   private _evConn: ((e: Event) => void) | null = null;
   private _evResetChat: ((e: Event) => void) | null = null;
+  private _evSendMessage: ((e: Event) => void) | null = null;
+  // True while _sendMessage() is dispatching — prevents the listener from
+  // double-adding a message that _sendMessage() already rendered locally.
+  private _selfDispatching = false;
+
+  // Input history (up/down arrow navigation, same pattern as IOBar)
+  private _inputHistory: string[] = [];
+  private _inputHistIdx = -1;
+  private _inputDraft = "";
+
+  // Autosuggestion state
+  private _inputSuggestion = "";
+  private _mentionOpen = false;
+  private _mentionIdx = -1;
+  private _mentionMatches: string[] = [];
 
   private get haUrl(): string | null {
     return localStorage.getItem("wactorz-ha-url") || null;
@@ -495,6 +510,37 @@ export class CardDashboard {
       if (this.view === "chat") this._renderChatThread();
     };
     document.addEventListener("af-reset-chat", this._evResetChat);
+
+    // Display the user's message in the chat UI for any send path (keyboard
+    // OR voice/wake-word). Keyboard sends go through _sendMessage() which
+    // already adds the message locally and sets _selfDispatching; those are
+    // skipped here to avoid double-add.  Voice sends dispatch af-send-message
+    // directly (from IOBar) without ever calling _sendMessage(), so they reach
+    // this listener with _selfDispatching === false and are rendered here.
+    this._evSendMessage = (e: Event) => {
+      if (this._selfDispatching) return;
+      const { content, target } = (
+        e as CustomEvent<{ content: string; target: string }>
+      ).detail;
+      this.chatTarget = target;
+      this._lastSentTarget = target;
+      const msg: ChatMessage = {
+        id: `user-${Date.now()}`,
+        from: "user",
+        to: target,
+        content,
+        timestampMs: Date.now(),
+      };
+      this.chatMessages.push(msg);
+      if (this.view !== "chat") {
+        this.view = "chat";
+        this._renderView();
+      } else {
+        this._appendChatMsgEl(msg);
+        this._scrollThread();
+      }
+    };
+    document.addEventListener("af-send-message", this._evSendMessage);
   }
 
   private _unwireEvents(): void {
@@ -521,6 +567,10 @@ export class CardDashboard {
     if (this._evResetChat) {
       document.removeEventListener("af-reset-chat", this._evResetChat);
       this._evResetChat = null;
+    }
+    if (this._evSendMessage) {
+      document.removeEventListener("af-send-message", this._evSendMessage);
+      this._evSendMessage = null;
     }
   }
 
@@ -1433,34 +1483,118 @@ export class CardDashboard {
     select.id = "af-target-select";
     this._populateSelect(select);
 
+    // ── Input wrapper (ghost text + mention panel + textarea + hint) ──────────
+    const inputWrap = document.createElement("div");
+    inputWrap.className = "af-input-wrap";
+
+    // @mention panel — floats above the wrap when @ is typed
+    const mentionPanel = document.createElement("div");
+    mentionPanel.className = "af-mention-panel";
+
+    // Ghost text layer — positioned behind the textarea
+    const ghost = document.createElement("div");
+    ghost.className = "af-input-ghost";
+    ghost.setAttribute("aria-hidden", "true");
+
     const input = document.createElement("textarea");
     input.className = "af-iobar-input";
     input.id = "af-iobar-input";
     input.rows = 1;
     input.placeholder = `Message @${this.chatTarget}…`;
+
+    // Hint row — keyboard shortcuts, visible on focus
+    const hint = document.createElement("div");
+    hint.className = "af-input-hint";
+    hint.textContent = "↑↓ history · Tab accept · @agent";
+
     const autoGrow = () => {
       input.style.height = "1px";
       const h = Math.min(input.scrollHeight, 140);
       input.style.height = h + "px";
       input.style.overflowY = h >= 140 ? "auto" : "hidden";
     };
-    input.addEventListener("input", autoGrow);
+
+    input.addEventListener("input", () => {
+      autoGrow();
+      this._onInputChange(input, select, ghost, mentionPanel);
+    });
+
     input.addEventListener("keydown", (e) => {
+      // @mention panel navigation
+      if (this._mentionOpen) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          this._closeMentionPanel(mentionPanel);
+          return;
+        }
+        if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+          e.preventDefault();
+          const dir = e.key === "ArrowRight" ? 1 : -1;
+          this._mentionIdx = Math.max(-1, Math.min(this._mentionMatches.length - 1, this._mentionIdx + dir));
+          this._renderMentionChips(mentionPanel, select, input);
+          return;
+        }
+        if (e.key === "Tab" || e.key === "Enter") {
+          e.preventDefault();
+          const idx = this._mentionIdx >= 0 ? this._mentionIdx : 0;
+          this._acceptMention(this._mentionMatches[idx] ?? "", input, select, mentionPanel, ghost);
+          return;
+        }
+      }
+
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
+        this._closeMentionPanel(mentionPanel);
         this._sendMessage(input, select);
         input.style.height = "auto";
+        this._clearGhost(input, ghost);
+        return;
       }
+      // Tab or → at end-of-line accepts suggestion
+      if ((e.key === "Tab" || (e.key === "ArrowRight" && input.selectionStart === input.value.length))
+          && this._inputSuggestion) {
+        e.preventDefault();
+        this._acceptSuggestion(input, ghost);
+        return;
+      }
+      if (e.key === "ArrowUp" && !e.shiftKey) {
+        e.preventDefault();
+        this._historyUp(input);
+        this._onInputChange(input, select, ghost, mentionPanel);
+        return;
+      }
+      if (e.key === "ArrowDown" && !e.shiftKey) {
+        e.preventDefault();
+        this._historyDown(input);
+        this._onInputChange(input, select, ghost, mentionPanel);
+        return;
+      }
+      if (e.key === "Escape") {
+        this._clearGhost(input, ghost);
+        return;
+      }
+      if (!["ArrowUp", "ArrowDown", "Tab"].includes(e.key)) this._inputHistIdx = -1;
     });
+
+    input.addEventListener("blur", () => {
+      setTimeout(() => this._closeMentionPanel(mentionPanel), 150);
+    });
+
     select.addEventListener("change", () => {
       this.chatTarget = select.value;
       input.placeholder = `Message @${select.value}…`;
     });
 
+    inputWrap.append(mentionPanel, ghost, input, hint);
+
     const sendBtn = document.createElement("button");
     sendBtn.className = "af-send-btn";
     sendBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M1 13L13 7 1 1v4.5l8.5 1.5-8.5 1.5V13z" fill="currentColor"/></svg>`;
-    sendBtn.addEventListener("click", () => this._sendMessage(input, select));
+    sendBtn.addEventListener("click", () => {
+      this._closeMentionPanel(mentionPanel);
+      this._sendMessage(input, select);
+      this._clearGhost(input, ghost);
+    });
 
     // Wake button hidden for 0.5 — create with hidden id so IOBar refs don't throw
     const wakeBtn = document.createElement("button");
@@ -1480,7 +1614,7 @@ export class CardDashboard {
       micBtn.style.display = "none";
     }
 
-    bar.append(wakeBtn, micBtn, select, input, sendBtn);
+    bar.append(wakeBtn, micBtn, select, inputWrap, sendBtn);
     return bar;
   }
 
@@ -1520,6 +1654,14 @@ export class CardDashboard {
   ): void {
     const content = input.value.trim();
     if (!content) return;
+    this._inputHistory.unshift(content);
+    if (this._inputHistory.length > 50) this._inputHistory.pop();
+    this._inputHistIdx = -1;
+    this._inputDraft = "";
+    this._inputSuggestion = "";
+    input.classList.remove("has-suggestion");
+    const ghost = input.previousElementSibling as HTMLElement | null;
+    if (ghost?.classList.contains("af-input-ghost")) ghost.textContent = "";
     const target = select.value || "main-actor";
     this.chatTarget = target;
     this._lastSentTarget = target;
@@ -1540,9 +1682,148 @@ export class CardDashboard {
     }
     input.value = "";
     input.style.height = "auto";
+    this._selfDispatching = true;
     document.dispatchEvent(
       new CustomEvent("af-send-message", { detail: { content, target } }),
     );
+    this._selfDispatching = false;
+  }
+
+  private _historyUp(input: HTMLTextAreaElement): void {
+    if (this._inputHistory.length === 0) return;
+    if (this._inputHistIdx === -1) this._inputDraft = input.value;
+    this._inputHistIdx = Math.min(this._inputHistIdx + 1, this._inputHistory.length - 1);
+    input.value = this._inputHistory[this._inputHistIdx] ?? "";
+    input.setSelectionRange(input.value.length, input.value.length);
+  }
+
+  private _historyDown(input: HTMLTextAreaElement): void {
+    if (this._inputHistIdx === -1) return;
+    this._inputHistIdx--;
+    input.value = this._inputHistIdx === -1
+      ? this._inputDraft
+      : (this._inputHistory[this._inputHistIdx] ?? "");
+    input.setSelectionRange(input.value.length, input.value.length);
+  }
+
+  // ── Private: autosuggestion + @mention ───────────────────────────────────
+
+  private _onInputChange(
+    input: HTMLTextAreaElement,
+    select: HTMLSelectElement,
+    ghost: HTMLElement,
+    mentionPanel: HTMLElement,
+  ): void {
+    const val = input.value;
+    // @mention detection: `@` anywhere at the end of the current word
+    const mentionMatch = /@(\w*)$/.exec(val);
+    if (mentionMatch) {
+      this._openMentionPanel(mentionMatch[1] ?? "", mentionPanel, select, input);
+      this._clearGhost(input, ghost);
+      return;
+    }
+    this._closeMentionPanel(mentionPanel);
+    this._updateGhost(input, ghost);
+  }
+
+  private _updateGhost(input: HTMLTextAreaElement, ghost: HTMLElement): void {
+    const val = input.value;
+    if (!val.trim()) { this._clearGhost(input, ghost); return; }
+    const lower = val.toLowerCase();
+    const match = this._inputHistory.find(
+      (h) => h.toLowerCase().startsWith(lower) && h !== val,
+    );
+    if (match) {
+      this._inputSuggestion = match;
+      const typed = document.createElement("span");
+      typed.style.color = "transparent";
+      typed.textContent = val;
+      const tail = document.createElement("span");
+      tail.textContent = match.slice(val.length);
+      ghost.textContent = "";
+      ghost.append(typed, tail);
+      input.classList.add("has-suggestion");
+    } else {
+      this._clearGhost(input, ghost);
+    }
+  }
+
+  private _clearGhost(input: HTMLTextAreaElement, ghost: HTMLElement): void {
+    this._inputSuggestion = "";
+    ghost.textContent = "";
+    input.classList.remove("has-suggestion");
+  }
+
+  private _acceptSuggestion(input: HTMLTextAreaElement, ghost: HTMLElement): void {
+    if (!this._inputSuggestion) return;
+    input.value = this._inputSuggestion;
+    input.setSelectionRange(input.value.length, input.value.length);
+    this._clearGhost(input, ghost);
+    // trigger autoGrow after filling
+    input.dispatchEvent(new Event("input"));
+  }
+
+  private _openMentionPanel(
+    query: string,
+    panel: HTMLElement,
+    select: HTMLSelectElement,
+    input: HTMLTextAreaElement,
+  ): void {
+    const all = [...this.agents.values()].map((a) => a.name).filter(Boolean);
+    this._mentionMatches = query
+      ? all.filter((n) => n.toLowerCase().startsWith(query.toLowerCase()))
+      : all;
+    if (this._mentionMatches.length === 0) { this._closeMentionPanel(panel); return; }
+    this._mentionIdx = 0;
+    this._mentionOpen = true;
+    this._renderMentionChips(panel, select, input);
+    panel.classList.add("open");
+  }
+
+  private _renderMentionChips(
+    panel: HTMLElement,
+    select: HTMLSelectElement,
+    input: HTMLTextAreaElement,
+  ): void {
+    panel.textContent = "";
+    this._mentionMatches.forEach((name, i) => {
+      const chip = document.createElement("button");
+      chip.className = "af-mention-chip" + (i === this._mentionIdx ? " active" : "");
+      chip.textContent = name;
+      chip.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        this._acceptMention(name, input, select, panel,
+          panel.previousElementSibling as HTMLElement);
+      });
+      panel.appendChild(chip);
+    });
+  }
+
+  private _acceptMention(
+    name: string,
+    input: HTMLTextAreaElement,
+    select: HTMLSelectElement,
+    panel: HTMLElement,
+    ghost: HTMLElement,
+  ): void {
+    if (!name) return;
+    // Replace the trailing @query with nothing (target is now set via select)
+    input.value = input.value.replace(/@\w*$/, "").trimEnd();
+    // Update the target select to point to this agent
+    const opt = [...select.options].find((o) => o.value === name || o.text === name);
+    if (opt) { select.value = opt.value; this.chatTarget = opt.value; }
+    input.placeholder = `Message @${name}…`;
+    this._closeMentionPanel(panel);
+    if (ghost) this._clearGhost(input, ghost);
+    input.focus();
+    input.dispatchEvent(new Event("input"));
+  }
+
+  private _closeMentionPanel(panel: HTMLElement): void {
+    this._mentionOpen = false;
+    this._mentionIdx = -1;
+    this._mentionMatches = [];
+    panel.classList.remove("open");
   }
 
   // ── Private: API calls ────────────────────────────────────────────────────

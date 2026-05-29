@@ -736,16 +736,14 @@ fn do_reset_metrics(data_dir: &std::path::Path, agent: Option<&str>) -> anyhow::
 
 fn do_reset_spawns(data_dir: &std::path::Path, agent: Option<&str>) -> anyhow::Result<()> {
     let db_path = data_dir.join("wactorz.db");
-    if db_path.exists() {
-        if let Ok(conn) = rusqlite::Connection::open(&db_path) {
-            if let Some(name) = agent {
-                let _ = conn.execute(
-                    "DELETE FROM spawn_registry WHERE name = ? OR spawned_by = ?",
-                    rusqlite::params![name, name],
-                );
-            } else {
-                let _ = conn.execute("DELETE FROM spawn_registry", []);
-            }
+    if db_path.exists() && let Ok(conn) = rusqlite::Connection::open(&db_path) {
+        if let Some(name) = agent {
+            let _ = conn.execute(
+                "DELETE FROM spawn_registry WHERE name = ? OR spawned_by = ?",
+                rusqlite::params![name, name],
+            );
+        } else {
+            let _ = conn.execute("DELETE FROM spawn_registry", []);
         }
     }
     Ok(())
@@ -814,40 +812,38 @@ fn aggregate_cost(data_dir: &std::path::Path) -> serde_json::Value {
     let mut total_output = 0u64;
     let mut agents: Vec<serde_json::Value> = Vec::new();
 
-    if actors_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&actors_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("db") {
-                    continue;
-                }
-                let Ok(conn) = rusqlite::Connection::open(&path) else {
-                    continue;
-                };
-                let Ok(raw) = conn.query_row(
-                    "SELECT value FROM kv_store WHERE key = '_final_cost'",
-                    [],
-                    |row| row.get::<_, String>(0),
-                ) else {
-                    continue;
-                };
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
-                    continue;
-                };
-                let cost = v.get("cost_usd").and_then(|x| x.as_f64()).unwrap_or(0.0);
-                let input = v.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
-                let output = v.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
-                let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                total_cost += cost;
-                total_input += input;
-                total_output += output;
-                agents.push(serde_json::json!({
-                    "name": name,
-                    "cost_usd": cost,
-                    "input_tokens": input,
-                    "output_tokens": output,
-                }));
+    if actors_dir.exists() && let Ok(entries) = std::fs::read_dir(&actors_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("db") {
+                continue;
             }
+            let Ok(conn) = rusqlite::Connection::open(&path) else {
+                continue;
+            };
+            let Ok(raw) = conn.query_row(
+                "SELECT value FROM kv_store WHERE key = '_final_cost'",
+                [],
+                |row| row.get::<_, String>(0),
+            ) else {
+                continue;
+            };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                continue;
+            };
+            let cost = v.get("cost_usd").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            let input = v.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+            let output = v.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+            let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            total_cost += cost;
+            total_input += input;
+            total_output += output;
+            agents.push(serde_json::json!({
+                "name": name,
+                "cost_usd": cost,
+                "input_tokens": input,
+                "output_tokens": output,
+            }));
         }
     }
 

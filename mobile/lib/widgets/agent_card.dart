@@ -1,22 +1,16 @@
 import 'package:flutter/material.dart';
-import '../models.dart';
+import '../models/agent.dart';
 import '../theme.dart';
 import 'status_dot.dart';
 
 class AgentCard extends StatelessWidget {
   final Agent agent;
   final VoidCallback onTap;
-  final VoidCallback onChat;
-  final Future<void> Function() onDelete;
-  final Future<void> Function() onTogglePause;
 
   const AgentCard({
     super.key,
     required this.agent,
     required this.onTap,
-    required this.onChat,
-    required this.onDelete,
-    required this.onTogglePause,
   });
 
   Color get _stateColor {
@@ -26,7 +20,6 @@ class AgentCard extends StatelessWidget {
     return kMuted;
   }
 
-  // Show first 8 chars if name looks like a UUID
   String get _displayName {
     final n = agent.name.isEmpty ? agent.id : agent.name;
     final looksLikeUuid = RegExp(r'^[0-9a-f]{8}-').hasMatch(n);
@@ -57,7 +50,7 @@ class AgentCard extends StatelessWidget {
           children: [
             Row(
               children: [
-                StatusDot(agent: agent),
+                StatusDot(state: agent.state),
                 const SizedBox(width: 6),
                 Expanded(
                   child: Text(
@@ -70,12 +63,6 @@ class AgentCard extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                     maxLines: 1,
                   ),
-                ),
-                _MoreMenu(
-                  agent: agent,
-                  onChat: onChat,
-                  onDelete: onDelete,
-                  onTogglePause: onTogglePause,
                 ),
               ],
             ),
@@ -136,69 +123,4 @@ class _StatRow extends StatelessWidget {
       ),
     ],
   );
-}
-
-class _MoreMenu extends StatelessWidget {
-  final Agent agent;
-  final VoidCallback onChat;
-  final Future<void> Function() onDelete;
-  final Future<void> Function() onTogglePause;
-
-  const _MoreMenu({
-    required this.agent,
-    required this.onChat,
-    required this.onDelete,
-    required this.onTogglePause,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return PopupMenuButton<String>(
-      iconSize: 16,
-      padding: EdgeInsets.zero,
-      color: kCard,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(8),
-        side: const BorderSide(color: kBorder),
-      ),
-      onSelected: (v) async {
-        switch (v) {
-          case 'chat':  onChat();
-          case 'pause': await onTogglePause();
-          case 'delete':
-            final ok = await showDialog<bool>(
-              context: context,
-              builder: (_) => AlertDialog(
-                backgroundColor: kCard,
-                title: const Text('Delete agent?'),
-                content: Text('Remove "${agent.name}" permanently.'),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.pop(context, false),
-                    child: const Text('Cancel'),
-                  ),
-                  TextButton(
-                    onPressed: () => Navigator.pop(context, true),
-                    style: TextButton.styleFrom(foregroundColor: kRed),
-                    child: const Text('Delete'),
-                  ),
-                ],
-              ),
-            );
-            if (ok == true) await onDelete();
-        }
-      },
-      itemBuilder: (_) => [
-        const PopupMenuItem(value: 'chat', child: Text('Chat')),
-        PopupMenuItem(
-          value: 'pause',
-          child: Text(agent.isPaused ? 'Resume' : 'Pause'),
-        ),
-        const PopupMenuItem(
-          value: 'delete',
-          child: Text('Delete', style: TextStyle(color: kRed)),
-        ),
-      ],
-    );
-  }
 }

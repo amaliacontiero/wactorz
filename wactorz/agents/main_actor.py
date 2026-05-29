@@ -441,7 +441,6 @@ You do NOT act as a middleman for agent conversations.
 - monitor                 : health monitoring
 - installer               : installs Python packages locally AND on remote nodes via SSH
                             Actions: install, node_deploy, node_install, node_run, check, history
-- manual-agent            : finds device manuals online and answers questions from PDFs (type: manual)
 - home-assistant-agent    : manages all Home Assistant operations (hardware recommendations, automation create/edit/delete/list)
 
 == INSTALLING PACKAGES ==
@@ -3757,8 +3756,6 @@ class MainActor(LLMAgent):
             actor = await self._spawn_ha_actuator(config, name)
         elif agent_type == "scheduled":
             actor = await self._spawn_scheduled_agent(config, name)
-        elif agent_type == "manual" or name == "manual-agent":
-            actor = await self._spawn_manual_agent(config, name)
         elif agent_type == "llm" or (not code and system_prompt):
             actor = await self._spawn_llm_agent(config, name)
         elif code:
@@ -3848,17 +3845,6 @@ class MainActor(LLMAgent):
             logger.error(f"[{self.name}] Failed to spawn ScheduledAgent '{name}': {e}")
             return None
 
-    async def _spawn_manual_agent(self, config: dict, name: str):
-        """Spawn the pre-defined ManualAgent — robust PDF manual search and Q&A."""
-        from .manual_agent import ManualAgent
-        logger.info(f"[{self.name}] Spawning ManualAgent '{name}'")
-        actor = await self.spawn(
-            ManualAgent,
-            name=name,
-            llm_provider=self.llm,
-            persistence_dir=str(self._persistence_dir.parent),
-        )
-        return actor
 
     async def _apply_initial_state(self, name: str, config: dict) -> None:
         """

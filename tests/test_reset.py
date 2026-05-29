@@ -239,6 +239,12 @@ class ResetHandlerValidScopesTest(unittest.IsolatedAsyncioTestCase):
 
 class ResetHandlerDispatchTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        # Pre-import wactorz.reset before patch.dict snapshots sys.modules.
+        # On Python 3.10, patch.dict.stop() restores sys.modules from the snapshot;
+        # if wactorz.reset is absent from the snapshot, tearDown removes it, leaving
+        # a stale package attribute.  Subsequent patch() calls then target the stale
+        # module while the handler imports a fresh one, so mocks are never seen.
+        import wactorz.reset  # noqa: F401
         self._aiohttp_patcher = patch.dict(sys.modules, {"aiohttp": _make_aiohttp_mod()})
         self._aiohttp_patcher.start()
 
