@@ -130,6 +130,11 @@ export class CardDashboard {
   // double-adding a message that _sendMessage() already rendered locally.
   private _selfDispatching = false;
 
+  // Input history (up/down arrow navigation, same pattern as IOBar)
+  private _inputHistory: string[] = [];
+  private _inputHistIdx = -1;
+  private _inputDraft = "";
+
   private get haUrl(): string | null {
     return localStorage.getItem("wactorz-ha-url") || null;
   }
@@ -1489,7 +1494,19 @@ export class CardDashboard {
         e.preventDefault();
         this._sendMessage(input, select);
         input.style.height = "auto";
+        return;
       }
+      if (e.key === "ArrowUp" && !e.shiftKey) {
+        e.preventDefault();
+        this._historyUp(input);
+        return;
+      }
+      if (e.key === "ArrowDown" && !e.shiftKey) {
+        e.preventDefault();
+        this._historyDown(input);
+        return;
+      }
+      if (!["ArrowUp", "ArrowDown"].includes(e.key)) this._inputHistIdx = -1;
     });
     select.addEventListener("change", () => {
       this.chatTarget = select.value;
@@ -1559,6 +1576,10 @@ export class CardDashboard {
   ): void {
     const content = input.value.trim();
     if (!content) return;
+    this._inputHistory.unshift(content);
+    if (this._inputHistory.length > 50) this._inputHistory.pop();
+    this._inputHistIdx = -1;
+    this._inputDraft = "";
     const target = select.value || "main-actor";
     this.chatTarget = target;
     this._lastSentTarget = target;
@@ -1584,6 +1605,23 @@ export class CardDashboard {
       new CustomEvent("af-send-message", { detail: { content, target } }),
     );
     this._selfDispatching = false;
+  }
+
+  private _historyUp(input: HTMLTextAreaElement): void {
+    if (this._inputHistory.length === 0) return;
+    if (this._inputHistIdx === -1) this._inputDraft = input.value;
+    this._inputHistIdx = Math.min(this._inputHistIdx + 1, this._inputHistory.length - 1);
+    input.value = this._inputHistory[this._inputHistIdx] ?? "";
+    input.setSelectionRange(input.value.length, input.value.length);
+  }
+
+  private _historyDown(input: HTMLTextAreaElement): void {
+    if (this._inputHistIdx === -1) return;
+    this._inputHistIdx--;
+    input.value = this._inputHistIdx === -1
+      ? this._inputDraft
+      : (this._inputHistory[this._inputHistIdx] ?? "");
+    input.setSelectionRange(input.value.length, input.value.length);
   }
 
   // ── Private: API calls ────────────────────────────────────────────────────
