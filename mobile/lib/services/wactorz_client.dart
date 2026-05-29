@@ -169,12 +169,13 @@ class WactorzClient extends ChangeNotifier {
   }
 
   void _finalizeStream() {
-    if (_streamBuffer != null && _activeChatAgent != null) {
+    if (_streamBuffer == null) return;
+    if (_activeChatAgent != null) {
       final msgs = _chats[_activeChatAgent!] ??= [];
       msgs.add(_streamBuffer!.finalized());
-      _streamBuffer = null;
-      notifyListeners();
     }
+    _streamBuffer = null;
+    notifyListeners();
   }
 
   ChatMessage? _streamBuffer;

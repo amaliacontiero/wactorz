@@ -21,7 +21,13 @@ Widget _wrap(Widget child, {WactorzClient? client}) {
       ),
       ChangeNotifierProvider<TtsService>.value(value: TtsService()),
     ],
-    child: MaterialApp(home: child),
+    child: MaterialApp(
+      // Material 3's default InkSparkle splash uses a GLSL shader that the
+      // headless test runtime cannot load.  Override with InkRipple to avoid
+      // the 'ink_sparkle.frag' asset error on button taps.
+      theme: ThemeData(splashFactory: InkRipple.splashFactory),
+      home: child,
+    ),
   );
 }
 
@@ -36,7 +42,17 @@ void main() {
 
   group('WactorzApp', () {
     testWidgets('renders without crashing — shows loading then setup', (tester) async {
-      await tester.pumpWidget(const WactorzApp());
+      // WactorzApp itself is the MaterialApp shell; providers live above it in
+      // main() so tests must supply them explicitly.
+      await tester.pumpWidget(
+        MultiProvider(
+          providers: [
+            ChangeNotifierProvider(create: (_) => WactorzClient()),
+            ChangeNotifierProvider(create: (_) => TtsService()),
+          ],
+          child: const WactorzApp(),
+        ),
+      );
       await tester.pump();
       expect(find.byType(WactorzApp), findsOneWidget);
     });

@@ -396,10 +396,12 @@ void main() {
       c.dispose();
     });
 
-    test('chat message without active agent leaves buffer', () {
+    test('chat message without active agent discards buffer', () {
       final c = _makeClient();
       c.processMessage(jsonEncode({'type': 'chat', 'content': 'orphan', 'timestamp': 1.0}));
-      expect(c.streamBuffer, isNotNull);
+      // _finalizeStream always clears the buffer; no active agent means the
+      // message is discarded rather than stored under an unknown agent.
+      expect(c.streamBuffer, isNull);
       c.dispose();
     });
   });
