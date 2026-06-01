@@ -14,9 +14,18 @@ import asyncio
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+    # Force UTF-8 on the real Windows console only. Skip when stdio has been
+    # replaced (pytest capture, test runners, etc.) since re-wrapping a
+    # capture stream breaks the harness on Python 3.13.
+    _need_wrap = (
+        (getattr(sys.stdout, "encoding", "") or "").lower() != "utf-8"
+        and hasattr(sys.stdout, "buffer")
+        and hasattr(sys.stderr, "buffer")
+    )
+    if _need_wrap:
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 import json
 import logging
@@ -60,6 +69,148 @@ state = {
 
 ws_clients: set = set()
 mqtt_client_ref = None
+# IDs that have been explicitly deleted — block re-admission from stale heartbeats.
+# Bounded so a long-running monitor doesn't leak memory across many deletions.
+# Stored as a list of (agent_id, deleted_at_ts) tuples so we can re-admit on
+# a NEWER status event (which is what a deliberate respawn produces) while
+# still ignoring stale retained messages from the deleted instance.
+_deleted_agent_ids: list = []
+_DELETED_IDS_MAX   = 1024
+
+
+def _mark_deleted(agent_id: str) -> None:
+    """Add an agent_id to the deleted list with FIFO eviction. If already
+    present, refresh its deleted-at timestamp so any in-flight retained
+    messages from the previous incarnation stay blocked."""
+    _undelete(agent_id)   # remove any prior entry so the new timestamp wins
+    _deleted_agent_ids.append((agent_id, time.time()))
+    if len(_deleted_agent_ids) > _DELETED_IDS_MAX:
+        del _deleted_agent_ids[0:len(_deleted_agent_ids) - _DELETED_IDS_MAX]
+
+
+def _is_deleted(agent_id: str, newer_than: float = 0.0) -> bool:
+    """Was this agent_id deleted? When newer_than is given, return False if
+    the caller has evidence (a message timestamp) that's strictly later than
+    the deletion — that means the agent was respawned and we should re-admit
+    it on the next update_agent() call. The actual un-delete happens there;
+    this function stays a pure query."""
+    for aid, ts in _deleted_agent_ids:
+        if aid == agent_id:
+            if newer_than > ts:
+                return False
+            return True
+    return False
+
+
+def _undelete(agent_id: str) -> bool:
+    """Remove agent_id from the deleted list. Returns True if it was there."""
+    global _deleted_agent_ids
+    before = len(_deleted_agent_ids)
+    _deleted_agent_ids = [(a, t) for (a, t) in _deleted_agent_ids if a != agent_id]
+    return len(_deleted_agent_ids) < before
+
+
+async def _purge_agent_retained(agent_id: str) -> None:
+    """Clear retained MQTT messages for a deleted agent so the broker stops
+    re-delivering them after a monitor reconnect or a fresh subscribe.
+
+    Without this, every reconnect re-fires the agent's retained status /
+    heartbeat / metrics, each of which would otherwise crash parse_topic
+    with KeyError on an entry that update_agent now refuses to recreate.
+    """
+    if not mqtt_client_ref:
+        return
+    for metric in ("status", "heartbeat", "metrics", "logs", "spawned",
+                   "manifest", "errors", "detections", "results", "completed"):
+        topic = f"agents/{agent_id}/{metric}"
+        try:
+            await mqtt_client_ref.publish(topic, b"", retain=True)
+        except Exception as e:
+            logger.debug(f"[purge] Failed to clear retained {topic}: {e}")
+
+
+async def _delete_agent(agent_id: str) -> str:
+    """Delete an agent properly regardless of whether it lives locally on this
+    process or on a remote node. Returns a short status string for logs.
+
+    Strategy:
+      1. Mark the actor_id deleted and pop the dashboard entry.
+      2. Try to route through main.delete_spawned_agent(name) — it owns the
+         spawn registry, knows the agent's node, updates desired_state, sends
+         the right MQTT stop signal, and clears the manifest. This is the
+         canonical path; it handles local + remote uniformly.
+      3. Fall back to direct MQTT if the registry isn't available (the monitor
+         is running in a separate process / MQTT-only mode):
+           - Remote → publish to nodes/<node>/stop using the node we captured
+             from heartbeats.
+           - Local → publish to agents/<id>/commands {"command": "stop"}.
+      4. Clear retained messages so old heartbeats don't come back on reconnect.
+    """
+    record = state["agents"].get(agent_id) or {}
+    name   = record.get("name") or agent_id
+    node   = (record.get("node") or "").strip()
+
+    _mark_deleted(agent_id)
+    state["agents"].pop(agent_id, None)
+
+    routed = "unknown"
+
+    if registry is not None:
+        # In-process: delegate to main, which owns the spawn registry and
+        # knows exactly how to clean up both local and remote agents.
+        main = registry.find_by_name("main")
+        if main is not None and hasattr(main, "delete_spawned_agent"):
+            try:
+                await main.delete_spawned_agent(name)
+                routed = f"via main.delete_spawned_agent({name!r})"
+            except Exception as e:
+                logger.warning(
+                    f"[delete] main.delete_spawned_agent('{name}') failed: {e}; "
+                    f"falling back to direct MQTT"
+                )
+                routed = "main path failed"
+
+        # If main wasn't reachable or the call failed, also try to stop a
+        # purely local actor through the registry directly. Useful for agents
+        # that exist in the registry but aren't in main's spawn registry yet
+        # (race window during startup).
+        if routed.startswith("via main") is False:
+            actor = registry.get(agent_id) or registry.find_by_name(name)
+            if actor is not None and not getattr(actor, "protected", False):
+                asyncio.create_task(actor.stop())
+                routed = "via local registry"
+
+    if routed in ("unknown", "main path failed"):
+        # MQTT-only mode (or main unavailable). Route by node if we have one.
+        if mqtt_client_ref:
+            if node:
+                try:
+                    await mqtt_client_ref.publish(
+                        f"nodes/{node}/stop",
+                        json.dumps({"name": name}),
+                    )
+                    routed = f"via nodes/{node}/stop"
+                except Exception as e:
+                    logger.warning(f"[delete] nodes/{node}/stop publish failed: {e}")
+            else:
+                try:
+                    await mqtt_client_ref.publish(
+                        f"agents/{agent_id}/commands",
+                        json.dumps({"command": "stop", "sender": "monitor",
+                                    "timestamp": time.time()}),
+                    )
+                    routed = f"via agents/{agent_id}/commands"
+                except Exception as e:
+                    logger.warning(f"[delete] commands publish failed: {e}")
+
+    # Always purge retained — even when main handled the delete, we want the
+    # dashboard's view to clear immediately rather than wait for tombstones.
+    asyncio.create_task(_purge_agent_retained(agent_id))
+
+    logger.info(
+        f"[delete] '{name}' (id={agent_id[:8]}, node={node or 'local'}) {routed}"
+    )
+    return routed
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -80,6 +231,8 @@ def _parse_mention(content: str) -> tuple[str, str]:
 
 
 def update_agent(agent_id: str, key: str, data):
+    if _is_deleted(agent_id):
+        return
     if agent_id not in state["agents"]:
         state["agents"][agent_id] = {
             "agent_id":   agent_id,
@@ -217,19 +370,6 @@ async def handle_slash(text: str, reply_fn) -> bool:
     parts = text.split()
     cmd   = parts[0].lower()
 
-    if cmd in ("/help", "/h"):
-        await reply_fn(
-            "Commands:\n"
-            "  /agents                        list all active agents\n"
-            "  /nodes                         list remote nodes\n"
-            "  /migrate <agent> <node>        move an agent to a different node\n"
-            "  /deploy <node> [host [user [pw [broker]]]]\n"
-            "                                 deploy a remote Wactorz node\n"
-            "  /clear-plans                   clear the plan cache\n\n"
-            "Everything else goes to the main orchestrator."
-        )
-        return True
-
     if cmd == "/clear-plans":
         main = _find_main()
         if main and hasattr(main, "persist"):
@@ -303,34 +443,103 @@ async def _route_chat(content: str, reply_fn, stream_fn=None, stream_end_fn=None
     stream_fn(chunk)      — send one streaming chunk (optional; falls back to reply_fn)
     stream_end_fn()       — signal that streaming is done (optional)
     """
-    logger.warning(f"[io-gateway DEBUG] _route_chat called: content={content!r}")
-
     _chunk_fn = stream_fn or reply_fn
     _end_fn   = stream_end_fn or (lambda: None)
 
     if content.startswith("/"):
         handled = await handle_slash(content, reply_fn)
         if not handled:
-            await reply_fn("Unknown command. Type /help for available commands.")
+            # Forward unrecognized slash commands to main actor.
+            # main_actor.process_user_input handles the full command set
+            # (/help, /plans, /delete, /stop, /memory, /rules, /topics, etc.)
+            main = _find_main()
+            if main and hasattr(main, "process_user_input_stream"):
+                _chunk_fn = stream_fn or reply_fn
+                async for chunk in main.process_user_input_stream(content):
+                    if isinstance(chunk, dict):
+                        continue
+                    await _chunk_fn(str(chunk))
+                if stream_end_fn:
+                    await stream_end_fn()
+            elif main and hasattr(main, "process_user_input"):
+                result = await main.process_user_input(content)
+                await reply_fn(str(result))
+                if stream_end_fn:
+                    await stream_end_fn()
+            else:
+                await reply_fn("Unknown command. Type /help for available commands.")
         return
 
     target_name, text = _parse_mention(content)
-    logger.warning(f"[io-gateway DEBUG] parsed: target_name={target_name!r} text={text[:60]!r} registry_set={registry is not None}")
 
     target = registry.find_by_name(target_name) if registry else None
-    logger.warning(f"[io-gateway DEBUG] find_by_name({target_name!r}) -> {target!r}")
 
     if target is None:
+        # ── Remote agent fallback ─────────────────────────────────────────────
+        # Agent not in local registry — check if it's running on a remote node.
+        # If so, route the message via MQTT and stream the reply back.
+        main = registry.find_by_name("main") if registry else None
+        if main and hasattr(main, "_known_nodes"):
+            import time as _rt
+            remote_node = None
+            for node_name, nd in main._known_nodes.items():
+                if _rt.time() - nd.get("last_seen", 0) < 30:
+                    if target_name in nd.get("agents", []):
+                        remote_node = node_name
+                        break
+
+            if remote_node:
+                import uuid as _uuid, json as _json
+                import aiomqtt
+                reply_topic = f"main/reply/io-gateway/{_uuid.uuid4().hex[:8]}"
+                payload = {
+                    "text":          text,
+                    "payload":       text,
+                    "_reply_topic":  reply_topic,
+                    "_remote_task":  True,
+                }
+                try:
+                    async with aiomqtt.Client(
+                        getattr(main, "_mqtt_broker", "localhost"),
+                        getattr(main, "_mqtt_port",   1883),
+                    ) as client:
+                        # Subscribe first, then publish — avoids race condition
+                        await client.subscribe(reply_topic)
+                        await main._mqtt_publish(
+                            f"agents/by-name/{target_name}/task",
+                            payload,
+                        )
+                        logger.info(f"[io-gateway] Routed @{target_name} → {remote_node} via MQTT")
+                        try:
+                            async def _get_reply():
+                                async for msg in client.messages:
+                                    try:
+                                        data = _json.loads(msg.payload.decode())
+                                        text_out = (
+                                            data.get("result") or data.get("reply")
+                                            or data.get("text") or data.get("message")
+                                            or data.get("content") or str(data)
+                                        )
+                                    except Exception:
+                                        text_out = msg.payload.decode()
+                                    return str(text_out)
+                            text_out = await asyncio.wait_for(_get_reply(), timeout=150.0)
+                            await reply_fn(text_out)
+                            await _end_fn()
+                            return
+                        except asyncio.TimeoutError:
+                            await reply_fn(f"[error] @{target_name} on {remote_node} did not reply within 150s.")
+                            await _end_fn()
+                            return
+                except Exception as exc:
+                    logger.error(f"[io-gateway] Remote @{target_name} routing failed: {exc}", exc_info=True)
+                    await reply_fn(f"[error] Could not reach @{target_name} on {remote_node}: {exc}")
+                    await _end_fn()
+                    return
+
         await reply_fn(f"Agent @{target_name} not found.")
         return
 
-    logger.warning(
-        f"[io-gateway DEBUG] target={target.name!r} "
-        f"has_process_stream={hasattr(target, 'process_user_input_stream')} "
-        f"has_chat_stream={hasattr(target, 'chat_stream')} "
-        f"has_process_user_input={hasattr(target, 'process_user_input')} "
-        f"has_chat={hasattr(target, 'chat')}"
-    )
     logger.info(f"[io-gateway] → {target.name}: {text[:60]!r}")
 
     gen_fn = (
@@ -539,7 +748,6 @@ async def ws_handler(request):
 
                     elif msg_type == "chat":
                         content = (data.get("content") or "").strip()
-                        logger.warning(f"[io-gateway DEBUG] ws chat msg received: content={content!r} registry_set={registry is not None}")
                         if content and registry is not None:
                             # Persist the user's turn first so chat_log has the
                             # request even if the assistant reply errors out.
@@ -598,7 +806,7 @@ async def handle_command(cmd: dict):
             )
             await broadcast({"type": "patch", "state": _snapshot()})
         elif command == "delete":
-            state["agents"].pop(agent_id, None)
+            await _delete_agent(agent_id)
             await broadcast({"type": "delete_agent", "agent_id": agent_id, "state": _snapshot()})
     except Exception as e:
         logger.error(f"[cmd] Publish failed: {e}")
@@ -625,9 +833,40 @@ def parse_topic(topic: str, payload_str: str):
         agent_id = parts[1]
         metric   = parts[2]
 
+        # Re-admit a deleted agent on a FRESH status event. Every actor
+        # publishes its first status from on_start(), with uptime ≈ 0; that's
+        # the unambiguous "I just started" signal. A stale retained status
+        # from the previous (deleted) incarnation would carry the uptime it
+        # had at the moment of deletion (typically large), so we don't
+        # confuse it with a respawn.
+        #
+        # Without this, deleting an agent and respawning it under the same
+        # name produces the same deterministic actor_id (uuid5 of the name),
+        # the deleted guard fires, and the new instance is invisible in the
+        # dashboard even though it's actually running.
+        if metric == "status" and isinstance(data, dict) and _is_deleted(agent_id):
+            uptime = data.get("uptime", 0)
+            try:
+                uptime = float(uptime)
+            except (TypeError, ValueError):
+                uptime = 0.0
+            agent_state = data.get("state", "")
+            if uptime < 10.0 and agent_state not in ("stopped", "failed"):
+                _undelete(agent_id)
+                logger.info(
+                    f"[MQTT] Re-admitting respawned agent {agent_id[:8]} "
+                    f"(uptime={uptime:.1f}s, state={agent_state}, previously deleted)"
+                )
+
+        # If the agent was just deleted, update_agent() refuses to recreate
+        # the entry — so any direct state["agents"][agent_id] access below
+        # would KeyError. Skip the whole branch; the agent is gone.
+        if _is_deleted(agent_id):
+            return {"type": "agent", "subtype": metric, "agent_id": agent_id, "data": data}
+
         if metric == "status":
             update_agent(agent_id, "status", data)
-            if isinstance(data, dict):
+            if isinstance(data, dict) and agent_id in state["agents"]:
                 if "name"      in data: state["agents"][agent_id]["name"]      = data["name"]
                 if "state"     in data: state["agents"][agent_id]["state"]     = data["state"]
                 if "protected" in data: state["agents"][agent_id]["protected"] = data["protected"]
@@ -635,18 +874,24 @@ def parse_topic(topic: str, payload_str: str):
 
         elif metric == "heartbeat":
             update_agent(agent_id, "heartbeat", data)
-            if isinstance(data, dict):
+            if isinstance(data, dict) and agent_id in state["agents"]:
                 ag = state["agents"][agent_id]
                 ag["name"]  = data.get("name",      agent_id[:8])
                 ag["cpu"]   = data.get("cpu",        0)
                 ag["mem"]   = data.get("memory_mb",  0)
                 ag["task"]  = data.get("task",       "idle")
                 ag["state"] = data.get("state",      "unknown")
-            logger.info(f"[MQTT] Heartbeat: {state['agents'][agent_id].get('name', agent_id[:8])}")
+                # Remote agents' heartbeats include "node" — capture it so the
+                # dashboard delete path can route the stop to the right runner.
+                # Local agents don't set this field; absence means "local".
+                if data.get("node"):
+                    ag["node"] = data["node"]
+            if agent_id in state["agents"]:
+                logger.info(f"[MQTT] Heartbeat: {state['agents'][agent_id].get('name', agent_id[:8])}")
 
         elif metric == "metrics":
             update_agent(agent_id, "metrics", data)
-            if isinstance(data, dict):
+            if isinstance(data, dict) and agent_id in state["agents"]:
                 state["agents"][agent_id]["messages_processed"] = data.get("messages_processed", 0)
                 if "cost_usd" in data:
                     state["agents"][agent_id]["cost_usd"]      = data.get("cost_usd", 0.0)
@@ -903,8 +1148,6 @@ async def index_handler(request):
     for candidate in [
         FRONTEND_DIST / "index.html",
         _find_dir("frontend") / "index.html",
-        _pkg / "monitor.html",
-        _root / "monitor.html",
     ]:
         if candidate.exists():
             ingress_path = request.headers.get("X-Ingress-Path", "").rstrip("/")
@@ -1092,6 +1335,37 @@ async def health_handler(request):
     return web.json_response({"status": "ok"})
 
 
+async def cost_handler(request):
+    from aiohttp import web
+    from .agents.llm_agent import get_global_cost_info
+    return web.json_response(get_global_cost_info())
+
+
+async def cost_limit_handler(request):
+    from aiohttp import web
+    from .agents.llm_agent import set_cost_limit
+    try:
+        body = await request.json()
+        limit_usd = float(body.get("limit_usd", 0))
+        period = body.get("period", "monthly")
+        if period not in ("daily", "weekly", "monthly"):
+            return web.json_response({"error": "period must be daily, weekly, or monthly"}, status=400)
+        set_cost_limit(limit_usd, period)
+        return web.json_response({"ok": True, "limit_usd": limit_usd, "period": period})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=400)
+
+
+async def cost_reset_handler(request):
+    from aiohttp import web
+    from .agents.llm_agent import reset_global_cost
+    try:
+        info = reset_global_cost()
+        return web.json_response({"ok": True, **info})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=400)
+
+
 async def send_message_handler(request):
     from aiohttp import web
     actor_id = request.match_info["actor_id"]
@@ -1114,19 +1388,83 @@ async def send_message_handler(request):
 async def delete_actor_handler(request):
     from aiohttp import web
     actor_id = request.match_info["actor_id"]
-    if registry is None:
-        return web.json_response({"error": "registry not available"}, status=503)
-    actor = registry.get(actor_id) or registry.find_by_name(actor_id)
-    if actor is None:
-        return web.json_response({"error": "actor not found"}, status=404)
-    if getattr(actor, "protected", False):
+    # Resolve the dashboard's record first so remote agents (which aren't in
+    # the local registry) can still be deleted via this endpoint. The earlier
+    # 503/404 short-circuit made remote deletes impossible.
+    record = state["agents"].get(actor_id) or {}
+    if not record:
+        # Fall back to local-registry lookup so a name-based ID still works.
+        if registry is not None:
+            actor = registry.get(actor_id) or registry.find_by_name(actor_id)
+            if actor is None:
+                return web.json_response({"error": "actor not found"}, status=404)
+            if getattr(actor, "protected", False):
+                return web.json_response({"error": "actor is protected"}, status=403)
+            actor_id = actor.actor_id
+        else:
+            return web.json_response({"error": "actor not found"}, status=404)
+    if record.get("protected"):
         return web.json_response({"error": "actor is protected"}, status=403)
-    if mqtt_client_ref:
-        await mqtt_client_ref.publish(
-            f"agents/{actor_id}/commands",
-            json.dumps({"command": "stop", "sender": "api", "timestamp": time.time()}),
+    routed = await _delete_agent(actor_id)
+    await broadcast({"type": "delete_agent", "agent_id": actor_id, "state": _snapshot()})
+    return web.Response(status=200, text=f"stopping ({routed})")
+
+
+async def reset_handler(request):
+    """POST /api/reset  —  clear stored state and broadcast a reset event.
+
+    Body (JSON):
+      scope   : "chat" | "state" | "metrics" | "spawns" | "all"  (required)
+      agent   : str  (optional — limit to one agent by name)
+    """
+    from aiohttp import web
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+
+    scope = body.get("scope", "")
+    agent = body.get("agent") or None
+
+    valid = {"chat", "state", "metrics", "spawns", "logs", "all"}
+    if scope not in valid:
+        return web.json_response(
+            {"error": f"scope must be one of {sorted(valid)}"}, status=400
         )
-    return web.Response(status=200, text="stopping")
+
+    import wactorz.reset as _reset
+
+    if scope == "all":
+        _reset.reset_all(agent)
+    elif scope == "chat":
+        _reset.reset_chat(agent)
+    elif scope == "state":
+        if agent:
+            _reset.reset_agent_state(agent)
+        else:
+            _reset._reset_all_pickles()
+    elif scope == "metrics":
+        _reset.reset_metrics(agent)
+    elif scope == "spawns":
+        _reset.reset_spawns(agent)
+    elif scope == "logs":
+        _reset.reset_logs()
+
+    # Clear in-memory dashboard state for the affected agents
+    if scope in ("all", "chat", "metrics"):
+        if agent:
+            aid = next(
+                (k for k, v in state["agents"].items() if v.get("name") == agent), None
+            )
+            if aid:
+                state["agents"][aid].pop("cost_usd", None)
+                state["agents"][aid].pop("messages_processed", None)
+        else:
+            state["alerts"].clear()
+            state["log_feed"].clear()
+
+    await broadcast({"type": "reset", "scope": scope, "agent": agent, "state": _snapshot()})
+    return web.json_response({"status": "ok", "scope": scope, "agent": agent})
 
 
 async def pause_actor_handler(request):
@@ -1216,9 +1554,17 @@ async def actors_handler(request):
     # Prefer the live registry (injected by cli.py) — actor objects carry the
     # authoritative protected flag.  Fall back to MQTT-derived state dict when
     # the registry is unavailable (standalone monitor_server mode).
+    #
+    # CONTRACT: the registry path intentionally excludes remote-runner agents
+    # (they are not in the local Python registry).  The frontend relies on this
+    # to distinguish local vs remote agents: any agent absent from this response
+    # but present via MQTT heartbeat with a "node" field is a remote agent and
+    # must NOT be evicted by the 15-second REST reconcile cycle.
     if registry is not None:
         result = []
         for actor in registry.all_actors():
+            if _is_deleted(actor.actor_id):
+                continue
             ag = state["agents"].get(actor.actor_id, {})
             result.append({
                 "id":                actor.actor_id,
@@ -1300,6 +1646,52 @@ async def chat_log_handler(request):
 
 
 _tts_voices_cache: list | None = None
+_ha_bridge_task: asyncio.Task | None = None
+
+
+async def _start_ha_bridge(_app=None) -> None:
+    """Launch HAFusekiBridge as a background task if HA_TOKEN is configured."""
+    global _ha_bridge_task
+    from .config import CONFIG
+    if not CONFIG.ha_token or not CONFIG.fuseki_url:
+        return
+    try:
+        from .fuseki import HAFusekiBridge, _run_with_retry
+    except Exception as exc:
+        logger.warning("[ha-bridge] Could not import HAFusekiBridge: %s", exc)
+        return
+
+    bridge = HAFusekiBridge(
+        ha_url=CONFIG.ha_url,
+        ha_token=CONFIG.ha_token,
+        fuseki_url=CONFIG.fuseki_url,
+        fuseki_dataset=CONFIG.fuseki_dataset,
+        fuseki_user=CONFIG.fuseki_user,
+        fuseki_password=CONFIG.fuseki_password,
+    )
+    _ha_bridge_task = asyncio.create_task(
+        _run_with_retry(bridge.run, "HAFusekiBridge"),
+        name="ha-fuseki-bridge",
+    )
+    logger.info("[ha-bridge] HAFusekiBridge started (ha=%s → fuseki=%s/%s)",
+                CONFIG.ha_url, CONFIG.fuseki_url, CONFIG.fuseki_dataset)
+
+
+async def ha_sync_handler(request):
+    """POST /api/ha/sync — cancel and restart the HA→Fuseki bridge immediately."""
+    from aiohttp import web
+    from .config import CONFIG
+    global _ha_bridge_task
+    if not CONFIG.ha_token:
+        return web.json_response({"error": "HA_TOKEN not configured"}, status=400)
+    if _ha_bridge_task and not _ha_bridge_task.done():
+        _ha_bridge_task.cancel()
+        try:
+            await _ha_bridge_task
+        except (asyncio.CancelledError, Exception):
+            pass
+    await _start_ha_bridge()
+    return web.json_response({"status": "restarted"})
 
 
 async def _warm_tts_voices(_app=None) -> None:
@@ -1391,8 +1783,10 @@ async def config_handler(request):
             "token": CONFIG.ha_token,
         },
         "fuseki": {
-            "url":     CONFIG.fuseki_url,
-            "dataset": CONFIG.fuseki_dataset,
+            "url":      CONFIG.fuseki_url,
+            "dataset":  CONFIG.fuseki_dataset,
+            "user":     CONFIG.fuseki_user,
+            "password": CONFIG.fuseki_password,
         },
         "mqtt": {
             "host": MQTT_BROKER,
@@ -1507,9 +1901,32 @@ async def main(exit_on_failure: bool = False):
             raise SystemExit(1)
         return
 
-    app = web.Application()
+    @web.middleware
+    async def _cors_middleware(request, handler):
+        if request.method == "OPTIONS":
+            return web.Response(headers={
+                "Access-Control-Allow-Origin":  "*",
+                "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            })
+        response = await handler(request)
+        try:
+            response.headers["Access-Control-Allow-Origin"]  = "*"
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        except Exception:
+            pass
+        return response
+
+    app = web.Application(middlewares=[_cors_middleware])
     app.router.add_get("/",                      index_handler)
     app.router.add_get("/health",                health_handler)
+    app.router.add_get("/api/cost",              cost_handler)
+    app.router.add_get("/cost",                  cost_handler)
+    app.router.add_post("/api/cost/limit",       cost_limit_handler)
+    app.router.add_post("/cost/limit",           cost_limit_handler)
+    app.router.add_post("/api/cost/reset",       cost_reset_handler)
+    app.router.add_post("/cost/reset",           cost_reset_handler)
     app.router.add_get("/ws",                    ws_handler)
     app.router.add_get("/mqtt",                  mqtt_proxy_handler)
 
@@ -1544,11 +1961,14 @@ async def main(exit_on_failure: bool = False):
     app.router.add_get("/api/tts/voices",        tts_voices_handler)
     app.router.add_get("/api/tts",               tts_handler)
     app.on_startup.append(_warm_tts_voices)
+    app.on_startup.append(_start_ha_bridge)
 
     app.router.add_get("/api/config",            config_handler)
     app.router.add_get("/config",                config_handler)
     app.router.add_get("/api/feed",              feed_handler)
     app.router.add_get("/feed",                  feed_handler)
+    app.router.add_post("/api/reset",             reset_handler)
+    app.router.add_post("/api/ha/sync",          ha_sync_handler)
     app.router.add_get("/favicon.svg",           index_handler)
     from .fuseki_proxy import fuseki_proxy_handler
     app.router.add_post("/api/fuseki/{dataset}/sparql",  fuseki_proxy_handler)
@@ -1570,7 +1990,37 @@ async def main(exit_on_failure: bool = False):
 
 
 def cli_main() -> None:
-    asyncio.run(main(exit_on_failure=True))
+    if sys.platform == "win32":
+        # On Windows we manage the loop manually so paho-mqtt's __del__ doesn't
+        # race against a closed loop during interpreter shutdown, which would
+        # produce spurious "RuntimeError: Event loop is closed" noise from
+        # aiomqtt's _on_socket_close callback.
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(main(exit_on_failure=True))
+        except (KeyboardInterrupt, SystemExit):
+            pass
+        finally:
+            # Cancel all pending tasks so paho gets a chance to close its
+            # sockets while the loop is still alive.
+            try:
+                pending = asyncio.all_tasks(loop)
+                if pending:
+                    loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True)
+                    )
+            except Exception:
+                pass
+            # Brief sleep lets paho's internal socket-close callback fire
+            # before we seal the loop for good.
+            try:
+                loop.run_until_complete(asyncio.sleep(0.25))
+            except Exception:
+                pass
+            loop.close()
+    else:
+        asyncio.run(main(exit_on_failure=True))
 
 
 if __name__ == "__main__":

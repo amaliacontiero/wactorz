@@ -91,6 +91,7 @@ wactorz         = "wactorz.cli:main"
 wactorz-monitor = "wactorz.monitor_server:cli_main"
 wactorz-fuseki  = "wactorz.fuseki:_cli_main"
 wactorz-mcp     = "wactorz.interfaces.mcp_server:main"
+wactorz-reset   = "wactorz.reset:main"
 
 [project.urls]
 Homepage      = "https://waldiez.github.io/wactorz/"
@@ -126,6 +127,10 @@ exclude = [
 # After `pip install` these land at {site-packages}/wactorz/static/.
 [tool.hatch.build.targets.wheel.force-include]
 "static"       = "static"
+
+# ── pytest ─────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 # ── sdist (source distribution for PyPI) ──────────────────────────────────────
 [tool.hatch.build.targets.sdist]

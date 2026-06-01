@@ -1335,6 +1335,60 @@ class _AgentAPI:
         self._mqtt_broker = actor._mqtt_broker
         self._mqtt_port   = actor._mqtt_port
 
+    # ── Identity properties (parity with _RemoteAgentAPI) ──────────────────
+    # The remote API exposes `agent.node` as the node_name of the runner the
+    # agent is running on. Generated code uses this for topic prefixing
+    # patterns like f"{agent.node}/{agent.name}/detections" — common enough
+    # that the LLM emits it routinely. Without the same property on local
+    # _AgentAPI, agents that migrate from a remote node back to main crash
+    # immediately with "'_AgentAPI' object has no attribute 'node'".
+    #
+    # The canonical "this agent is local" value across the rest of the
+    # framework (spawn registry, desired_state, list_nodes filters) is the
+    # empty string "" — see main_actor's `is_target_local` check which
+    # treats ("", "local", "main") as equivalent. For *display* though, an
+    # empty string concatenated into a topic produces a malformed leading
+    # slash. We compromise by returning "local" so f-strings stay readable
+    # and topics stay valid; user code that compares against "" should be
+    # updated to also accept "local".
+    @property
+    def node(self) -> str:
+        node = getattr(self._actor, "_node", None)
+        if node:
+            return str(node)
+        return "local"
+
+    # ── LLM convenience shims (parity with remote _RemoteAgentAPI) ─────────
+    # The remote runner exposes agent.chat(messages, ...) directly on the
+    # API object — generated code written on a remote node will use that
+    # form. Without the same surface here, migrating an agent local→remote
+    # and back (or copy-pasting code originally written for a remote node)
+    # crashes with "'_AgentAPI' object has no attribute 'chat'".
+    #
+    # These delegate to agent.llm so generated code keeps working in both
+    # environments. Both forms — agent.chat(...) and agent.llm.chat(...) —
+    # are valid; pick whichever feels cleaner in your code.
+
+    async def chat(self, messages, system: str = "", timeout: float = 60.0) -> str:
+        """
+        Multi-turn LLM call — mirrors _RemoteAgentAPI.chat() so the same
+        generated code runs locally and remotely.
+
+        ``messages`` is a list of {"role": "user"/"assistant", "content": "..."}.
+        For a single-turn prompt, prefer ``agent.llm.chat("prompt")`` instead.
+        """
+        if self.llm is None:
+            return "[No LLM configured for this agent]"
+        # Allow callers passing a bare string by promoting it to a single
+        # user-turn list — same forgiveness the remote side offers in practice.
+        if isinstance(messages, str):
+            messages = [{"role": "user", "content": messages}]
+        return await self.llm.complete(messages, system=system)
+
+    async def complete(self, messages, system: str = "", timeout: float = 60.0) -> str:
+        """Alias for chat() — matches _LLMInterface.complete() naming."""
+        return await self.chat(messages, system=system, timeout=timeout)
+
     # ── MQTT ───────────────────────────────────────────────────────────────
 
     async def publish(self, topic: str, data: Any):
@@ -1648,68 +1702,127 @@ class _AgentAPI:
         self._actor.persist(key, value)
         return _AWAITABLE_NONE           # safe to await
 
-    def recall(self, key: str) -> Any:
+    def recall(self, key: str, default: Any = None) -> Any:
         """
-        Load a persisted value. Returns None if the key doesn't exist.
+        Load a persisted value. Returns `default` (None by default) if the
+        key doesn't exist — same shape as dict.get(), and identical to the
+        remote runner's _RemoteAgentAPI.recall() so the same agent code
+        works on local and remote without modification.
 
         Note: recall() is synchronous — do NOT use await.
         The sanitizer strips `await agent.recall(...)` at compile time.
         If an accidental `await` slips through, the _safe_invoke callback
         wrapper (layer 4) will catch the TypeError.
 
-        The return value is always the real persisted value (or None).
+        The return value is always the real persisted value (or the default).
         We do NOT substitute _AWAITABLE_NONE here because that would break
         the `if agent.recall('key') is None:` idiom that existing agent
         code relies on.
         """
-        return self._actor.recall(key)
+        value = self._actor.recall(key)
+        return value if value is not None else default
 
     # ── Inter-agent messaging ──────────────────────────────────────────────
 
     async def send_to(self, agent_name: str, payload: Any, timeout: float = 60.0) -> Optional[Any]:
         """Send a TASK to another agent by name and wait for its result.
 
-        Works with DynamicAgent, LLMAgent, ManualAgent — any Actor subclass.
-        Uses a dedicated future keyed by a unique task_id so concurrent calls
-        don't interfere with each other.
+        Routing priority:
+          1. Local registry — fast in-process mailbox
+          2. Remote node via MQTT — agents/by-name/{name}/task with reply topic
+          3. Returns error dict if the agent is unknown in both
+
+        Works with local DynamicAgent/LLMAgent AND remote _RemoteAgent on any node.
         """
         registry = self._actor._registry
         if not registry:
             logger.warning(f"[{self.name}] send_to: no registry")
             return None
+
         target = registry.find_by_name(agent_name)
-        if not target:
-            logger.warning(f"[{self.name}] send_to: agent '{agent_name}' not found")
+
+        if target:
+            # ── Local path ────────────────────────────────────────────────────
+            import uuid as _uuid
+            task_id = str(_uuid.uuid4())[:8]
+            if not hasattr(self._actor, "_result_futures"):
+                self._actor._result_futures = {}
+            future = asyncio.get_event_loop().create_future()
+            self._actor._result_futures[task_id] = future
+            _ensure_result_handler(self._actor)
+            if not isinstance(payload, dict):
+                payload = {"message": payload, "text": str(payload)}
+            payload = dict(payload)
+            payload["_task_id"]  = task_id
+            payload["_reply_to"] = self._actor.actor_id
+            await self._actor.send(target.actor_id, MessageType.TASK, payload)
+            try:
+                return await asyncio.wait_for(future, timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.warning(f"[{self.name}] send_to '{agent_name}' timed out after {timeout}s")
+                return {"error": f"Timeout waiting for '{agent_name}'"}
+            finally:
+                self._actor._result_futures.pop(task_id, None)
+
+        # ── Remote path: find agent on a known node ───────────────────────────
+        remote_node = None
+        main = registry.find_by_name("main") if registry else None
+        if main and hasattr(main, "_known_nodes"):
+            for node_name, nd in main._known_nodes.items():
+                if agent_name in nd.get("agents", []):
+                    remote_node = node_name
+                    break
+
+        if not remote_node:
+            logger.warning(f"[{self.name}] send_to: agent '{agent_name}' not found locally or remotely")
             return {"error": f"Agent '{agent_name}' not found"}
 
-        import uuid
-        task_id = str(uuid.uuid4())[:8]
+        import uuid as _uuid
+        reply_topic = f"agents/by-name/{self.name}/reply/{_uuid.uuid4().hex[:8]}"
 
-        # Register a future in the actor's result table
-        if not hasattr(self._actor, "_result_futures"):
-            self._actor._result_futures = {}
-        future = asyncio.get_event_loop().create_future()
-        self._actor._result_futures[task_id] = future
-
-        # Ensure the actor resolves result futures in handle_message
-        _ensure_result_handler(self._actor)
-
-        # Payload: always a dict with task_id and reply_to so target can respond
         if not isinstance(payload, dict):
             payload = {"message": payload, "text": str(payload)}
         payload = dict(payload)
-        payload["_task_id"]  = task_id
-        payload["_reply_to"] = self._actor.actor_id
+        payload["_reply_topic"] = reply_topic
+        payload["_remote_task"] = True
 
-        await self._actor.send(target.actor_id, MessageType.TASK, payload)
+        future = asyncio.get_event_loop().create_future()
+        if not hasattr(self._actor, "_result_futures"):
+            self._actor._result_futures = {}
+        self._actor._result_futures[reply_topic] = future
+
+        await self._actor._mqtt_publish(f"agents/by-name/{agent_name}/task", payload)
+
+        async def _wait_reply():
+            try:
+                import aiomqtt
+                broker = getattr(self._actor, "_mqtt_broker", "localhost")
+                port   = getattr(self._actor, "_mqtt_port", 1883)
+                async with aiomqtt.Client(broker, port) as client:
+                    await client.subscribe(reply_topic)
+                    async for msg in client.messages:
+                        try:
+                            import json as _json
+                            data = _json.loads(msg.payload.decode())
+                            if not future.done():
+                                future.set_result(data)
+                        except Exception:
+                            pass
+                        return
+            except Exception as e:
+                if not future.done():
+                    future.set_exception(e)
+
+        reply_task = asyncio.create_task(_wait_reply())
         try:
-            result = await asyncio.wait_for(future, timeout=timeout)
+            result = await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
             return result
         except asyncio.TimeoutError:
-            logger.warning(f"[{self.name}] send_to '{agent_name}' timed out after {timeout}s")
-            return {"error": f"Timeout waiting for '{agent_name}'"}
+            logger.warning(f"[{self.name}] send_to '{agent_name}' on '{remote_node}' timed out after {timeout}s")
+            return {"error": f"Timeout waiting for remote '{agent_name}'"}
         finally:
-            self._actor._result_futures.pop(task_id, None)
+            reply_task.cancel()
+            self._actor._result_futures.pop(reply_topic, None)
 
     async def send_to_many(self, tasks: list[tuple[str, Any]], timeout: float = 60.0) -> list:
         """Send tasks to multiple agents IN PARALLEL and collect all results.
@@ -1729,28 +1842,62 @@ class _AgentAPI:
 
     def agents(self) -> list[dict]:
         """
-        Return all running agents with name, type and description.
-        Use this to discover what workers are available before delegating.
+        Return all running agents — both local and remote.
+
+        Local agents come from the registry. Remote agents are sourced from
+        main._known_nodes (populated by node heartbeats). Each entry includes
+        a 'remote' flag and 'node' field so callers can route correctly.
 
         Example:
             available = agent.agents()
-            workers = [a for a in available if a["name"] != "main"]
+            remote_workers = [a for a in available if a.get("remote")]
         """
         registry = self._actor._registry
-        if not registry:
-            return []
-        result = []
-        for actor in registry.all_actors():
-            result.append({
-                "name":        actor.name,
-                "type":        type(actor).__name__,
-                "description": (
-                    getattr(actor, "description", "")
-                    or getattr(actor, "system_prompt", "")[:100]
-                    or ""
-                ),
-                "state": actor.state.name if hasattr(actor.state, "name") else str(actor.state),
-            })
+        result   = []
+        seen     = set()
+
+        # ── Local agents from registry ────────────────────────────────────────
+        if registry:
+            for actor in registry.all_actors():
+                seen.add(actor.name)
+                result.append({
+                    "name":        actor.name,
+                    "type":        type(actor).__name__,
+                    "description": (
+                        getattr(actor, "description", "")
+                        or getattr(actor, "system_prompt", "")[:100]
+                        or ""
+                    ),
+                    "state":  actor.state.name if hasattr(actor.state, "name") else str(actor.state),
+                    "remote": False,
+                    "node":   None,
+                })
+
+        # ── Remote agents from live node heartbeats ───────────────────────────
+        main = registry.find_by_name("main") if registry else None
+        if main and hasattr(main, "_known_nodes"):
+            import time as _t
+            for node_name, nd in main._known_nodes.items():
+                if _t.time() - nd.get("last_seen", 0) > 30:
+                    continue   # node is offline — skip
+                for aname in nd.get("agents", []):
+                    if aname in seen:
+                        continue   # already in local registry (shouldn't happen but guard it)
+                    seen.add(aname)
+                    # Try to get description from _agent_manifests
+                    desc = ""
+                    if hasattr(main, "_agent_manifests"):
+                        m    = main._agent_manifests.get(aname, {})
+                        desc = m.get("description", "")
+                    result.append({
+                        "name":        aname,
+                        "type":        "RemoteAgent",
+                        "description": desc,
+                        "state":       "running",
+                        "remote":      True,
+                        "node":        node_name,
+                    })
+
         return result
 
     def nodes(self) -> list[dict]:

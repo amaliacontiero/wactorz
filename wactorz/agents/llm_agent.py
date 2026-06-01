@@ -7,12 +7,124 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Optional
 
 from ..core.actor import Actor, Message, MessageType
 from ..core.persistence import get_db
 
 logger = logging.getLogger(__name__)
+
+
+# ── Global cost limit ────────────────────────────────────────────────────────
+
+def _period_key(period: str) -> str:
+    now = datetime.now()
+    if period == "daily":
+        return now.strftime("%Y-%m-%d")
+    if period == "weekly":
+        return now.strftime("%Y-W%W")
+    return now.strftime("%Y-%m")
+
+
+def _global_cost_kv_key(period: str) -> str:
+    return f"_global_cost_{_period_key(period)}"
+
+
+def get_global_cost_info() -> dict:
+    """Return current period spend and limit. Used by GET /api/cost."""
+    from ..config import CONFIG
+    db = get_db()
+    # Runtime override (set via POST /api/cost/limit) takes priority over env var
+    limit = CONFIG.llm_cost_limit_usd
+    period = CONFIG.llm_cost_limit_period
+    if db is not None:
+        try:
+            override = db.kv_get("_system", "_cost_limit_override")
+            if isinstance(override, dict):
+                limit = float(override.get("limit_usd", limit))
+                period = override.get("period", period)
+        except Exception:
+            pass
+    key = _global_cost_kv_key(period)
+    spend = 0.0
+    if db is not None:
+        try:
+            spend = float(db.kv_get("_system", key) or 0.0)
+        except Exception:
+            pass
+    pct = round(spend / limit * 100, 1) if limit > 0 else None
+    return {
+        "period": period,
+        "period_key": _period_key(period),
+        "spend_usd": round(spend, 6),
+        "limit_usd": limit if limit > 0 else None,
+        "pct_used": pct,
+        "limit_reached": limit > 0 and spend >= limit,
+        "warning": limit > 0 and spend >= limit * 0.8,
+    }
+
+
+def set_cost_limit(limit_usd: float, period: str) -> None:
+    """Persist a runtime cost limit override to SQLite."""
+    if period not in ("daily", "weekly", "monthly"):
+        raise ValueError(f"period must be daily, weekly, or monthly (got {period!r})")
+    db = get_db()
+    if db is None:
+        raise RuntimeError("Database not available")
+    db.kv_set("_system", "_cost_limit_override", {"limit_usd": limit_usd, "period": period})
+
+
+def reset_global_cost() -> dict:
+    """Clear accumulated spend for all periods. Returns new spend info."""
+    db = get_db()
+    if db is None:
+        raise RuntimeError("Database not available")
+    for period in ("daily", "weekly", "monthly"):
+        db.kv_set("_system", _global_cost_kv_key(period), 0.0)
+    return get_global_cost_info()
+
+
+def _accumulate_global_cost(delta: float) -> None:
+    if delta <= 0:
+        return
+    db = get_db()
+    if db is None:
+        return
+    from ..config import CONFIG
+    limit = CONFIG.llm_cost_limit_usd
+    try:
+        override = db.kv_get("_system", "_cost_limit_override")
+        if isinstance(override, dict):
+            limit = float(override.get("limit_usd", limit))
+    except Exception:
+        pass
+    if limit <= 0:
+        return
+    for period in ("daily", "weekly", "monthly"):
+        key = _global_cost_kv_key(period)
+        try:
+            current = float(db.kv_get("_system", key) or 0.0)
+            db.kv_set("_system", key, round(current + delta, 6))
+        except Exception as exc:
+            logger.debug("[cost-limit] global accumulate failed (%s): %s", period, exc)
+
+
+def _check_cost_limit() -> None:
+    info = get_global_cost_info()
+    if not info.get("limit_usd"):
+        return
+    if info["limit_reached"]:
+        raise RuntimeError(
+            f"LLM cost limit of ${info['limit_usd']:.2f} reached "
+            f"for {info['period_key']}. Blocking further LLM calls."
+        )
+    if info["warning"]:
+        logger.warning(
+            "[cost-limit] %.1f%% of $%.2f %s budget used ($%.4f)",
+            info["pct_used"], info["limit_usd"],
+            info["period"], info["spend_usd"],
+        )
 
 
 # Fallback pricing per 1M tokens (input, output) in USD.
@@ -70,13 +182,17 @@ _PRICING_TTL = 86400.0  # 24 hours
 # Populated by _refresh_pricing(); maps exact model name → ($/1M input, $/1M output)
 _dynamic_pricing: dict[str, tuple[float, float]] = {}
 _dynamic_pricing_ts: float = 0.0
+_pricing_fetch_in_progress: bool = False
 
 
 async def _refresh_pricing() -> None:
     """Fetch latest model prices from LiteLLM's catalogue and cache them for 24 h."""
-    global _dynamic_pricing, _dynamic_pricing_ts
+    global _dynamic_pricing, _dynamic_pricing_ts, _pricing_fetch_in_progress
     if time.time() - _dynamic_pricing_ts < _PRICING_TTL and _dynamic_pricing:
         return
+    if _pricing_fetch_in_progress:
+        return
+    _pricing_fetch_in_progress = True
     try:
         import aiohttp
         async with aiohttp.ClientSession() as session:
@@ -98,7 +214,9 @@ async def _refresh_pricing() -> None:
         _dynamic_pricing_ts = time.time()
         logger.info("[pricing] Fetched %d model prices from LiteLLM", len(pricing))
     except Exception as exc:
-        logger.warning("[pricing] Failed to fetch dynamic pricing: %s — using fallback", exc)
+        logger.warning("[pricing] Failed to fetch dynamic pricing: %s - using fallback", exc)
+    finally:
+        _pricing_fetch_in_progress = False
 
 
 def _calc_cost(model: str, input_tokens: int, output_tokens: int) -> float:
@@ -954,6 +1072,7 @@ class LLMAgent(Actor):
         self.total_input_tokens  = 0
         self.total_output_tokens = 0
         self.total_cost_usd      = 0.0
+        self._last_persisted_usd = 0.0
 
     def _current_task_description(self) -> str:
         return self._current_task
@@ -986,6 +1105,9 @@ class LLMAgent(Actor):
             self.total_input_tokens  += saved_cost.get("input_tokens", 0)
             self.total_output_tokens += saved_cost.get("output_tokens", 0)
             self.total_cost_usd      += saved_cost.get("cost_usd", 0.0)
+        # Align persisted baseline so global cost doesn't re-add lifetime spend on first
+        # _persist_cost() after restart.
+        self._last_persisted_usd = self.total_cost_usd
 
         # Migration: if _messages_processed key doesn't exist yet, seed from
         # conversation_history so the overview counter isn't always 0 on first
@@ -1106,6 +1228,19 @@ class LLMAgent(Actor):
             logger.warning(f"[{self.name}] No LLM provider configured.")
             return
 
+        try:
+            _check_cost_limit()
+        except RuntimeError as e:
+            payload_dict = msg.payload if isinstance(msg.payload, dict) else {}
+            task_id  = payload_dict.get("_task_id")
+            reply_to = payload_dict.get("_reply_to") or msg.reply_to or msg.sender_id
+            if reply_to:
+                result = {"text": str(e), "task": task_text}
+                if task_id:
+                    result["_task_id"] = task_id
+                await self.send(reply_to, MessageType.RESULT, result)
+            return
+
         start = time.time()
         try:
             self._conversation_history.append({"role": "user", "content": task_text, "ts": start})
@@ -1164,6 +1299,10 @@ class LLMAgent(Actor):
         """Direct async call - useful for the main conversation actor."""
         if self.llm is None:
             return "[No LLM configured]"
+        try:
+            _check_cost_limit()
+        except RuntimeError as e:
+            return str(e)
 
         self.metrics.messages_processed += 1
         ts_user = time.time()
@@ -1210,6 +1349,12 @@ class LLMAgent(Actor):
                 else:
                     print(chunk, end="", flush=True)
         """
+        try:
+            _check_cost_limit()
+        except RuntimeError as e:
+            yield str(e)
+            return
+
         if self.llm is None or not hasattr(self.llm, "stream"):
             # Fallback: non-streaming — yield whole response as single chunk
             response = await self.chat(user_message)
@@ -1286,6 +1431,10 @@ class LLMAgent(Actor):
 
     def _persist_cost(self):
         """Write lifetime cost to durable SQLite storage after each exchange."""
+        delta = self.total_cost_usd - self._last_persisted_usd
+        if delta > 0:
+            _accumulate_global_cost(delta)
+            self._last_persisted_usd = self.total_cost_usd
         self.persist("_final_cost", {
             "input_tokens":  self.total_input_tokens,
             "output_tokens": self.total_output_tokens,

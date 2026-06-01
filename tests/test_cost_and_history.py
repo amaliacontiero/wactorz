@@ -46,10 +46,9 @@ class LLMAgentCostRestoreTest(unittest.IsolatedAsyncioTestCase):
     def _make_agent(self, saved_cost: dict):
         from wactorz.agents.llm_agent import LLMAgent
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             agent = LLMAgent(name="test-llm", persistence_dir=tmp)
 
-        # Stub recall: return saved_cost for _final_cost, empty defaults for others
         def _recall(key, default=None):
             if key == "_final_cost":
                 return saved_cost
@@ -88,7 +87,6 @@ class LLMAgentCostRestoreTest(unittest.IsolatedAsyncioTestCase):
         agent = self._make_agent(saved)
         await agent.on_start()
 
-        # Simulate one more exchange
         agent.total_input_tokens  += 10
         agent.total_output_tokens += 5
         agent.total_cost_usd      += 0.001
@@ -105,7 +103,7 @@ class PersistCostTest(unittest.TestCase):
     def _make_agent(self):
         from wactorz.agents.llm_agent import LLMAgent
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             agent = LLMAgent(name="cost-agent", persistence_dir=tmp)
 
         agent.persist = MagicMock()

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 
     <!-- ── Primary SEO ──────────────────────────────────────────────────────── -->
-    <title>Wactorz — Multi-Agent Orchestration Dashboard</title>
+    <title>Wactorz - Multi-Agent Orchestration Dashboard</title>
     <meta name="description"
           content="Wactorz: real-time multi-agent orchestration dashboard. Monitor, chat with, and control AI agents via an immersive 3D network graph, social card grid, or galaxy view." />
     <meta name="keywords"
@@ -17,7 +17,7 @@
     <!-- ── Open Graph ───────────────────────────────────────────────────────── -->
     <meta property="og:type"        content="website" />
     <meta property="og:site_name"   content="Wactorz" />
-    <meta property="og:title"       content="Wactorz — Multi-Agent Orchestration Dashboard" />
+    <meta property="og:title"       content="Wactorz - Multi-Agent Orchestration Dashboard" />
     <meta property="og:description"
           content="Monitor and control AI agents in real-time. Visualise your agent network as an immersive 3D graph, social card grid, or galaxy. Built on the actor model with MQTT pub-sub." />
     <meta property="og:locale"      content="en_US" />
@@ -489,15 +489,15 @@
         border-top: 1px solid rgba(37, 99, 235, 0.15);
         z-index: 400;
       }
-      #mic-btn {
+      #mic-btn, #wake-btn {
         flex-shrink: 0; width: 36px; height: 36px; border-radius: 8px;
         background: rgba(37, 99, 235, 0.12);
         border: 1px solid rgba(37, 99, 235, 0.3);
-        color: #93c5fd; font-size: 16px; cursor: pointer;
+        color: #93c5fd; cursor: pointer;
         display: flex; align-items: center; justify-content: center;
         transition: all 0.2s ease;
       }
-      #mic-btn:hover { background: rgba(37, 99, 235, 0.22); }
+      #mic-btn:hover, #wake-btn:hover { background: rgba(37, 99, 235, 0.22); }
       #mic-btn.recording {
         background: rgba(251, 113, 133, 0.2);
         border-color: rgba(251, 113, 133, 0.5);
@@ -508,9 +508,25 @@
         0%, 100% { box-shadow: 0 0 0 0 rgba(251,113,133,0.3); }
         50% { box-shadow: 0 0 0 8px rgba(251,113,133,0); }
       }
+      #wake-btn.ambient {
+        background: rgba(34, 197, 94, 0.15);
+        border-color: rgba(34, 197, 94, 0.4);
+        color: #4ade80;
+        animation: wake-pulse 2s ease-in-out infinite;
+      }
+      #wake-btn.triggered {
+        background: rgba(234, 179, 8, 0.2);
+        border-color: rgba(234, 179, 8, 0.5);
+        color: #facc15;
+        animation: none;
+      }
+      @keyframes wake-pulse {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(34,197,94,0.3); }
+        50% { box-shadow: 0 0 0 6px rgba(34,197,94,0); }
+      }
       #text-input {
         flex: 1;
-        min-height: 36px; max-height: 120px;
+        min-height: 36px;
         padding: 8px 14px;
         background: rgba(255, 255, 255, 0.05);
         border: 1px solid rgba(255, 255, 255, 0.1);
@@ -518,6 +534,7 @@
         outline: none; transition: border-color 0.2s;
         font-family: inherit;
         resize: none; overflow: hidden; line-height: 1.5;
+        scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.15) transparent;
       }
       #text-input::placeholder { color: rgba(255,255,255,0.3); }
       #text-input:focus { border-color: rgba(37, 99, 235, 0.5); }
@@ -730,6 +747,43 @@
       .af-stat-value { margin-top: 8px; font-size: 26px; font-weight: 700; }
       .af-stat-detail { margin-top: 6px; color: rgba(255,255,255,0.55); font-size: 12px; }
 
+      /* ── Host stats bar ── */
+      .af-host-bar {
+        display: flex; align-items: center; gap: 20px;
+        padding: 10px 16px; border-radius: 12px;
+        background: linear-gradient(90deg, rgba(7,12,28,0.9), rgba(10,16,32,0.7));
+        border: 1px solid rgba(255,255,255,0.07);
+        font-size: 12px; color: rgba(255,255,255,0.55);
+        flex-shrink: 0;
+      }
+      .af-host-label {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+        color: rgba(255,255,255,0.3); flex-shrink: 0;
+      }
+      .af-host-metric {
+        display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
+      }
+      .af-host-metric-label {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+        color: rgba(255,255,255,0.28); flex-shrink: 0; width: 30px;
+      }
+      .af-host-bar-track {
+        flex: 1; height: 4px; border-radius: 2px;
+        background: rgba(255,255,255,0.07); overflow: hidden; min-width: 60px; max-width: 120px;
+      }
+      .af-host-bar-fill {
+        height: 100%; border-radius: 2px; width: 0%;
+        transition: width 0.6s ease;
+      }
+      .af-host-bar-fill-cpu { background: linear-gradient(90deg, #f59e0b, #fcd34d); }
+      .af-host-bar-fill-mem { background: linear-gradient(90deg, #6366f1, #818cf8); }
+      .af-host-metric-val {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 11px; color: rgba(255,255,255,0.6); flex-shrink: 0; min-width: 70px;
+      }
+
       .af-overview-panels {
         display: grid; grid-template-columns: minmax(0,1.5fr) minmax(280px,0.9fr); gap: 16px; align-items: start;
       }
@@ -800,7 +854,7 @@
 
       /* ── IO Bar (embedded in af-root) ── */
       .af-iobar {
-        display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+        display: flex; align-items: flex-end; gap: 8px; padding: 8px 12px;
         border-top: 1px solid rgba(37,99,235,0.15); background: rgba(4,8,16,0.9); flex-shrink: 0;
       }
       .af-target-select {
@@ -813,8 +867,45 @@
         flex: 1; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
         border-radius: 8px; padding: 7px 12px; font-size: 13px; color: rgba(255,255,255,0.9);
         outline: none; transition: border-color 0.15s; font-family: inherit;
+        resize: none; overflow: hidden; min-height: 34px; line-height: 1.4;
+        scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.15) transparent;
       }
       .af-iobar-input:focus { border-color: rgba(37,99,235,0.55); background: rgba(255,255,255,0.07); }
+      .af-iobar-input.has-suggestion { background: transparent !important; position: relative; z-index: 1; }
+
+      /* ── Autosuggestion ghost text ── */
+      .af-input-wrap { position: relative; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+      .af-input-ghost {
+        position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+        padding: 7px 12px; font-size: 13px; font-family: inherit; line-height: 1.4;
+        border: 1px solid transparent; border-radius: 8px;
+        pointer-events: none; z-index: 0; overflow: hidden;
+        white-space: pre-wrap; word-break: break-word;
+        color: rgba(147,197,253,0.32);
+      }
+      .af-input-hint {
+        font-size: 10px; color: rgba(255,255,255,0.18); padding: 0 2px;
+        display: none; user-select: none; line-height: 1;
+      }
+      .af-input-wrap:focus-within .af-input-hint { display: block; }
+
+      /* ── @mention panel ── */
+      .af-mention-panel {
+        display: none; position: absolute; bottom: calc(100% + 6px); left: 0;
+        background: rgba(9,18,40,0.97); border: 1px solid rgba(37,99,235,0.35);
+        border-radius: 10px; padding: 6px 8px; gap: 6px;
+        flex-wrap: wrap; z-index: 200; max-width: 100%;
+        box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+      }
+      .af-mention-panel.open { display: flex; }
+      .af-mention-chip {
+        padding: 4px 11px; border-radius: 20px; font-size: 11px; cursor: pointer;
+        border: 1px solid rgba(37,99,235,0.3); background: rgba(37,99,235,0.1);
+        color: #93c5fd; transition: background 0.1s, border-color 0.1s; white-space: nowrap;
+      }
+      .af-mention-chip:hover, .af-mention-chip.active {
+        background: rgba(37,99,235,0.28); border-color: #3b82f6; color: #fff;
+      }
       .af-send-btn {
         width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0;
         display: flex; align-items: center; justify-content: center;
@@ -823,6 +914,16 @@
       }
       .af-send-btn:hover:not(:disabled) { background: #3b82f6; transform: scale(1.05); }
       .af-send-btn:disabled { background: rgba(37,99,235,0.3); cursor: not-allowed; }
+      .af-voice-btn {
+        width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0;
+        display: flex; align-items: center; justify-content: center;
+        background: rgba(37,99,235,0.12); border: 1px solid rgba(37,99,235,0.3);
+        color: #93c5fd; cursor: pointer; transition: background 0.15s;
+      }
+      .af-voice-btn:hover { background: rgba(37,99,235,0.22); }
+      .af-voice-btn.recording { background: rgba(239,68,68,0.2); border-color: rgba(239,68,68,0.5); animation: mic-pulse 1s ease-in-out infinite; }
+      .af-voice-btn.ambient { background: rgba(34,197,94,0.15); border-color: rgba(34,197,94,0.4); animation: wake-pulse 2s ease-in-out infinite; }
+      .af-voice-btn.triggered { background: rgba(251,191,36,0.2); border-color: rgba(251,191,36,0.5); animation: none; }
 
       @media (max-width: 1100px) {
         .af-stats-grid { grid-template-columns: repeat(2, minmax(0,1fr)); }
@@ -907,6 +1008,8 @@
         display: flex; gap: 10px; flex-wrap: wrap;
         font-size: 11px; color: rgba(255,255,255,0.4); margin-top: 2px;
       }
+      .af-card-cpu { color: rgba(251,191,36,0.75); }
+      .af-card-mem { color: rgba(129,140,248,0.75); }
       .af-card-footer { display: flex; gap: 5px; margin-top: 6px; flex-wrap: wrap; }
       .af-card-btn {
         font-size: 11px; padding: 4px 10px; border-radius: 6px;
@@ -963,8 +1066,11 @@
       .af-state-error        { color: #f87171; }
 
       /* Heartbeat pulse on dot */
+      .af-card-state-dot { transition: opacity 1.2s ease, filter 1.2s ease; }
       .af-card-pulse { animation: af-card-hb-once 0.5s ease !important; }
       @keyframes af-card-hb-once { 0%,100%{transform:scale(1)} 40%{transform:scale(1.9);opacity:1} }
+      /* Stale agent — no heartbeat for 180 s */
+      .af-card-stale { animation: none !important; opacity: 0.35; filter: grayscale(1); }
 
       /* ── Classic (cd-card) layout ────────────────────────────────────────── */
       .cd-grid {
@@ -1397,7 +1503,7 @@
           min-height: 58px;
         }
         /* 44px touch targets — minimum recommended by Apple HIG */
-        #mic-btn, #send-btn { width: 44px; height: 44px; font-size: 16px; }
+        #wake-btn, #mic-btn, #send-btn { width: 44px; height: 44px; }
         #text-input { font-size: 16px; } /* 16px prevents iOS auto-zoom on focus */
       }
 
@@ -1855,6 +1961,13 @@
         border-color: rgba(56,189,248,0.55);
         box-shadow: 0 0 0 2px rgba(56,189,248,0.08);
       }
+      select.af-cfg-input option {
+        background: #1a1d2e;
+        color: rgba(255,255,255,0.88);
+      }
+      select.af-cfg-input option:checked {
+        background: #2a3a5c;
+      }
       .af-mini-btn.danger {
         background: rgba(239,68,68,0.15);
         border-color: rgba(239,68,68,0.4);
@@ -1876,17 +1989,17 @@
         .fin-metric-val { font-size: 15px; }
       }
     </style>
-    <script type="module" crossorigin src="./assets/index-CE1gaHPI.js"></script>
+    <script type="module" crossorigin src="./assets/index-B9jy-LJg.js"></script>
     <link rel="modulepreload" crossorigin href="./assets/rolldown-runtime-lhHHWwHU.js">
     <link rel="modulepreload" crossorigin href="./assets/babylon-core-wJ5bR-LE.js">
-    <link rel="modulepreload" crossorigin href="./assets/vendor-DuCOOrkg.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-CcRsjWCO.js">
   </head>
   <body>
     <!-- 3D canvas -->
     <canvas id="renderCanvas"></canvas>
 
     <!-- HUD: agent count + health badge + page links -->
-    <div id="hud" class="glass">
+    <div id="hud" class="glass" style="display:none">
       <div class="hud-title">Wactorz</div>
       <div class="hud-count" id="hud-count">0</div>
       <div class="hud-label">Active Agents</div>
@@ -1908,7 +2021,7 @@
     </div>
 
     <!-- Activity feed toggle (below theme switcher) -->
-    <button id="feed-toggle" title="Toggle activity feed">
+    <button id="feed-toggle" style="display:none" title="Toggle activity feed">
       Feed <span id="feed-badge"></span>
     </button>
 
@@ -1939,9 +2052,24 @@
     <!-- Node hover tooltip -->
     <div id="node-tooltip"></div>
 
-    <!-- IO bar: mic + multiline textarea + send -->
-    <div id="io-bar">
-      <button id="mic-btn" title="Hold to speak">🎙</button>
+    <!-- IO bar: wake + mic + multiline textarea + send -->
+    <div id="io-bar" style="display:none">
+      <button id="wake-btn" title="Wake word — click to enable">
+        <svg width="15" height="15" viewBox="0 0 15 15" fill="currentColor" aria-hidden="true">
+          <rect x="1" y="6" width="2" height="3" rx="1"/>
+          <rect x="4.5" y="4" width="2" height="7" rx="1"/>
+          <rect x="8" y="2" width="2" height="11" rx="1"/>
+          <rect x="11.5" y="4" width="2" height="7" rx="1"/>
+        </svg>
+      </button>
+      <button id="mic-btn" title="Hold to speak">
+        <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
+          <path d="M7.5 1.5a2.5 2.5 0 0 0-2.5 2.5v4a2.5 2.5 0 0 0 5 0V4a2.5 2.5 0 0 0-2.5-2.5Z" fill="currentColor"/>
+          <path d="M3 7.5a4.5 4.5 0 0 0 9 0" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+          <line x1="7.5" y1="12" x2="7.5" y2="13.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+          <line x1="5" y1="13.5" x2="10" y2="13.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+        </svg>
+      </button>
       <textarea
         id="text-input"
         rows="1"

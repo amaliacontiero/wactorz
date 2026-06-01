@@ -115,6 +115,11 @@ const voice = new VoiceInput();
 const ioManager = new IOManager(mqtt, chatPanel);
 const ioBar = new IOBar(voice, ioManager);
 
+document.addEventListener("af-mic-toggle", () => {
+  if (voice.isRecording) ioBar.stopMic();
+  else void ioBar.startMic();
+});
+
 const feed = new ActivityFeed();
 
 // ── Direct WebSocket chat (bypasses MQTT/IOAgent when server has registry) ────
@@ -201,6 +206,7 @@ wsChat.onStatePatch((agents, deletedId, stats) => {
   if (stats?.totalMessages !== undefined) scene.setTotalMessages(stats.totalMessages);
   agents.forEach((a) => {
     if (!a.agent_id) return;
+    if (deletedAgentIds.has(a.agent_id)) return;
     const rawState = (a.state ?? a.status ?? "running") as string;
     const state: AgentState =
       rawState === "paused"
@@ -231,7 +237,7 @@ wsChat.onStatePatch((agents, deletedId, stats) => {
 
 wsChat.connect(`${_wsBase}/ws`);
 refreshLiveActors();
-window.setInterval(refreshLiveActors, 15000);
+window.setInterval(() => { refreshLiveActors(); scene.pruneStaleRemoteAgents(); }, 15000);
 
 // ── WS log_feed → Activity Feed ───────────────────────────────────────────────
 // The server embeds its in-memory log_feed (spawned/status/logs/alerts) in
@@ -371,6 +377,7 @@ mqtt.on("heartbeat", (payload) => {
 });
 
 mqtt.on("spawn", (payload) => {
+  if (deletedAgentIds.has(payload.agentId)) return;
   scene.onSpawn(payload);
   syncAgentViews();
   pushFeed({
@@ -469,6 +476,8 @@ mqtt.on("connected", () => {
     new CustomEvent("af-connection-status", { detail: { status: "live" } }),
   );
 
+  scene.pruneStaleRemoteAgents();
+
   if (seeded) return;
   seeded = true;
 
@@ -536,6 +545,12 @@ mqtt.on("node-heartbeat", (payload) => {
 
 mqtt.on("system-health", () => {
   hud.setSystemHealth(true);
+});
+
+mqtt.on("host-stats", (stats) => {
+  if (stats.cpu !== undefined || stats.memUsedMb !== undefined) {
+    scene.setHostStats(stats.cpu ?? 0, stats.memUsedMb ?? 0, stats.memTotalMb);
+  }
 });
 
 mqtt.on("coin", (payload) => {

@@ -1,43 +1,514 @@
 # Changelog
 
 All notable changes to Wactorz are documented here.
-Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Versioning follows [SemVer](https://semver.org/).
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [0.4.2] -- 2026-05-14
+## [Unreleased]
 
-### Added
-
-- **Dynamic LLM pricing** -- `LLMAgent` now fetches live model prices from the [LiteLLM model catalogue](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) on startup and caches them for 24 hours. Falls back to a hardcoded table if the fetch fails or the model is not found. `pricing_info(model)` helper added for debugging (reports source, rates, and cache age).
-- **`HomeAssistantAgent` -- `other` action** -- A new `other` action handles open-ended HA questions ("Do I have any thermometers?", "What is the state of my thermostat?") that do not map cleanly to `list_*` or `call_service`. The agent runs a short LLM tool-call loop (up to 3 rounds) using `get_simplified_ha_data` to answer the question without over-classifying inventory requests or listing every entity. A `ha_context_terms` heuristic ensures common HA-related questions are routed here instead of falling through to `unknown`.
-- **`HomeAssistantAgent` -- `get_entities_state` action** -- Accepts one or more explicit entity IDs, fetches their current states from HA, and re-publishes each state to `homeassistant/state_changes/{entity_id}` over MQTT. This lets callers query live state and simultaneously bootstrap any MQTT subscriber that is waiting for a change event.
-- **`ha_helper.get_full_ha_data()`** -- New async helper that returns raw registry dumps for floors, areas, devices, entities, and states in a single WebSocket session, without transforming or filtering any field.
-- **`ha_helper.get_simplified_ha_data()`** -- New async helper that returns a compact, null-stripped snapshot suitable for LLM prompts. Resolves entity display names from live states, excludes `hassio` platform entities, and drops icon/picture fields. Used by `HomeAssistantAgent` to replace the older `fetch_devices_entities_with_location` call, significantly reducing token usage in device-discovery prompts.
-- **`PlannerAgent` -- HA entity state bootstrap** -- After spawning a pipeline, the planner now calls `_bootstrap_ha_entity_states()` as a background task. It extracts entity IDs from the plan's generated code, `ha_actuator` actions, MQTT topics, and the enriched task string, then sends a `get_entities_state` request to `home-assistant-agent`. This re-publishes current HA state to `homeassistant/state_changes/{entity_id}` so freshly-spawned agents that subscribe to that topic fire immediately, instead of waiting for the next real HA state change to arrive.
-- **Remote runner self-bootstrap** -- `RemoteRunnerAgent` nodes now self-install `aiomqtt` / `paho-mqtt` on first start without requiring pre-installed dependencies. Heartbeat begins immediately; dependency installation runs in the background so the node appears on the overview before pip finishes.
-- **Live remote node tracking** -- the overview panel tracks remote runner nodes in real time; deleted-agent ghost entries no longer re-appear after removal.
-- **OpenTelemetry Collector** -- `otelcol` service added to Docker Compose with a Prometheus remote-write scrape target; healthcheck included and a commented debug exporter option for local tracing.
+## [0.4.3] - 2026-06-01
 
 ### Changed
 
-- **`HomeAssistantAgent` -- device-discovery schema** -- The prompt schema for hardware-recommendation requests now uses the flattened `get_simplified_ha_data` structure (separate `floors`, `areas`, `devices`, `entities` lists) instead of the deeply nested `fetch_devices_entities_with_location` format. This cuts the context size and matches the real HA registry field names (`id`, `area_id`, `domain`, etc.).
-- **`HomeAssistantAgent` -- `list_*` classification tightened** -- The `list_automations`, `list_areas`, `list_devices`, and `list_entities` actions now only fire on explicit inventory requests ("list all automations"). Existence, count, lookup, and state questions ("do I have a thermostat?", "what is the state of X?") are correctly routed to the new `other` action.
-- **`HomeAssistantAgent` -- MQTT state-change payload** -- `get_entities_state` now publishes the canonical state-change payload (`event_type`, `entity_id`, `new_state`, `old_state`) to `homeassistant/state_changes/{entity_id}`, matching the format emitted by `HomeAssistantStateBridgeAgent` on real HA state changes.
+- **HomeAssistantAgent** — `create_automation` intent is temporarily disabled; requests are routed to `_recommend_hardware` instead.
+- **HomeAssistantAgent** — Edit automation flow refactored into three focused helpers (`_identify_automation`, `_get_automation_config`, `_generate_modified_automation_config`) with `AutomationEditError` for internal error propagation.
+- **HomeAssistantAgent** — All LLM system prompts extracted to `wactorz/agents/prompts/home_assistant_prompts.py`.
+- **ha_helper** — Type hints modernised (`Optional[str]` → `str | None`, `List[Dict]` → `list[dict]`); URL helpers reorganised; `get_automations` rewritten.
 
 ### Fixed
 
-- **LLM cost persistence** -- Five places where token usage was accumulated in memory but never written to SQLite, causing cost data to be lost on restart or crash: `LLMAgent._handle_task` silently discarded all usage from TASK-type messages; `LLMAgent._maybe_summarize` did not persist summarization tokens; `HomeAssistantAgent` never persisted lifetime spend (entirely lost on restart); `MainActor._classify_intent` dropped tokens for PIPELINE/ACTUATE/HA routes where no `chat()` follows; `MainActor._extract_durable_facts` left facts-extraction tokens unpersisted until the next turn.
-- **Gemini API key mapping** -- `LLM_API_KEY` now correctly mapped to `GEMINI_API_KEY` in the HA addon `run.sh`.
-- **NIM documentation** -- `LLM_API_KEY` is always required for NVIDIA NIM calls; docs corrected.
-- **HA addon optional fields** -- `discord_bot_token`, `telegram_bot_token`, `ha_token`, and `api_key` declared as `str?` in `config.yaml` schema so the addon validates when these fields are left blank.
-- **Agent delete blink** -- deleted agents are marked immediately on delete command, preventing ghost re-appearance in the UI.
-- **NIM fallback pricing** -- deprecated NVIDIA NIM model entries removed from the hardcoded fallback price table.
+- **HomeAssistantAgent** — Non-dict LLM response no longer crashes the delete/edit path (guard ordering corrected).
+- **HomeAssistantAgent** — Stale `devices["devices"]` key corrected to `devices["data"]` throughout hardware recommendation and entity extraction helpers.
 
 ### Tests
 
-- Added `tests/test_home_assistant_agent.py` -- covers `other` tool-call loop, `get_entities_state` action, MQTT publish payloads, and bootstrap entity ID extraction.
-- Added `tests/test_llm_provider_tools.py` -- covers `complete_with_tools` for all LLM providers.
+- Comprehensive test suite added for `ha_helper` (`tests/test_ha_helper.py`) and `HomeAssistantAgent` (`tests/test_home_assistant_agent.py`).
+
+## [0.4.2] - 2026-05-21
+
+# Remote-Agent Consistency Fixes
+
+This changelog documents a series of fixes that close the gap between local and
+remote agent behaviour. Before these changes the framework worked well for local
+agents but broke in many ways for remote ones, with inconsistencies clustering
+around topic registration, agent API parity, migration, and LLM agent support.
+
+Each fix below is described with its symptom, root cause, and resolution.
+
+## Files touched
+
+- `main_actor.py`
+- `remote_runner.py`
+- `dynamic_agent.py`
+- `actor.py` (read-only in this pass; no edits)
+
+---
+
+## Fix 1 — Manifest listener is the source of truth for remote contracts
+
+**Symptom.** The planner knew remote agents existed (they appeared in
+`list_capabilities`) but auto-wiring routed traffic to the wrong topics. Local
+agents wired correctly; remote ones did not.
+
+**Root cause.** Local agents register their `TopicContract` directly with the
+`TopicBus` whenever they `publish()`, `subscribe()`, or call
+`declare_contract()`. Remote agents have no local `TopicBus` — they advertise
+themselves via a retained MQTT manifest. Main's `_manifest_listener` was
+storing those manifests in `_agent_manifests` and `_topic_registry` but was
+**not** translating them into `TopicContract`s on the central bus. The planner
+read from the bus, so remote agents were invisible to wiring.
+
+**Fix.** `_manifest_listener` now builds a `TopicContract` from every incoming
+manifest and calls `bus.register_contract(...)`. `observed_samples` is folded
+into `produces_schema` so the real wire format wins over LLM-declared guesses.
+Tombstone payloads (empty retained messages) call `bus.unregister(name)` so
+deleted agents stop appearing as wiring candidates.
+
+---
+
+## Fix 2 — Remote runner ships full contract data in its manifest
+
+**Symptom.** Even after Fix 1, remote contracts were missing `subscribes`,
+`triggers_when`, and accurate schemas.
+
+**Root cause.** `_RemoteAgentAPI._publish_manifest()` only shipped `publishes`.
+The local `_AgentAPI._publish_manifest()` ships the full TopicContract surface.
+
+**Fix.** `_RemoteAgentAPI._publish_manifest()` now ships `subscribes`,
+`triggers_when`, `produces_schema`, `consumes_schema`, and `observed_samples`,
+matching the local shape exactly. Pre-declared spawn-config topics are unioned
+into `publishes` so the planner sees them even before the first `publish()`
+call. Schemas are also auto-captured per publish — every `publish()` call
+records field names and types into `observed_samples`, and the manifest
+re-publishes on schema change.
+
+---
+
+## Fix 3 — Heartbeat-driven contract refresh is strictly non-overwriting
+
+**Symptom.** Sometimes a freshly-arrived correct manifest would be replaced
+seconds later by a stale spawn-config-derived one.
+
+**Root cause.** A heartbeat handler in `main_actor.py` was rebuilding remote
+contracts from `from_spawn_config(...)` on every heartbeat, clobbering the
+manifest-derived contract.
+
+**Fix.** The heartbeat refresh now skips any agent that already has a contract
+on the bus or a manifest in main's cache, and only bootstraps from spawn config
+when the config declared real topics. The manifest path is the single source of
+truth.
+
+---
+
+## Fix 4 — Full API parity between local and remote agents
+
+**Symptom.** Remote agents crashed in `setup()` with
+`'_RemoteAgentAPI' object has no attribute 'declare_contract'`. Migrating an
+agent that called `agent.subscribe(...)` made it stop listening. Code that used
+`agent.window(...)` or `agent.mqtt_get(...)` worked locally and silently broke
+remotely.
+
+**Root cause.** `_RemoteAgentAPI` was missing methods that `DynamicAgent._AgentAPI`
+exposes. Agent code written for the local API would crash on the remote.
+
+**Fix.** Added to `_RemoteAgentAPI`:
+
+- `subscribe(topic, callback)` — background MQTT listener with dedup, callback
+  validation, `await None` tolerance, auto-records the topic into the contract
+  and republishes the manifest.
+- `mqtt_get(topic, timeout)` — one-shot retained-state read.
+- `window(topic, seconds, max_size)` — sliding stream window with
+  `mean/min/max/rising/falling/stable/absent_for/event_count/latest/count/values`.
+  Idempotent per topic.
+- `declare_contract(...)` — full signature with all LLM kwarg aliases
+  (`schema`, `output_schema`, `topics`, `subscribe`, etc.), string-to-list
+  coercion, awaitable sentinel return.
+- `publish_world_state(key, data)` / `read_world_state(topic)`.
+- `wiring_opportunities()` — returns `[]` on remote (cluster-wide view lives on
+  main).
+- `nodes()` / `topics()` / `capabilities()` — local-scope introspection.
+- `logger` property exposing `info/warning/error/debug`.
+
+Added at module level:
+
+- `_AwaitableNone` / `_AWAITABLE_NONE` — sentinel mirroring `dynamic_agent`.
+- `_RemoteStreamWindow` — self-contained port of `core.topic_bus.StreamWindow`
+  so the remote runner stays single-file.
+
+Tightened existing methods:
+
+- `log()` now accepts `level="info"` to match the local signature.
+- `_RemoteAgent.stop()` now also cancels stream windows so background MQTT
+  listeners don't leak.
+
+---
+
+## Fix 5 — Local→Remote migration captures the live contract
+
+**Symptom.** After a local→remote migration the agent's topic wiring was
+incomplete on the remote side.
+
+**Root cause.** The migration path was reading topics from the spawn registry,
+which is what was *requested* at spawn time — not what the local agent had
+wired up at runtime via `publish()`/`subscribe()`/`declare_contract()`.
+
+**Fix.** Just before stopping the local agent, migration now snapshots the live
+`TopicContract` from the `TopicBus` (`publishes`, `subscribes`, `triggers_when`,
+`produces_schema`, `consumes_schema`, `observed_samples`) and folds non-empty
+values into the spawn config that gets shipped to the remote node. The remote
+`_publish_manifest()` then advertises the right surface immediately.
+
+Also removed a stale double-save at the end of the local→remote branch —
+`_spawn_remote(save=True)` already saves the complete `new_config` (with
+initial state and live contract), but the post-branch code was overwriting that
+with the stale `config` dict.
+
+---
+
+## Fix 6 — `migrate_agent` is resilient to missing registry entries
+
+**Symptom.** `[FAIL] Agent 'X' not in spawn registry` even when the agent was
+running and visible on the dashboard.
+
+**Root cause.** `migrate_agent` hard-failed if the spawn registry lookup
+missed. Several legitimate paths produce running agents that aren't in the
+registry — ad-hoc spawns, partial migrations, registry overwrites from earlier
+bugs.
+
+**Fix.** `migrate_agent` now consults sources in priority order:
+
+1. Spawn registry (has full config including code).
+2. Manifest cache (has node, schemas; no code).
+3. Live heartbeats (last resort — confirms which node hosts the agent).
+4. Local registry (confirms the agent is running on this node).
+
+Migration proceeds if any source finds the agent. The only "not found" case is
+when no source knows about the agent at all.
+
+---
+
+## Fix 7 — Remote→Local migration without code on main
+
+**Symptom.** Remote→local migration failed when main had no spawn-registry
+entry for the agent.
+
+**Root cause.** The remote runner had a `@main` sentinel path that shipped the
+agent's state back over MQTT, but main had no listener for it — the feature was
+half-implemented.
+
+**Fix.** Added `_state_return_listener` on main. Migration flow:
+
+1. Main sends `nodes/{node}/migrate` with `target_node: "@main"` and a
+   one-time return token.
+2. Remote runner stops the agent, captures its full live config (the in-memory
+   `_config`, which includes everything the manifest exposed) plus its
+   persistent state, and publishes both to `nodes/{node}/state_return`.
+3. Main's `_state_return_listener` matches the token, builds a local spawn
+   config from the returned data, attaches the state as `_initial_state`, and
+   calls `_spawn_from_config(replace=True)`.
+
+Tokens are one-time, expire after 5 minutes, scoped to the agent/node
+combination so concurrent migrations can't collide.
+
+---
+
+## Fix 8 — `_handle_spawn` phantom method
+
+**Symptom.** `[FAIL] Stopped on remote but failed to spawn locally: 'MainActor'
+object has no attribute '_handle_spawn'`.
+
+**Root cause.** `_handle_spawn` was referenced in three places in `main_actor.py`
+but never defined. The real method is `_spawn_from_config(config, save=True)`,
+which routes remote vs local, handles the `replace=True` flow, picks the right
+agent type, and saves to the spawn registry.
+
+**Fix.** Replaced all three call sites with `_spawn_from_config(...)`:
+
+1. Remote→local migration (the path users hit).
+2. State-return listener.
+3. `/nodes remove → re-spawn locally` (pre-existing latent bug at line 2312;
+   would have failed any time someone removed a node and had main re-spawn its
+   agents locally).
+
+Also updated stale comment references. Zero references to `_handle_spawn`
+remain in the codebase.
+
+---
+
+## Fix 9 — Remote task dispatch matches local semantics
+
+**Symptom.** Migrated LLM agent crashed on @mention with
+`'str' object has no attribute 'get'` in `handle_task`.
+
+**Root cause.** Main's @mention forwarder sends
+`{"text": message, "payload": message, "_reply_topic": ...}`. The remote
+runner was extracting just `data["payload"]` (a bare string) and passing it to
+`handle_task`. Local actors pass the full envelope dict to `handle_task`, so
+`payload.get("text")` worked locally and crashed remotely.
+
+**Fix.** Remote runner now passes the full envelope to `handle_task`, stripped
+of transport-level keys (`_reply_topic`, `_remote_task`). Matches local
+semantics exactly.
+
+Compat note: if a caller sends `{"payload": 42}` (scalar wrapped in a `payload`
+field, nothing else), the runner unwraps the scalar — preserves the older
+convention for callers that send `{"payload": 42}` and expect `42`.
+
+---
+
+## Fix 10 — `recall(key, default=None)` everywhere
+
+**Symptom.** Migrating an agent back to local crashed with
+`_AgentAPI.recall() takes 2 positional arguments but 3 were given`.
+
+**Root cause.** Local `recall(key)` was strict; remote `recall(key, default=None)`
+was permissive. Agents that learned to call `agent.recall("k", default)` on the
+remote side crashed when they came back local.
+
+**Fix.** Local now matches remote: `recall(key, default=None)`. The default is
+returned when the key is missing or the stored value is `None`, matching
+dict-`.get()` semantics.
+
+---
+
+## Fix 11 — `send_to` and `delegate` timeouts align at 60s
+
+**Root cause.** Remote default 30s, local default 60s. Friendlier for LLM
+agents, which routinely take 10–40s per turn.
+
+**Fix.** Remote bumped to 60s. All shared method signatures between
+`_AgentAPI` and `_RemoteAgentAPI` now match.
+
+---
+
+## Fix 12 — `agent.llm` namespace on the remote side
+
+**Symptom.** LLM agents crashed remotely with
+`'_RemoteAgentAPI' object has no attribute 'llm'`.
+
+**Root cause.** Local agents use `agent.llm.chat(prompt, system)` /
+`agent.llm.complete(messages, system)` / `agent.llm.converse(user_message, system)`.
+Remote agents had a flat `agent.ask_llm(prompt, system)` / `agent.chat(messages, system)`
+— different shape, different names. Worse, `chat` meant different things on the
+two sides (single-turn locally, multi-turn remotely).
+
+**Fix.** Added `_RemoteLLMInterface` exposed as `agent.llm` on the remote side
+with the same three methods the local side has, with the same call shapes:
+
+- `agent.llm.chat(prompt, system)` — single-turn.
+- `agent.llm.complete(messages, system)` — multi-turn.
+- `agent.llm.converse(user_message, system)` — stateful, maintains history in
+  `agent.state['_chat_history']`.
+
+The pre-existing flat `agent.ask_llm(...)` and `agent.chat(...)` stay as
+legacy aliases.
+
+**Known follow-up.** Local `agent.llm` increments the agent's token / cost
+counters from the provider's usage response. The remote LLM bridge currently
+returns only `{"text": ...}` — usage isn't propagated back, so remote LLM cost
+is attributed to main rather than to the agent that spent it. Small follow-up
+to ship `usage` in the reply.
+
+---
+
+## Fix 13 — LLM bridge attribute/method/return-shape
+
+**Symptom.** LLM bridge error for remote agent:
+`'MainActor' object has no attribute '_llm'`.
+
+**Root cause.** Three bugs in two lines:
+
+1. `self._llm` doesn't exist; the correct attribute is `self.llm` (every other
+   site in `main_actor.py` uses that name).
+2. Wrong method — `self.llm.chat(...)` doesn't exist on `LLMProvider`; the
+   correct method is `complete(messages=, system=)`.
+3. Wrong return shape — `LLMProvider.complete()` returns `(text, usage)`, not
+   a string.
+
+**Fix.** Bridge now calls `self.llm.complete(messages=..., system=...)`, unpacks
+`(response, usage)`, guards against `self.llm is None` with a clear error
+string, and rolls bridge usage into main's token/cost counters (same pattern as
+other `complete()` call sites in `main_actor.py`).
+
+---
+
+## Fix 14 — Head-of-line blocking deadlock in the remote subscriber
+
+**Symptom.** Remote agent timed out 60s after calling `agent.llm.chat()`, yet
+main logged a `200 OK` from Anthropic within 4s. Diagnostic warning showed
+`Reply arrived on nodes/rpi-n/reply/<uuid> but no agent had a matching pending
+future. Waiting keys: []`, firing 4ms after the timeout.
+
+**Root cause.** The runner's MQTT subscriber loop is structured as
+`async for msg in client.messages` — a strictly sequential consumer. The
+previous code did `await agent.handle_task(payload)` *inside* that loop. While
+`handle_task` ran (waiting on `agent.llm.chat`'s reply future), the subscriber
+could not dispatch any other message. The LLM reply sat queued behind the same
+consumer. 60s later, `ask_llm` timed out, popped the future in `finally`,
+returned `""`. The subscriber loop iterated, picked up the long-queued reply —
+no waiting future.
+
+**Fix.** Subscriber loop now wraps each `handle_task` invocation in
+`asyncio.create_task(...)`. The subscriber returns to its iterator immediately
+and remains free to dispatch incoming replies. Specifics:
+
+- Task tracked on `agent._tasks` so a clean shutdown cancels it.
+- `done_callback` removes it from the list when finished.
+- Reply publish moved inside the background task.
+- Exceptions caught, logged, and a `{"error": ..., "agent": ...}` dict goes
+  back to the reply topic.
+
+Same fix protects concurrent agents on the same node — two agents calling
+`agent.llm.chat()` concurrently no longer block each other.
+
+The diagnostic warning ("Reply arrived but no agent had a matching pending
+future") stays as a permanent canary for similar deadlocks or topic mismatches
+in the future.
+
+---
+
+## Fix 15 — LLM agents are runnable on remote nodes
+
+**Symptom.** Migrated LLM agents forgot their conversation history. @mentions
+returned nothing useful.
+
+**Root cause.** A `type: "llm"` agent has no `code` — its behaviour lives
+inside the `LLMAgent` class, which exists only on main. The remote runner is
+DynamicAgent-shaped only; it has no `LLMAgent` equivalent. Spawn config with
+`system_prompt` but no `code` → remote compiles empty code → no `handle_task` →
+@mentions silently fail.
+
+**Fix.** Added a code synthesiser on `MainActor`. When `_spawn_remote` sees a
+`type: "llm"` config (or any spawn that has `system_prompt` but no `code`), it
+injects an auto-generated `code` field with a `setup` + `handle_task` that:
+
+- Restores `conversation_history` and `history_summary` via `agent.recall(...)`
+  on setup.
+- Maintains the rolling history in `agent.state['history']`.
+- Calls `agent.llm.complete(messages=history, system=system_prompt)` — routes
+  through the LLM bridge.
+- Persists after every exchange so a runner crash mid-conversation costs at
+  most one turn.
+- Returns `{"text": reply}` so the @mention reply path works.
+
+The synth tags the upgraded config with `_origin_type: "llm"`. When the agent
+migrates back to local, the state-return listener sees that tag, strips the
+synthesised `code`, restores `type: "llm"`, and the proper `LLMAgent` class
+takes over.
+
+---
+
+## Fix 16 — `_initial_state` applied locally
+
+**Symptom.** Even non-LLM agents lost persisted state on remote→local
+migration.
+
+**Root cause.** `_initial_state` was consumed only by the remote runner — the
+local spawn path silently discarded it. Every remote→local migration started
+with a blank slate.
+
+**Fix.** Added `_apply_initial_state_locally`. After a local spawn following a
+migration, it writes the migrated state dict through the actor's
+`PersistenceAPI`, mirrors it into `_persistent_state`, and refreshes
+LLMAgent-specific in-memory caches (`_conversation_history`, `_history_summary`,
+token totals). The next `agent.recall(...)` returns the migrated value.
+
+Not LLM-specific — every agent benefits. A sensor agent that persisted
+thresholds and calibration counters now actually gets them back when migrated
+to local.
+
+---
+
+## Fix 17 — Remote→Local always uses the `@main` sentinel
+
+**Symptom.** Remote→local migration silently lost state accumulated since the
+agent's original spawn (new conversation turns, observed schemas, calibration
+counters).
+
+**Root cause.** The `have_code` fast path used the spawn-registry config, which
+is the config sent at spawn time — not what the agent had learned since.
+
+**Fix.** Removed the `have_code` branch. Every remote→local migration now
+follows the same path:
+
+1. Main → `nodes/<node>/migrate {target_node: "@main"}`.
+2. Remote stops agent, snapshots LIVE config + state.
+3. Remote → `nodes/<node>/state_return`.
+4. Main applies `_origin_type` restoration, spawns locally, applies state.
+
+One round-trip instead of zero, live state every time.
+
+---
+
+## Test plan
+
+- Spawn a `type: "llm"` agent locally, chat with it a few turns.
+- Migrate to remote: `/migrate <agent> <node>`. @mention it — should remember
+  earlier turns.
+- Chat a few more turns on remote.
+- Migrate back to local: `/migrate <agent> local`. @mention it — should
+  remember all turns, both the local-original ones and the remote-added ones.
+- Restart the remote runner (or reboot the Pi) while the agent is there. After
+  the runner comes back, the agent should still remember.
+- Spawn a DynamicAgent with `agent.subscribe(...)`, `agent.window(...)`, and
+  `agent.declare_contract(...)`. Migrate in both directions — wiring should be
+  preserved and the agent should keep functioning.
+- Verify `/agents` and the planner's auto-wiring see the same topics for
+  remote agents as for local ones.
+
+### Added
+
+- **LLM spend limit enforcement** - hard cap on LLM API spend per period (daily, weekly, or monthly). Set via `LLM_COST_LIMIT_USD` / `LLM_COST_LIMIT_PERIOD` env vars or at runtime from the dashboard Settings tab without restart. When the limit is reached, further LLM calls are blocked and a "limit reached" message is delivered as a chat reply. Spend accumulates into all three period keys simultaneously so switching periods always shows real data. New REST endpoints: `GET /api/cost`, `POST /api/cost/limit`, `POST /api/cost/reset`. Env-var values are the startup default; GUI override persists in SQLite and takes priority.
+
+### Fixed
+
+- **`monitor_server` stdio wrapping under pytest** - `monitor_server` no longer re-wraps `sys.stdout` / `sys.stderr` at import time when they have already been replaced by a test capture harness. Prevents `ValueError: I/O operation on closed file` during pytest teardown on Python 3.13 + Windows.
+
+---
+
+## [0.4.2] - 2026-05-14
+
+### Added
+
+- **Dynamic LLM pricing** - `LLMAgent` now fetches live model prices from the [LiteLLM model catalogue](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) on startup and caches them for 24 hours. Falls back to a hardcoded table if the fetch fails or the model is not found. `pricing_info(model)` helper added for debugging (reports source, rates, and cache age).
+- **`HomeAssistantAgent` tool call loop** - Agent now runs a structured LLM tool-call loop for actions that require live HA data, replacing single-shot prompts and improving reliability for multi-step queries.
+- **`HomeAssistantAgent` `other` action** - A new `other` action handles open-ended HA questions ("Do I have any thermometers?", "What is the state of my thermostat?") that do not map cleanly to `list_*` or `call_service`. The agent runs a short LLM tool-call loop (up to 3 rounds) using `get_simplified_ha_data` to answer the question without over-classifying inventory requests or listing every entity. A `ha_context_terms` heuristic ensures common HA-related questions are routed here instead of falling through to `unknown`.
+- **`HomeAssistantAgent` `get_entities_state` action** - Accepts one or more explicit entity IDs, fetches their current states from HA, and re-publishes each state to `homeassistant/state_changes/{entity_id}` over MQTT. This lets callers query live state and simultaneously bootstrap any MQTT subscriber that is waiting for a change event.
+- **`ha_helper.get_full_ha_data()`** - New async helper that returns raw registry dumps for floors, areas, devices, entities, and states in a single WebSocket session, without transforming or filtering any field.
+- **`ha_helper.get_simplified_ha_data()`** - New async helper that returns a compact, null-stripped snapshot suitable for LLM prompts. Resolves entity display names from live states, excludes `hassio` platform entities, and drops icon/picture fields. Used by `HomeAssistantAgent` to replace the older `fetch_devices_entities_with_location` call, significantly reducing token usage in device-discovery prompts.
+- **`PlannerAgent` HA entity state bootstrap** - After spawning a pipeline, the planner now calls `_bootstrap_ha_entity_states()` as a background task. It extracts entity IDs from the plan's generated code, `ha_actuator` actions, MQTT topics, and the enriched task string, then sends a `get_entities_state` request to `home-assistant-agent`. This re-publishes current HA state to `homeassistant/state_changes/{entity_id}` so freshly-spawned agents that subscribe to that topic fire immediately, instead of waiting for the next real HA state change to arrive.
+- **Remote runner self-bootstrap** - `RemoteRunnerAgent` nodes now self-install `aiomqtt` / `paho-mqtt` on first start without requiring pre-installed dependencies. Heartbeat begins immediately; dependency installation runs in the background so the node appears on the overview before pip finishes.
+- **Live remote node tracking** - the overview panel tracks remote runner nodes in real time; deleted-agent ghost entries no longer re-appear after removal.
+- **OpenTelemetry Collector** - `otelcol` service added to Docker Compose with a Prometheus remote-write scrape target; healthcheck included and a commented debug exporter option for local tracing.
+- **`watch-costs.ps1`** - PowerShell script for live LLM cost monitoring from the terminal.
+
+### Changed
+
+- **`HomeAssistantAgent` device-discovery token reduction** - Prompt schema for hardware-recommendation requests now uses the flattened `get_simplified_ha_data` structure (separate `floors`, `areas`, `devices`, `entities` lists) instead of the deeply nested `fetch_devices_entities_with_location` format. This cuts the context size and matches the real HA registry field names (`id`, `area_id`, `domain`, etc.).
+- **`HomeAssistantAgent` `list_*` classification tightened** - The `list_automations`, `list_areas`, `list_devices`, and `list_entities` actions now only fire on explicit inventory requests ("list all automations"). Existence, count, lookup, and state questions ("do I have a thermostat?", "what is the state of X?") are correctly routed to the new `other` action.
+- **`HomeAssistantAgent` MQTT state-change payload** - `get_entities_state` now publishes the canonical state-change payload (`event_type`, `entity_id`, `new_state`, `old_state`) to `homeassistant/state_changes/{entity_id}`, matching the format emitted by `HomeAssistantStateBridgeAgent` on real HA state changes.
+- **Slash commands** - all slash commands now route through a single source of truth in `MainActor`, eliminating inconsistencies across entry points.
+
+### Fixed
+
+- **LLM cost persistence** - Five places where token usage was accumulated in memory but never written to SQLite, causing cost data to be lost on restart or crash: `LLMAgent._handle_task` silently discarded all usage from TASK-type messages; `LLMAgent._maybe_summarize` did not persist summarization tokens; `HomeAssistantAgent` never persisted lifetime spend (entirely lost on restart); `MainActor._classify_intent` dropped tokens for PIPELINE/ACTUATE/HA routes where no `chat()` follows; `MainActor._extract_durable_facts` left facts-extraction tokens unpersisted until the next turn.
+- **Cost tracking in `PlannerAgent` and `MainActor`** - planner and main actor now persist spend after every LLM call.
+- **Gemini API key mapping** - `LLM_API_KEY` now correctly mapped to `GEMINI_API_KEY` in the HA addon `run.sh`.
+- **NIM documentation** - `LLM_API_KEY` is always required for NVIDIA NIM calls; docs corrected.
+- **HA addon optional fields** - `discord_bot_token`, `telegram_bot_token`, `ha_token`, and `api_key` declared as `str?` in `config.yaml` schema so the addon validates when these fields are left blank.
+- **Agent delete blink** - deleted agents are marked immediately on delete command, preventing ghost re-appearance in the UI.
+- **NIM fallback pricing** - deprecated NVIDIA NIM model entries removed from the hardcoded fallback price table.
+- **OTel Collector healthcheck** - `otelcol` healthcheck corrected; debug exporter added as commented option.
+- **Remote runner async bootstrap** - heartbeat now starts before pip completes so the node appears in the overview immediately.
+- **UI non-streaming agent communication** - messages from non-streaming agents now display correctly in the chat interface.
+- **Catalog agent spawning** - timeout issue resolved; agents spawn reliably under load.
+- **Fuseki Python 3.10 compatibility** - `fuseki.py` now runs on Python 3.10.
+
+### Tests
+
+- Added `tests/test_home_assistant_agent.py` - covers `other` tool-call loop, `get_entities_state` action, MQTT publish payloads, and bootstrap entity ID extraction.
+- Added `tests/test_llm_provider_tools.py` - covers `complete_with_tools` for all LLM providers.
 
 ---
 
@@ -159,7 +630,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Version
 - **MQTT TCP bridge** in `monitor_server.py` -- `/mqtt` WebSocket endpoint now falls back to raw TCP (port 1883) when Mosquitto's WS listener (port 9001) is unavailable
 - **Web UI auto-start** -- `wactorz` CLI spawns the monitor server as a quiet background asyncio task (`--no-monitor` to opt out, `--monitor-port` to override port 8888)
 - **`/api/actors` REST endpoint** on Python monitor server -- returns live agent state from MQTT-derived in-memory store
-- **`wactorz[all]` wheel** now bundles `static/app/` and `monitor.html` via hatchling `force-include`; custom build hook rebuilds frontend when stale
+- **`wactorz[all]` wheel** now bundles `static/app/` via hatchling `force-include`; custom build hook rebuilds frontend when stale
 - **`wactorz/_version.py`** -- single source of version truth, imported by `__init__.py` and `pyproject.toml`
 - **Rust WS bridge** -- `/mqtt` proxy route added alongside `/ws`; `WsBridge` now tracks MonitorState and broadcasts `full_snapshot`/`patch`/`delete_agent` to `/ws` clients
 - **`scripts/build.py`** -- clean build script (hatchling + twine) with `--upload` flag for PyPI

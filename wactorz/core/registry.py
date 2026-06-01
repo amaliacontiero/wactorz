@@ -752,6 +752,7 @@ class _MQTTPublisher:
         """
         import aiomqtt
         backoff = 1.0
+        _last_exc_str: str | None = None
 
         while True:
             try:
@@ -762,7 +763,6 @@ class _MQTTPublisher:
                     keepalive    = 30,
                 ) as client:
                     self._connected = True
-                    backoff = 1.0  # reset backoff on successful connect
                     logger.info(f"[MQTT] Publisher connected | client_id={self._client_id}")
 
                     while True:
@@ -779,6 +779,9 @@ class _MQTTPublisher:
                             # Remove from SQLite outbox if it was persisted
                             if row_id >= 0:
                                 self._delete_from_db(row_id)
+                            # Reset backoff and error dedup only after a successful publish
+                            backoff = 1.0
+                            _last_exc_str = None
                         except Exception as pub_err:
                             # Put back at front of queue and reconnect
                             logger.warning(f"[MQTT] Publish failed: {pub_err} — requeueing")
@@ -791,11 +794,16 @@ class _MQTTPublisher:
                 break
             except Exception as e:
                 self._connected = False
-                logger.warning(
-                    f"[MQTT] Publisher disconnected: {e}. "
-                    f"Reconnecting in {backoff:.1f}s... "
-                    f"(queue depth: {self._queue.qsize()})"
-                )
+                exc_str = str(e)
+                if exc_str != _last_exc_str:
+                    logger.warning(
+                        f"[MQTT] Publisher disconnected: {e}. "
+                        f"Reconnecting in {backoff:.1f}s... "
+                        f"(queue depth: {self._queue.qsize()})"
+                    )
+                    _last_exc_str = exc_str
+                else:
+                    logger.debug(f"[MQTT] Still disconnected — retrying in {backoff:.1f}s")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30.0)  # exponential backoff, cap at 30s
 

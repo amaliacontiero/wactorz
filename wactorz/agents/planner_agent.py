@@ -271,11 +271,21 @@ class PlannerAgent(Actor):
         # ── Prune stale TopicBus contracts ────────────────────────────────
         # Remove contracts for agents that are no longer running so the
         # planner doesn't wire against dead topics.
+        # IMPORTANT: include remote agents from live node heartbeats — they
+        # are not in the local registry but their contracts are valid and
+        # must NOT be pruned.
         try:
             from ..core.topic_bus import get_topic_bus
             bus = get_topic_bus()
             if bus and self._registry:
                 live = {a.name for a in self._registry.all_actors()}
+                # Add remotely-running agents from main's known_nodes
+                main = self._registry.find_by_name("main")
+                if main and hasattr(main, "_known_nodes"):
+                    import time as _pt
+                    for nd in main._known_nodes.values():
+                        if _pt.time() - nd.get("last_seen", 0) < 30:
+                            live.update(nd.get("agents", []))
                 pruned = bus.registry.prune_stale(live)
                 if pruned:
                     await self._log(f"Pruned {len(pruned)} stale TopicBus contract(s): {pruned}")
@@ -1621,36 +1631,58 @@ class PlannerAgent(Actor):
                 manifest_map[cap["name"]] = cap
 
         workers = []
+        seen    = set()
+
+        # ── Local actors ──────────────────────────────────────────────────────
         for actor in self._registry.all_actors():
-            # Skip housekeeping agents, the running planner itself, AND any
-            # OTHER planner instances. Pipeline-mode planners stay alive as
-            # supervisors of their spawned children (see line 356, where
-            # _auto_terminate is set False for pipelines), so they accumulate
-            # in the registry across user requests. Without this filter, a
-            # new planner would see the old ones as candidate "workers" —
-            # noise that bloats the worker list passed to the LLM and risks
-            # the LLM trying to delegate to a sibling planner.
             if actor.name in _SKIP_AGENTS or actor.name == self.name:
                 continue
             if actor.name.startswith("planner-"):
                 continue
-            # Prefer manifest data (richer), fall back to live actor attrs
+            seen.add(actor.name)
             manifest = manifest_map.get(actor.name, {})
             workers.append({
-                "name":          actor.name,
-                "type":          type(actor).__name__,
-                "description":   (
+                "name":             actor.name,
+                "type":             type(actor).__name__,
+                "node":             None,
+                "remote":           False,
+                "description":      (
                     manifest.get("description")
                     or getattr(actor, "description", "")
                     or getattr(actor, "system_prompt", "")[:100]
                     or type(actor).__name__
                 ),
-                "capabilities":  manifest.get("capabilities", []),
-                "input_schema":  manifest.get("input_schema",  {}),
-                "output_schema": manifest.get("output_schema", {}),
-                "publishes":     manifest.get("publishes", []),
+                "capabilities":     manifest.get("capabilities", []),
+                "input_schema":     manifest.get("input_schema",  {}),
+                "output_schema":    manifest.get("output_schema", {}),
+                "publishes":        manifest.get("publishes", []),
                 "observed_samples": manifest.get("observed_samples", {}),
             })
+
+        # ── Remote agents from live node heartbeats ───────────────────────────
+        if main and hasattr(main, "_known_nodes"):
+            import time as _dt
+            for node_name, nd in main._known_nodes.items():
+                if _dt.time() - nd.get("last_seen", 0) > 30:
+                    continue   # node offline — skip
+                for aname in nd.get("agents", []):
+                    if aname in seen or aname in _SKIP_AGENTS:
+                        continue
+                    seen.add(aname)
+                    manifest = manifest_map.get(aname, {})
+                    workers.append({
+                        "name":             aname,
+                        "type":             "RemoteAgent",
+                        "node":             node_name,
+                        "remote":           True,
+                        "description":      manifest.get("description", f"Remote agent on {node_name}"),
+                        "capabilities":     manifest.get("capabilities", []),
+                        "input_schema":     manifest.get("input_schema",  {}),
+                        "output_schema":    manifest.get("output_schema", {}),
+                        "publishes":        manifest.get("publishes", []),
+                        "observed_samples": manifest.get("observed_samples", {}),
+                    })
+
         return workers
 
     # ── Decomposition ──────────────────────────────────────────────────────
@@ -1661,7 +1693,8 @@ class PlannerAgent(Actor):
             return []
 
         def _fmt_worker(w: dict) -> str:
-            lines = [f"  - {w['name']} ({w['type']}): {w['description']}"]
+            location = f" on {w['node']}" if w.get("remote") and w.get("node") else ""
+            lines = [f"  - {w['name']} ({w['type']}{location}): {w['description']}"]
             if w.get("capabilities"):
                 lines.append(f"    capabilities: {', '.join(w['capabilities'])}")
             if w.get("input_schema"):
