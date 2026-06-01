@@ -1,11 +1,10 @@
 import 'package:flutter/material.dart';
 import '../theme.dart';
-import '../models.dart';
 
 class StatusDot extends StatefulWidget {
-  final Agent agent;
+  final String state;
   final double size;
-  const StatusDot({super.key, required this.agent, this.size = 8});
+  const StatusDot({super.key, required this.state, this.size = 8});
 
   @override
   State<StatusDot> createState() => _StatusDotState();
@@ -34,18 +33,18 @@ class _StatusDotState extends State<StatusDot>
     super.dispose();
   }
 
-  Color get _color {
-    if (widget.agent.isRunning) return kGreen;
-    if (widget.agent.isPaused) return kAmber;
-    if (widget.agent.isFailed) return kRed;
-    return kMuted;
-  }
+  Color get _color => switch (widget.state) {
+        'running' => kGreen,
+        'paused'  => kAmber,
+        'failed'  => kRed,
+        _         => kMuted,
+      };
 
   @override
   Widget build(BuildContext context) {
     final color = _color;
     final s = widget.size;
-    if (!widget.agent.isRunning) {
+    if (widget.state != 'running') {
       return Container(
         width: s,
         height: s,
