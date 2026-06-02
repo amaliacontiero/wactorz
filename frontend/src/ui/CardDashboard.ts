@@ -3179,9 +3179,13 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
     const resetBtn = document.createElement("button");
     resetBtn.className = "af-mini-btn danger";
     resetBtn.textContent = "Reset spend";
-    resetBtn.title = "Clears the accumulated spend counter for the current period.";
+    resetBtn.title = "Clears the period budget counter only. The lifetime " +
+      "“Cost” total is separate and is not affected (use wactorz-reset --metrics for that).";
     resetBtn.addEventListener("click", async () => {
-      if (!window.confirm("Reset accumulated spend for the current period?")) return;
+      if (!window.confirm(
+        "Reset the period budget counter?\n\n" +
+        "This only zeroes spend for the current period. The lifetime " +
+        "“Cost” total stays unchanged.")) return;
       resetBtn.disabled = true;
       try {
         await this._resetCost();
