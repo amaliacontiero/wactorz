@@ -3084,20 +3084,9 @@ PREFIX prov:   <http://www.w3.org/ns/prov#>
       ]),
     );
 
-    el.appendChild(
-      this._buildSettingsSection(
-        "📡 MQTT Broker",
-        [
-          {
-            key: "wactorz-mqtt-url",
-            label: "WebSocket URL",
-            placeholder: "ws://localhost:9001",
-            type: "text",
-          },
-        ],
-        "⚠ Changes require a page reload",
-      ),
-    );
+    // No MQTT URL field: the dashboard always connects to the same-origin
+    // /mqtt proxy (derived from window.location), so there is nothing to
+    // configure here and a stored value could only ever go stale.
 
     return el;
   }
