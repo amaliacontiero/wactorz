@@ -7,6 +7,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Cost limit** — Period spend now accumulates even when no cap is configured. Previously `_accumulate_global_cost` skipped bookkeeping unless a limit was set, so enabling a cap mid-period gave false protection (spend already incurred this period was never recorded and the cap could be silently overshot), and the "Current spend (no limit set)" readout was permanently `$0`.
+- **Cost limit** — Weekly budget period now keys on the ISO week (`%G-W%V`) instead of `%Y-W%W`, which produced a partial `W00` bucket at the start of January and week boundaries that didn't align with Mon–Sun.
+- **Monitor UI** — "Reset spend" button now states explicitly that it clears only the current period's budget counter and leaves the lifetime "Cost" total unchanged (use `wactorz-reset --metrics` for that), removing confusion between the two separate accumulators.
+
 ## [0.4.3] - 2026-06-01
 
 ### Changed
