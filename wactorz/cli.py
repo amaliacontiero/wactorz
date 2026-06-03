@@ -189,7 +189,7 @@ async def build_system(args: argparse.Namespace):
         provider = AnthropicProvider(model=CONFIG.llm_model, api_key=api_key)
     elif llm == "openai":
         api_key = os.getenv("OPENAI_API_KEY") or CONFIG.llm_api_key
-        provider = OpenAIProvider(model=CONFIG.llm_model, api_key=api_key)
+        provider = OpenAIProvider(model=CONFIG.llm_model, api_key=api_key, base_url=CONFIG.openai_url or None)
     elif llm == "ollama":
         ollama_model = args.ollama_model or CONFIG.llm_model
         provider = OllamaProvider(model=ollama_model, base_url=CONFIG.ollama_url)
