@@ -22,9 +22,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **Delegation never dispatched** — bare `@agent <task>` mentions in `main`'s output were streamed as prose, not dispatched. `_execute_llm_delegations` now matches them (line/sentence-anchored).
 - **Recipe-agent replies dropped** — `DynamicAgent` RESULT replies didn't echo `_task_id`, so `delegate_task` hung until timeout. They now echo it, matching `LLMAgent`.
-
-### Fixed
-
 - **Monitor UI** — "Demo fallback" MQTT badge no longer appears when `MONITOR_PORT` differs from the default 8888. `config_handler` was advertising a hardcoded `:8888` WebSocket URL to the frontend; it now uses the actual bound port (`WS_PORT`).
 - **Monitor UI** — MQTT WebSocket URL is derived from `window.location` on every load and never cached in `localStorage`. Existing browsers with a stale cached URL (e.g. `ws://…:8888/mqtt`) self-heal automatically on next page load — no manual `localStorage` clearing required.
 - **Monitor UI** — Service worker now fetches `index.html` network-first so fresh content-hashed JS bundles always load after a redeploy (fixes stale-SW Demo fallback in normal vs incognito browsing).
