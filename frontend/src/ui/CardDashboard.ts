@@ -443,21 +443,32 @@ export class CardDashboard {
     };
 
     this._evChunk = (e) => {
-      if (this.view !== "chat") return;
       const { chunk, from } = (
         e as CustomEvent<{ chunk: string; from: string }>
       ).detail;
-      if (!this._streamRow) {
+      // Accumulate the stream regardless of the active view — chunks that
+      // arrive while the user is on another tab must not be lost, otherwise
+      // the message is saved truncated on stream-end (and only the page
+      // refresh, which reloads from the backend, shows the full text). A new
+      // session starts when there is no active stream (_streamFrom === null).
+      if (this._streamFrom === null) {
         this._streamFrom = from;
         this._streamTarget = this._lastSentTarget;
         this._streamText = "";
+      }
+      this._streamText += chunk;
+
+      // DOM updates only when the chat thread is on screen. The bubble is
+      // (re)created lazily here and rebuilt by _renderChatThread on tab return.
+      if (this.view !== "chat") return;
+      if (!this._streamRow) {
         const thread = this.root.querySelector<HTMLElement>(".af-chat-thread");
         if (!thread) return;
         const row = document.createElement("div");
         row.className = "af-chat-msg af-chat-msg-agent";
         const fromEl = document.createElement("div");
         fromEl.className = "af-chat-msg-from";
-        fromEl.textContent = from;
+        fromEl.textContent = this._streamFrom;
         const bubble = document.createElement("div");
         bubble.className = "af-chat-msg-bubble";
         row.appendChild(fromEl);
@@ -466,7 +477,6 @@ export class CardDashboard {
         this._streamRow = row;
         this._streamBody = bubble;
       }
-      this._streamText += chunk;
       if (this._streamBody) this._streamBody.textContent = this._streamText;
       this._scrollThread();
     };
@@ -1398,8 +1408,25 @@ export class CardDashboard {
     const thread = this.root.querySelector<HTMLElement>("#af-chat-thread");
     if (!thread) return;
     thread.innerHTML = "";
+    // The wipe above detached any live stream bubble; drop the stale DOM refs
+    // so they don't point at orphaned nodes (rebuilt below if still streaming).
+    this._streamRow = null;
+    this._streamBody = null;
+
+    // Is a stream in progress that belongs to the thread currently shown?
+    const streamHere =
+      !!this._streamFrom &&
+      this._streamText.length > 0 &&
+      this._msgBelongsHere({
+        id: "",
+        from: this._streamFrom,
+        to: this._streamTarget ?? this._lastSentTarget,
+        content: "",
+        timestampMs: 0,
+      });
+
     const msgs = this.chatMessages.filter((m) => this._msgBelongsHere(m));
-    if (msgs.length === 0) {
+    if (msgs.length === 0 && !streamHere) {
       const empty = document.createElement("div");
       empty.className = "af-chat-empty";
       empty.innerHTML =
@@ -1411,6 +1438,24 @@ export class CardDashboard {
     } else {
       msgs.forEach((m) => this._appendChatMsgEl(m, thread));
     }
+
+    // Re-attach the in-progress streaming bubble so returning to the chat tab
+    // mid-reply shows the text accumulated so far and keeps updating it.
+    if (streamHere) {
+      const row = document.createElement("div");
+      row.className = "af-chat-msg af-chat-msg-agent";
+      const fromEl = document.createElement("div");
+      fromEl.className = "af-chat-msg-from";
+      fromEl.textContent = this._streamFrom!;
+      const bubble = document.createElement("div");
+      bubble.className = "af-chat-msg-bubble";
+      bubble.textContent = this._streamText;
+      row.append(fromEl, bubble);
+      thread.appendChild(row);
+      this._streamRow = row;
+      this._streamBody = bubble;
+    }
+
     this._scrollThread();
   }
 
