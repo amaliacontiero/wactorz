@@ -131,6 +131,11 @@ if [ "$MOSQUITTO_EMBEDDED" = "true" ]; then
     mkdir -p /data/mosquitto
 
     cat > /tmp/mosquitto.conf << 'MQTTEOF'
+# Stay as root so the broker can write the persistence DB under /data
+# (started as root, mosquitto otherwise drops to the unprivileged
+# "mosquitto" user, which cannot write the root-owned /data/mosquitto).
+user root
+
 # TCP listener
 listener 1883
 allow_anonymous true
