@@ -21,6 +21,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **HA add-on persistence** — state (chat, agents, cost, spawn registry) now reliably survives add-on **updates**, not just restarts. The state directory resolves from `WACTORZ_STATE_DIR` (absolute `/data/state` in the add-on) instead of a CWD-relative `./state`, so it no longer lands in the container's ephemeral layer; `wactorz-reset` honours the same path.
+- **HA add-on embedded Mosquitto** — retained messages (live overview/cost) now persist across restarts and updates: `persistence true` under `/data/mosquitto`, with the broker pinned to `user root` so it can actually write there.
 - **Delegation never dispatched** — bare `@agent <task>` mentions in `main`'s output were streamed as prose, not dispatched. `_execute_llm_delegations` now matches them (line/sentence-anchored).
 - **Recipe-agent replies dropped** — `DynamicAgent` RESULT replies didn't echo `_task_id`, so `delegate_task` hung until timeout. They now echo it, matching `LLMAgent`.
 - **Monitor UI** — "Demo fallback" MQTT badge no longer appears when `MONITOR_PORT` differs from the default 8888. `config_handler` was advertising a hardcoded `:8888` WebSocket URL to the frontend; it now uses the actual bound port (`WS_PORT`).
