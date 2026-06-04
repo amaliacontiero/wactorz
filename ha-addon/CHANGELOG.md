@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.3.2
+
+- Fixed: add-on state now genuinely persists across updates — state directory pinned to an absolute `/data/state` (`WACTORZ_STATE_DIR`) instead of relying on the working directory, which let state fall into the container's ephemeral layer.
+- Fixed: embedded Mosquitto retained messages (live overview/cost) now survive restarts and updates — `persistence true` under `/data/mosquitto`, broker pinned to `user root` so it can write the persistence DB.
+- Added: developer guide for testing the add-on locally on real HA OS (`LOCAL_TESTING.md`).
+
 ## 0.4.3.1
 
 - Fixed: addon state (agents, cost tracking, spawn registry) now persists to `/data` and survives addon updates and restarts.
