@@ -19,6 +19,7 @@ import { HAClient, type HAEntity } from "../io/HAClient";
 import { ambient, AMBIENT_TRACKS } from "../io/AmbientManager";
 import { tts } from "../io/TTSManager";
 import { toast } from "./ToastManager";
+import { renderMarkdown } from "./markdown";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -491,6 +492,12 @@ export class CardDashboard {
           timestampMs: Date.now(),
         };
         this.chatMessages.push(msg);
+      }
+      // The live bubble showed plain text while streaming (partial Markdown
+      // would flicker). Now that the reply is complete, re-render it richly.
+      if (this._streamBody && this._streamText) {
+        this._streamBody.textContent = "";
+        this._streamBody.appendChild(renderMarkdown(this._streamText));
       }
       this._streamRow = null;
       this._streamBody = null;
@@ -1474,7 +1481,10 @@ export class CardDashboard {
       : msg.from;
     const bubble = document.createElement("div");
     bubble.className = "af-chat-msg-bubble";
-    bubble.textContent = msg.content;
+    // Agent replies are rendered as a small Markdown subset; user messages stay
+    // plain so stray *asterisks* / backticks they type are never reformatted.
+    if (isUser) bubble.textContent = msg.content;
+    else bubble.appendChild(renderMarkdown(msg.content));
     row.append(from, bubble);
     if (!isUser) {
       const time = document.createElement("div");
