@@ -5,7 +5,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)"  srcset="https://raw.githubusercontent.com/waldiez/wactorz/main/.github/assets/title-dark.svg">
     <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/waldiez/wactorz/main/.github/assets/title-light.svg">
-    <img src="https://raw.githubusercontent.com/waldiez/wactorz/main/.github/assets/title-dark.svg" width="320" alt="Wactorz" />
+    <img src="https://raw.githubusercontent.com/waldiez/wactorz/main/.github/assets/title-light.svg" width="320" alt="Wactorz" />
   </picture>
 </p>
 
